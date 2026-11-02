@@ -423,6 +423,11 @@ def _stub_seed(db):
                                        confidence=0.9, evidence="title+year")
     db.add(map_other)
     db.commit()
+    # 隔离：内存库的映射 id 会与 module 级 seed 夹具（文件库）撞号，
+    # 而画质缓存按映射 id 存进程级 CacheManager——不清掉 seed 预置的
+    # 完整缓存，PA-073 新鲜度门禁会让本夹具的取流回填被旧缓存挡住。
+    for mid in (map_a.id, map_b.id, map_other.id):
+        CacheManager.delete(up.cms_quality_cache_key(mid))
     return item, map_a, map_b, map_other
 
 

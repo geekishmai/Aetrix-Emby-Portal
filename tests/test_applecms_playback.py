@@ -317,3 +317,95 @@ def test_probe_401_still_credential_invalid_on_cms(monkeypatch, cms_source):
             http_probe=_probe_status(401))
     assert (exc.value.status, exc.value.code) == (
         409, "upstream_credential_invalid")
+
+
+# ==================== PA-073 画质回填新鲜度门禁 ====================
+# 口径：_capture_cms_quality 开头先读画质缓存——已有 label 且宽、高
+# 非空即直接返回、不再同步抓 m3u8 主清单；仅缺失/不完整时才抓取
+# 回填。回归核心：同线连续两次点播，第二发对主清单的 GET 计数为 0
+# （修复前每次点播都抓、计数为 2）。mapping_id 用大号唯一值隔离
+# 进程内共享的 CacheManager 内存缓存。
+
+M3U8_DETAIL = {
+    "code": 1, "page": 1, "pagecount": 1, "list": [{
+        "vod_id": 205, "vod_play_from": "直链线路",
+        "vod_play_url": "第01集$https://cdn.example.com/master.m3u8"}]}
+
+_MASTER_TEXT = (
+    "#EXTM3U\n"
+    '#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,'
+    'CODECS="avc1.640028,mp4a.40.2"\n'
+    "1080.m3u8\n"
+)
+
+
+def _counting_text_get(calls):
+    def http_get_text(url, headers, timeout):
+        calls.append(url)
+        return 200, _MASTER_TEXT
+    return http_get_text
+
+
+def test_quality_master_fetched_once_across_two_plays(
+        monkeypatch, cms_source):
+    _env_on(monkeypatch)
+    calls = []
+    for _ in range(2):
+        url = up.resolve_upstream_stream(
+            None, 7, "205", quality_mapping_id=977001,
+            http_get=_detail_get(M3U8_DETAIL), http_probe=_probe_ok(),
+            http_get_text=_counting_text_get(calls))
+        assert url == "https://cdn.example.com/master.m3u8"
+    # 第一发抓主清单回填，第二发命中完整缓存、零抓取
+    assert len(calls) == 1
+    cached = up.read_cms_quality(977001)
+    assert cached["width"] == 1920 and cached["height"] == 1080
+    assert cached["label"] == "1080P"
+
+
+def test_quality_master_fetched_once_soft_pass_branch(
+        monkeypatch, cms_source):
+    """软探活分支（探活 403）同样受门禁约束：两次点播只抓一发。"""
+    _env_on(monkeypatch)
+    calls = []
+    for _ in range(2):
+        url = up.resolve_upstream_stream(
+            None, 7, "205", quality_mapping_id=977002,
+            http_get=_detail_get(M3U8_DETAIL),
+            http_probe=_probe_status(403),
+            http_get_text=_counting_text_get(calls))
+        assert url == "https://cdn.example.com/master.m3u8"
+    assert len(calls) == 1
+
+
+def test_quality_incomplete_cache_still_fetches(monkeypatch, cms_source):
+    """缓存不完整（只有 label、缺宽高）时仍抓主清单回填数值。"""
+    _env_on(monkeypatch)
+    up.store_cms_quality(977003, {"label": "1080P"})
+    assert up.read_cms_quality(977003).get("width") in (None, 0)
+    calls = []
+    url = up.resolve_upstream_stream(
+        None, 7, "205", quality_mapping_id=977003,
+        http_get=_detail_get(M3U8_DETAIL), http_probe=_probe_ok(),
+        http_get_text=_counting_text_get(calls))
+    assert url == "https://cdn.example.com/master.m3u8"
+    assert len(calls) == 1
+    cached = up.read_cms_quality(977003)
+    assert cached["width"] == 1920 and cached["height"] == 1080
+
+
+def test_quality_no_cache_fetches_and_backfills(monkeypatch, cms_source):
+    """无缓存时抓取行为与修复前一致：抓一发并回填完整画质。"""
+    _env_on(monkeypatch)
+    assert up.read_cms_quality(977004) is None
+    calls = []
+    url = up.resolve_upstream_stream(
+        None, 7, "205", quality_mapping_id=977004,
+        http_get=_detail_get(M3U8_DETAIL), http_probe=_probe_ok(),
+        http_get_text=_counting_text_get(calls))
+    assert url == "https://cdn.example.com/master.m3u8"
+    assert calls == ["https://cdn.example.com/master.m3u8"]
+    cached = up.read_cms_quality(977004)
+    assert cached["width"] == 1920 and cached["height"] == 1080
+    assert cached["bandwidth"] == 8_000_000
+    assert cached["label"] == "1080P"
