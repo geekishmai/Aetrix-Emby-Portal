@@ -180,7 +180,9 @@ def read_cms_quality(mapping_id) -> Optional[dict]:
     """读 CMS 线路画质缓存（取流路径回填，展示路径消费）。
 
     内容形态：``{"width": int, "height": int, "bandwidth": int,
-    "video_range": str|None, "label": str|None}``（字段可缺）。
+    "video_range": str|None, "label": str|None,
+    "duration_sec": float}``（字段可缺；duration_sec 是 media
+    playlist 分段时长求和，只有分段清单的源才有）。
     无缓存/缓存坏了返回 None——展示侧回落默认形态，不报错。
     """
     if mapping_id is None:
@@ -222,17 +224,65 @@ def store_cms_quality(mapping_id, quality: dict) -> None:
         pass
 
 
-def _default_http_get_text(url: str, headers: dict, timeout: float):
-    """默认文本 GET 层：返回 (status, text|None)，只读一小段。"""
+def _get_text_single_hop(url: str, headers: dict, timeout: float):
+    """文本 GET 单跳：返回 (status, text|None, location|None)。
+
+    与既有文本 GET 同口径：safe_urlopen 不跟随重定向、只读
+    ``_M3U8_MAX_BYTES``；多带 Location 供跟随层逐跳决策（3xx 在
+    无重定向处理器的 opener 下以 HTTPError 回到这里）。
+    """
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with upstream_http.safe_urlopen(req, timeout=timeout) as resp:
             body = resp.read(_M3U8_MAX_BYTES)
-            return resp.status, body.decode("utf-8", "replace")
+            location = resp.headers.get("Location") if resp.headers else None
+            return resp.status, body.decode("utf-8", "replace"), location
     except urllib.error.HTTPError as exc:
-        return exc.code, None
+        location = exc.headers.get("Location") if exc.headers else None
+        return exc.code, None, location
     except Exception:
-        return None, None
+        return None, None, None
+
+
+def _default_http_get_text(url: str, headers: dict, timeout: float):
+    """默认文本 GET 层：返回 (status, text|None)，只读一小段。"""
+    status, text, _location = _get_text_single_hop(url, headers, timeout)
+    return status, text
+
+
+def _default_http_get_text_followed(url: str, headers: dict,
+                                    timeout: float):
+    """文本 GET（有界跟随重定向版）：跳转型播放地址抓清单用。
+
+    与探活层 ``_default_http_range_probe`` 同款手工逐跳：最多
+    ``UPSTREAM_PROBE_MAX_REDIRECTS`` 跳，每一跳的新 URL 先过
+    ``upstream_http.verify_outbound_url`` 复验才发请求
+    （safe_urlopen 发请求前还会再验一次，opener 本身仍不跟随）；
+    验不过、没有 Location 或跳数超限，一律 (None, None) 按抓不到
+    处理。返回最终跳的 (status, text)。
+    """
+    current_url = url
+    for hop in range(UPSTREAM_PROBE_MAX_REDIRECTS + 1):
+        status, text, location = _get_text_single_hop(
+            current_url, headers, timeout)
+        if status not in _PROBE_REDIRECT_STATUSES:
+            return status, text
+        if hop >= UPSTREAM_PROBE_MAX_REDIRECTS or not location:
+            return None, None
+        next_url = urllib.parse.urljoin(current_url, location)
+        try:
+            upstream_http.verify_outbound_url(next_url)
+        except Exception:
+            return None, None
+        current_url = next_url
+    return None, None
+
+
+def _is_playlist_text(text) -> bool:
+    """响应内容是不是 m3u8 清单：以 #EXTM3U 开头（容 BOM/空白）。"""
+    if not text:
+        return False
+    return str(text).lstrip("﻿ \t\r\n").startswith("#EXTM3U")
 
 
 def _capture_cms_quality(source, mapping_id, detail, address, *,
@@ -240,9 +290,13 @@ def _capture_cms_quality(source, mapping_id, detail, address, *,
     """取流成功顺手回填 CMS 线路画质（备注标记 + m3u8 主清单）。
 
     两路信号：detail 的 vod_remarks 里带明确画质标记（4K/1080P
-    等）时拼标签存 ``label``；播放地址是 m3u8 时现抓主清单解析
-    分辨率/带宽/范围信号（真实数值，优先于备注标签）。全程
-    fail-safe：任何失败只留空，绝不阻塞、绝不改写 302 结果。
+    等）时拼标签存 ``label``；播放地址现抓清单解析分辨率/带宽/
+    范围信号（真实数值，优先于备注标签）——.m3u8 地址直抓，
+    跳转型地址（share 页等无 .m3u8 后缀的地址）走有界跟随
+    （逐跳复验、只认 #EXTM3U 开头的内容，其余一律留空）；
+    抓到的若是只有分段的 media playlist（无主清单信号），只
+    回填分段时长求和 ``duration_sec``。全程 fail-safe：任何
+    失败只留空，绝不阻塞、绝不改写 302 结果。
 
     新鲜度门禁（PA-073）：缓存里已有 label 且宽、高非空即视为
     完整，直接返回、不再发任何 HTTP——画质是 vod 的固有属性，
@@ -265,26 +319,38 @@ def _capture_cms_quality(source, mapping_id, detail, address, *,
             if label:
                 payload["label"] = label
         path = (address or "").split("?", 1)[0].lower()
-        if path.endswith(".m3u8"):
-            get_text = _default_http_get_text if http_get_text is None \
-                else http_get_text
-            try:
-                status, text = get_text(
-                    address, _source_headers(source), M3U8_FETCH_TIMEOUT_SEC)
-            except Exception:  # noqa: BLE001 — 抓清单失败留空
-                status, text = None, None
-            if status == 200 and text:
-                master = ql.parse_m3u8_master(text)
-                if master:
-                    payload.update({
-                        "width": master.get("width") or 0,
-                        "height": master.get("height") or 0,
-                        "bandwidth": master.get("bandwidth") or 0,
-                        "video_range": master.get("video_range"),
-                    })
-                    master_label = ql.label_for_master(master)
-                    if master_label:
-                        payload["label"] = master_label
+        is_m3u8 = path.endswith(".m3u8")
+        if http_get_text is not None:
+            get_text = http_get_text
+        elif is_m3u8:
+            get_text = _default_http_get_text
+        else:
+            # 跳转型地址：只做一次有界跟随尝试（逐跳复验），
+            # 落点内容不是清单就当没抓到，绝不放大抓取次数。
+            get_text = _default_http_get_text_followed
+        try:
+            status, text = get_text(
+                address, _source_headers(source), M3U8_FETCH_TIMEOUT_SEC)
+        except Exception:  # noqa: BLE001 — 抓清单失败留空
+            status, text = None, None
+        if status == 200 and text and (is_m3u8 or _is_playlist_text(text)):
+            master = ql.parse_m3u8_master(text)
+            if master:
+                payload.update({
+                    "width": master.get("width") or 0,
+                    "height": master.get("height") or 0,
+                    "bandwidth": master.get("bandwidth") or 0,
+                    "video_range": master.get("video_range"),
+                })
+                master_label = ql.label_for_master(master)
+                if master_label:
+                    payload["label"] = master_label
+            elif _is_playlist_text(text):
+                # media playlist（只有分段、无主清单信号）：宽高/
+                # 带宽判不出，只回填分段时长求和这一项真信号。
+                duration = ql.media_playlist_duration_sec(text)
+                if duration:
+                    payload["duration_sec"] = duration
         if payload:
             store_cms_quality(mapping_id, payload)
     except Exception:  # noqa: BLE001 — 画质回填绝不影响取流

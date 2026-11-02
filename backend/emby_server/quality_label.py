@@ -250,6 +250,36 @@ def parse_m3u8_master(text: Optional[str]) -> Optional[dict]:
     return best
 
 
+def media_playlist_duration_sec(text: Optional[str]) -> Optional[float]:
+    """media playlist 总时长（秒）：全部分段 #EXTINF 时长求和。
+
+    只有分段、没有主清单变体的清单（部分源直链即此形态）拿不到
+    宽高/带宽，但时长是真信号——逐行累加 ``#EXTINF:<秒>,``。
+    主清单（含 #EXT-X-STREAM-INF）不是计量对象（时长在变体清单
+    里），返回 None；没有 EXTINF 或合计非正同样返回 None：
+    判不出就不报，不猜。坏行跳过不整单作废。
+    """
+    if not text:
+        return None
+    total = 0.0
+    seen = False
+    for raw_line in str(text).splitlines():
+        line = raw_line.strip()
+        if line.startswith(_STREAM_INF_PREFIX):
+            return None
+        if not line.startswith("#EXTINF:"):
+            continue
+        num = line[len("#EXTINF:"):].split(",", 1)[0].strip()
+        try:
+            total += float(num)
+        except ValueError:
+            continue
+        seen = True
+    if not seen or total <= 0:
+        return None
+    return round(total, 3)
+
+
 def label_for_master(master: Optional[dict]) -> Optional[str]:
     """主清单解析结果 → 画质标签（判不出返回 None）。"""
     if not master:
