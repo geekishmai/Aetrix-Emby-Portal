@@ -313,7 +313,17 @@ def test_inline_timeout_leaves_clean_state(db, db_factory, monkeypatch):
         # 预算到点回 preparing；此刻任务行必须是认领语义下的
         # running + 有效租约，没有被写成任何假终态。
         assert result["verdict"] == "preparing"
-        status, _kind, claimed_by = _job_state(db, job_id)
+        # 认领由后台线程落盘，CI 高负载下线程调度可慢于 0.3s 预算
+        # 窗（实证假红：预算到点时状态仍 pending）。等认领落盘再
+        # 断言（带截止、等不到仍红），断言口径不变。
+        deadline = time.monotonic() + 15
+        status, claimed_by = None, None
+        while time.monotonic() < deadline:
+            db.expire_all()
+            status, _kind, claimed_by = _job_state(db, job_id)
+            if status == "running" and claimed_by == tv._INLINE_WORKER_ID:
+                break
+            await asyncio.sleep(0.05)
         assert status == "running" and claimed_by == tv._INLINE_WORKER_ID
         # 工人此刻领不到同一单（租约未过期，不双跑）。
         s = db_factory()
@@ -322,8 +332,16 @@ def test_inline_timeout_leaves_clean_state(db, db_factory, monkeypatch):
         finally:
             s.close()
         # 后台执行自己收尾（同一执行核心），之后重查变 proceed。
-        await asyncio.sleep(2.5)
-        return tv.ensure_user_copy_gate(db, item, _user())
+        # 执行器 delay=2s，固定 sleep(2.5) 在高负载下余量不足易
+        # 假红（实证：睡醒时后台还没收尾）：轮询到 proceed 为止
+        # （带截止），断言口径不变。
+        deadline = time.monotonic() + 30
+        while True:
+            final_gate = tv.ensure_user_copy_gate(db, item, _user())
+            if (final_gate["verdict"] == "proceed"
+                    or time.monotonic() >= deadline):
+                return final_gate
+            await asyncio.sleep(0.1)
 
     final = asyncio.run(_scenario())
     assert final["verdict"] == "proceed"
