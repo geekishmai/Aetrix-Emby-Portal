@@ -2276,16 +2276,31 @@ _RESOLVE_CACHE_STATS = {"hits": 0, "misses": 0, "expired": 0, "evictions": 0}
 
 
 #: 解析单飞锁（键同解析缓存）：同一文件并发未命中只让一个线程真去换链。
+#: 值为 ``[锁, 引用数]``：最后一个用完的线程才回收，避免「前一个弹锁、后来者
+#: 建新锁」造成两把锁并行换链（QA V-5）。
 _RESOLVE_LOCKS: dict = {}
 
+#: 等单飞锁的上限（秒）：换链上游挂起时不让播放请求线程全堵在锁上，超时
+#: 降级为自己直接解析（放弃单飞，QA V-6）。
+_RESOLVE_SINGLE_FLIGHT_WAIT_SEC = 5.0
 
-def _resolve_single_flight_lock(key: tuple) -> threading.Lock:
+
+def _resolve_single_flight_enter(key: tuple) -> threading.Lock:
     with _RESOLVE_CACHE_LOCK:
-        lock = _RESOLVE_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _RESOLVE_LOCKS[key] = lock
-        return lock
+        entry = _RESOLVE_LOCKS.get(key)
+        if entry is None:
+            entry = _RESOLVE_LOCKS[key] = [threading.Lock(), 0]
+        entry[1] += 1
+        return entry[0]
+
+
+def _resolve_single_flight_exit(key: tuple) -> None:
+    with _RESOLVE_CACHE_LOCK:
+        entry = _RESOLVE_LOCKS.get(key)
+        if entry is not None:
+            entry[1] -= 1
+            if entry[1] <= 0:
+                _RESOLVE_LOCKS.pop(key, None)
 
 
 def resolve_cache_stats() -> dict:
@@ -2472,21 +2487,27 @@ def resolve_play_target(file_path: Optional[str], db: Session, library=None, *,
         return _reattach_cached_target(provider, stored, rel)
     # 未命中走单飞：播放器起播/拖动会对同一文件并行发 3-4 个 Range 请求，
     # 不单飞就各自换一次链（115 换链是接口调用，正是风控盯的频率面）。
-    lock = _resolve_single_flight_lock(cache_key)
+    lock = _resolve_single_flight_enter(cache_key)
     try:
-        with lock:
-            stored = _resolve_cache_get(cache_key)   # 等锁期间别人可能已经解析完
-            if stored is not None:
-                return _reattach_cached_target(provider, stored, rel)
+        acquired = lock.acquire(timeout=_RESOLVE_SINGLE_FLIGHT_WAIT_SEC)
+        if not acquired:
+            logger.info("解析单飞等锁超时 %.0fs，直接解析 mount://%s/%s",
+                        _RESOLVE_SINGLE_FLIGHT_WAIT_SEC, mount_id, rel)
+        try:
+            if acquired:
+                stored = _resolve_cache_get(cache_key)   # 等锁期间别人可能已经解析完
+                if stored is not None:
+                    return _reattach_cached_target(provider, stored, rel)
             target = provider.resolve_final(rel)
             if target.kind == "url":
                 target.value = validate_remote_url(target.value)
                 _resolve_cache_put(cache_key, _stored_play_target(provider, target, rel))
             return target
+        finally:
+            if acquired:
+                lock.release()
     finally:
-        with _RESOLVE_CACHE_LOCK:
-            if _RESOLVE_LOCKS.get(cache_key) is lock:
-                _RESOLVE_LOCKS.pop(cache_key, None)
+        _resolve_single_flight_exit(cache_key)
 
 
 def media_exists(file_path: str, db: Session, library=None) -> bool:

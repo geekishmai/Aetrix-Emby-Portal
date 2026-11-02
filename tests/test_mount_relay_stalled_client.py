@@ -134,3 +134,37 @@ def test_reading_client_is_not_cut(relay_stack):
         assert _EndlessHandler.active == 1
     finally:
         sock.close()
+
+
+def test_short_pause_then_resume_is_not_cut(relay_stack, monkeypatch):
+    """暂停短于阈值再继续读：流不许被截断（QA V-1 误杀判据）。"""
+    monkeypatch.setattr(_streaming, "_mount_relay_stall_timeout", lambda: 2.0)
+    sock = _open_and_stall(relay_stack)
+    try:
+        time.sleep(1.0)              # 0.5× 阈值的暂停
+        end = time.time() + 1.5
+        while time.time() < end:
+            assert sock.recv(65536), "paused-then-resumed client was cut off"
+        assert _EndlessHandler.active == 1
+    finally:
+        sock.close()
+
+
+def test_client_close_releases_upstream(relay_stack, monkeypatch):
+    """客户端正常断开：不必等停读阈值，上游也要尽快放掉。"""
+    monkeypatch.setattr(_streaming, "_mount_relay_stall_timeout", lambda: 600.0)
+    sock = _open_and_stall(relay_stack)
+    assert _wait(lambda: _EndlessHandler.active == 1, 5)
+    sock.close()
+    assert _wait(lambda: _EndlessHandler.active == 0, 15),         "closed client kept the upstream connection open"
+
+
+def test_stall_timeout_default_and_env(monkeypatch):
+    monkeypatch.delenv("MOUNT_RELAY_STALL_TIMEOUT_SEC", raising=False)
+    assert _streaming._mount_relay_stall_timeout() == 300.0
+    monkeypatch.setenv("MOUNT_RELAY_STALL_TIMEOUT_SEC", "45")
+    assert _streaming._mount_relay_stall_timeout() == 45.0
+    monkeypatch.setenv("MOUNT_RELAY_STALL_TIMEOUT_SEC", "abc")
+    assert _streaming._mount_relay_stall_timeout() == 300.0
+    monkeypatch.setenv("MOUNT_RELAY_STALL_TIMEOUT_SEC", "-1")
+    assert _streaming._mount_relay_stall_timeout() == 0.0

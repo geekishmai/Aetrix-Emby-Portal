@@ -475,6 +475,7 @@ async def resolve_drive_final_url(
 
 _MOUNT_RELAY_TIMEOUT_CONNECT = 10.0
 _MOUNT_RELAY_TIMEOUT_READ = 30.0
+_MOUNT_RELAY_STALL_DEFAULT = 300.0
 
 
 def _mount_relay_stall_timeout() -> float:
@@ -483,17 +484,19 @@ def _mount_relay_stall_timeout() -> float:
     读超时只管「上游不给数据」，管不到「客户端不收数据」：播放器拖动/重开
     时弃用旧连接却不 close（Infuse、AVPlayer 系实测每会话残留 3-4 条），
     中继停在 yield 上等 send 排空，上游连接与共享池名额被占到客户端退出。
-    缺省 60 秒（正常播放每块 1MB 的消费间隔远小于此；暂停超过阈值后恢复，
-    播放器按 Range 重连续播）；0 关闭，非法值回落缺省并告警。
+    缺省 300 秒：播放器缓冲满或用户暂停时也会正常停读，阈值要明显长于常见
+    暂停时长，免得把「暂停一会儿再继续」的流截断（QA V-1）；残留连接晚几分钟
+    释放代价很小。0 关闭，非法值回落缺省并告警。
     """
     raw = os.getenv("MOUNT_RELAY_STALL_TIMEOUT_SEC", "")
     if not str(raw).strip():
-        return 60.0
+        return _MOUNT_RELAY_STALL_DEFAULT
     try:
         value = float(raw)
     except ValueError:
-        logger.warning("环境变量 MOUNT_RELAY_STALL_TIMEOUT_SEC=%r 不是数字，使用默认值 60", raw)
-        return 60.0
+        logger.warning("环境变量 MOUNT_RELAY_STALL_TIMEOUT_SEC=%r 不是数字，使用默认值 %.0f",
+                       raw, _MOUNT_RELAY_STALL_DEFAULT)
+        return _MOUNT_RELAY_STALL_DEFAULT
     return max(0.0, value)
 
 
@@ -504,8 +507,11 @@ async def _release_upstream_when_stalled(source, resp, url: str, timeout: float)
     本流结束——客户端若之后恢复读取，会收到截断的响应并按 Range 重连。
     """
     if timeout <= 0:
-        async for chunk in source:
-            yield chunk
+        try:
+            async for chunk in source:
+                yield chunk
+        finally:
+            await source.aclose()
         return
     loop = asyncio.get_running_loop()
     waiting_since: Optional[float] = None
@@ -534,7 +540,10 @@ async def _release_upstream_when_stalled(source, resp, url: str, timeout: float)
             if stalled:
                 return
     finally:
-        watcher.cancel()
+        # 已判定停读时 watcher 正在关上游，等它关完，不许取消到一半（QA V-2）
+        if not stalled:
+            watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
         await source.aclose()
 
 

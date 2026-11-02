@@ -450,13 +450,14 @@ def test_concurrent_misses_resolve_once(counting, monkeypatch):
     db = _FakeDB([mount])
     results = []
     threads = [threading.Thread(target=lambda: results.append(
-        mnt.resolve_play_target("mount://7/电影/a.mkv", db))) for _ in range(8)]
+        mnt.resolve_play_target("mount://7/电影/a.mkv", db)), daemon=True) for _ in range(8)]
     for t in threads:
         t.start()
     time.sleep(0.2)
     gate.set()
     for t in threads:
         t.join(5)
+    assert not any(t.is_alive() for t in threads), "单飞死锁"
     assert len(results) == 8
     assert counting.calls == 1, "并发未命中必须单飞，只换一次链"
     assert {r.value for r in results} == {counting.url}
@@ -475,5 +476,36 @@ def test_single_flight_failure_does_not_wedge(counting, monkeypatch):
     for _ in range(2):
         with pytest.raises(mnt.MountError):
             mnt.resolve_play_target("mount://7/电影/a.mkv", db)
+    assert counting.calls == 2
+    assert mnt._RESOLVE_LOCKS == {}
+
+
+def test_single_flight_wait_timeout_falls_back(counting, monkeypatch):
+    """持锁线程卡住超过等锁上限：后来者降级直接解析，不陪着一起堵。"""
+    monkeypatch.setattr(mnt, "_RESOLVE_SINGLE_FLIGHT_WAIT_SEC", 0.3)
+    release = threading.Event()
+    original = _CountingProvider.resolve_play_target
+    first = threading.Event()
+
+    def stuck_first(self, rel):
+        if not first.is_set():
+            first.set()
+            release.wait(5)
+        return original(self, rel)
+
+    monkeypatch.setattr(_CountingProvider, "resolve_play_target", stuck_first)
+    mount = _mount()
+    db = _FakeDB([mount])
+    holder = threading.Thread(
+        target=lambda: mnt.resolve_play_target("mount://7/电影/a.mkv", db), daemon=True)
+    holder.start()
+    assert first.wait(2)
+    started = time.time()
+    target = mnt.resolve_play_target("mount://7/电影/a.mkv", db)
+    assert target.value == counting.url
+    assert time.time() - started < 2, "等锁超时后应直接解析"
+    release.set()
+    holder.join(5)
+    assert not holder.is_alive()
     assert counting.calls == 2
     assert mnt._RESOLVE_LOCKS == {}
