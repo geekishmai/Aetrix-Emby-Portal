@@ -277,6 +277,22 @@ def cms_entry_to_record(
     )
 
 
+def cms_entry_poster(entry) -> str:
+    """源站海报地址（``vod_pic``）：只认 http(s) 绝对地址，其余空串。
+
+    字段名按源站 provide 协议实证（2026-11-02 抽非凡 / 暴风 / 优酷
+    三家原始响应核对）：暴风 list 载荷即带 ``vod_pic``；非凡 list
+    不带、detail 带；优酷 detail 带。相对路径 / 协议相对 / 非 http
+    一律不采（不猜、不拼），调用方拿到空串即按无图处理。
+    """
+    if not isinstance(entry, dict):
+        return ""
+    pic = str(entry.get("vod_pic") or "").strip()
+    if pic.startswith("http://") or pic.startswith("https://"):
+        return pic
+    return ""
+
+
 def _local_work_key(local: Any) -> Optional[str]:
     """本地候选的标题+年份键（年份缺失返回 None：不只按标题配对）。
 
