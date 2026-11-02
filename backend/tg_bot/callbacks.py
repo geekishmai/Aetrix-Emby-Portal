@@ -128,6 +128,8 @@ def _handle_whois_callback(db, callback_query: dict) -> None:
         page = parts[1]
         target_id = int(parts[2])
         op = parts[3] if len(parts) > 3 else None
+        # PA-058：赠送 do 回调第五段为一次性 nonce（其余回调无此段）。
+        nonce = parts[4] if len(parts) > 4 else None
     except (IndexError, ValueError):
         return
     caller = resolve(db, int(tg_id))
@@ -145,7 +147,8 @@ def _handle_whois_callback(db, callback_query: dict) -> None:
         sender.answer_callback_query(db, cq_id, text="目标账号不存在")
         return
     try:
-        text, markup = whois_panel.render(db, caller, target, page, op)
+        text, markup = whois_panel.render(db, caller, target, page, op,
+                                          nonce=nonce)
     except Exception:
         logger.warning("tg whois panel render failed: %s", data, exc_info=True)
         return

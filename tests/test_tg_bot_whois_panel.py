@@ -193,10 +193,21 @@ def test_admin_cannot_ban_self_via_panel(db, monkeypatch):
 
 # ---------- 赠送三项：预设档位落账 ----------
 
+def _do_data_from_ask(db, monkeypatch, target, op):
+    """走 ask 确认页取 do 回调（含一次性 nonce），贴近真实点击链路。"""
+    edited = _click(db, monkeypatch, f"whois:ask:{target.id}:{op}")
+    assert edited
+    datas = [d for d in _datas(edited[0][1])
+             if d.startswith(f"whois:do:{target.id}:{op}")]
+    assert datas, "确认页须带 do 回调"
+    return datas[0]
+
+
 def test_gift_points_lands_with_ledger_and_audit(db, monkeypatch):
     _staff, target = _panel(db)
     before = int(target.points or 0)
-    edited = _click(db, monkeypatch, f"whois:do:{target.id}:gp100")
+    edited = _click(db, monkeypatch,
+                    _do_data_from_ask(db, monkeypatch, target, "gp100"))
     assert edited
     db.refresh(target)
     assert int(target.points or 0) == before + 100
@@ -214,7 +225,8 @@ def test_gift_points_lands_with_ledger_and_audit(db, monkeypatch):
 
 def test_gift_welfare_lands(db, monkeypatch):
     _staff, target = _panel(db)
-    edited = _click(db, monkeypatch, f"whois:do:{target.id}:gw7")
+    edited = _click(db, monkeypatch,
+                    _do_data_from_ask(db, monkeypatch, target, "gw7"))
     assert edited
     db.refresh(target)
     assert target.is_welfare is True
@@ -225,7 +237,8 @@ def test_gift_welfare_lands(db, monkeypatch):
 def test_gift_view_unlock_lands(db, monkeypatch):
     _staff, target = _panel(db)
     realm = ensure_default_realm(db)
-    edited = _click(db, monkeypatch, f"whois:do:{target.id}:gv30")
+    edited = _click(db, monkeypatch,
+                    _do_data_from_ask(db, monkeypatch, target, "gv30"))
     assert edited
     row = (db.query(models.EmbyViewUnlock)
            .filter(models.EmbyViewUnlock.user_id == target.id,
@@ -345,6 +358,34 @@ def test_pa056_super_ban_super_with_two_active_allowed(db, monkeypatch):
     db.refresh(sup2)
     assert sup2.is_active is False  # 还有另一名可登录超管，允许
     assert "已封禁" in edited[0][0]
+
+# ---------- PA-058：赠送确认一次性 nonce，同一 ask 双击只发一次 ----------
+
+def test_pa058_double_click_gifts_once(db, monkeypatch):
+    _staff, target = _panel(db)
+    before = int(target.points or 0)
+    do_data = _do_data_from_ask(db, monkeypatch, target, "gp100")
+    edited = _click(db, monkeypatch, do_data)
+    assert edited
+    db.refresh(target)
+    assert int(target.points or 0) == before + 100
+    # 同一 ask 的 do 回调第二次到达：不再落账，只回已执行提示
+    edited = _click(db, monkeypatch, do_data)
+    assert edited
+    db.refresh(target)
+    assert int(target.points or 0) == before + 100
+    assert "已经执行过" in edited[0][0]
+
+
+def test_pa058_do_without_nonce_refused(db, monkeypatch):
+    _staff, target = _panel(db)
+    before = int(target.points or 0)
+    # 不经 ask、直接拼旧格式 do 回调：无有效 nonce，拒绝落账
+    edited = _click(db, monkeypatch, f"whois:do:{target.id}:gp100")
+    assert edited
+    db.refresh(target)
+    assert int(target.points or 0) == before
+    assert "已失效" in edited[0][0]
 
 
 # ---------- 结构守卫：网站管理端与面板共用同一封禁服务 ----------
