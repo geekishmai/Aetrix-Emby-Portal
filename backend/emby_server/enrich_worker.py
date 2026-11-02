@@ -2937,6 +2937,22 @@ def _enrich_apply(db, item: Any, fetched: dict) -> None:
                 item.last_scraped_at = datetime.now()
             if _dbn_filled and item.metadata_source != "nfo":
                 item.metadata_source = "douban"
+            if _dbn_first.get("id"):
+                # 豆瓣号留痕（2026-11-02）：此前命中只落资料字段、号本身
+                # 蒸发，识别段与货架判据都读不到——生产 12,009 条无身份
+                # 条目里带豆瓣号的只有 1 条。只填空缺、已有不覆盖
+                # （与 engine.apply_to_item 合并口径一致）。
+                import json as _json
+                try:
+                    _ids = _json.loads(item.external_ids) \
+                        if item.external_ids else {}
+                except (ValueError, TypeError):
+                    _ids = {}
+                if isinstance(_ids, dict) and not str(
+                        _ids.get("douban") or "").strip():
+                    _ids["douban"] = str(_dbn_first["id"])
+                    item.external_ids = _json.dumps(
+                        _ids, ensure_ascii=False, sort_keys=True)
         except Exception as exc:
             logger.debug("豆瓣兜底落库失败 %s: %s", getattr(item, "name", ""), exc)
             _dbn_first = None
@@ -4935,13 +4951,17 @@ def _enrich_apply_two_stage(db, item: Any, fetched: dict,
                 db, item, fetched, tmdb_details_fetcher=_details_fetcher)
             if res is not None and not (
                     _bound_value(res.get("tmdb_id"))
-                    or _bound_value(res.get("imdb_id"))):
+                    or _bound_value(res.get("imdb_id"))
+                    or _bound_value(res.get("douban_id"))):
                 # 空白绑定不是绑定：防御纵深（完美审查第三轮注记）。
                 # #1377 已把 extract_binding 换成 strip 归一，正常路径下
                 # 这里已不可达；保留否决是防 apply_identity 后续拼接
                 # （如 resolve_imdb_id 的返回值）再带进空白：按 strip 口径
                 # 否决它（回滚掉该段记录），身份仍算未定，走下面的现行
                 # 终态接管，否则空白条目在识别段尾回 pending 空转。
+                # 2026-11-02：豆瓣绑定的身份在 douban_id（落 external_ids），
+                # tmdb/imdb 恒为 None，必须一并算数，否则豆瓣认亲会被
+                # 本防御误杀回滚。
                 db.rollback()
                 res = None
             if res is not None:
@@ -5018,6 +5038,27 @@ def _enrich_apply_two_stage(db, item: Any, fetched: dict,
                 item, "tmdb_id", None) and not had_tmdb:
             fetched["_parent_tmdb_newly_acquired"] = item.id
         _maybe_queue_probe(db, item)
+        return
+    if not _bound_value(getattr(item, "tmdb_id", None)) \
+            and not _bound_value(getattr(item, "imdb_id", None)):
+        # 身份只落在 external_ids（豆瓣等来源定的身份，2026-11-02）：
+        # 没有 tmdb/imdb 列，刮削队列的认领谓词（只认两列）永远不会
+        # 捞它——回 pending 只会在识别队列里按 unfilled_retry 无限
+        # 空转。识别即终态：按 done 收尾（与补资料段收尾同字段集），
+        # 资料补缺留待后续巡检/重排，不假装等得到认领。
+        item.enrich_status = "done"
+        item.enrich_attempts = 0
+        item.enrich_last_error = None
+        item.enrich_next_retry_at = None
+        item.enrich_claimed_at = None
+        item.enrich_claim_token = None
+        item.enrich_priority = 0
+        if not getattr(item, "last_scraped_at", None):
+            item.last_scraped_at = datetime.now()
+        _maybe_queue_probe(db, item)
+        logger.info(
+            "external_ids 身份条目识别终态 done"
+            "（无 tmdb/imdb 列，不回识别队列空转）id=%s", item.id)
         return
     # 识别段开、补资料段关：身份已落库，本条回 pending 等刮削队列认领。
     item.enrich_status = "pending"

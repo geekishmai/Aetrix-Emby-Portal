@@ -74,7 +74,8 @@ def test_switch_off_matches_current_behavior(db, scene, monkeypatch):
     monkeypatch.setattr(identity_gate, "IDENTITY_SHELF_GATE", 1)
     assert vg.resolve_visibility(db, scene["bound"], "shelf") is True
     assert vg.resolve_visibility(db, scene["unbound"], "shelf") is False
-    assert vg.resolve_visibility(db, scene["douban_only"], "shelf") is False
+    # 2026-11-02 站主拍板扩围：external_ids 任一来源键非空即算已绑定
+    assert vg.resolve_visibility(db, scene["douban_only"], "shelf") is True
     assert vg.resolve_visibility(db, scene["ep_follow"], "shelf") is True
     assert vg.resolve_visibility(db, scene["unbound"], "search") is True
     assert vg.resolve_visibility(db, scene["unbound"], "direct") is True
@@ -86,7 +87,8 @@ def test_switch_on_matches_case_a_exactly(db, scene, monkeypatch):
     monkeypatch.setattr(identity_gate, "IDENTITY_SHELF_GATE", 0)
     assert vg.resolve_visibility(db, scene["bound"], "shelf") is True
     assert vg.resolve_visibility(db, scene["unbound"], "shelf") is False
-    assert vg.resolve_visibility(db, scene["douban_only"], "shelf") is False
+    # 2026-11-02 站主拍板扩围：external_ids 任一来源键非空即算已绑定
+    assert vg.resolve_visibility(db, scene["douban_only"], "shelf") is True
     assert vg.resolve_visibility(db, scene["ep_follow"], "shelf") is True
     assert vg.resolve_visibility(db, scene["other"], "shelf") is True
     assert vg.resolve_visibility(db, scene["unbound"], "search") is True
