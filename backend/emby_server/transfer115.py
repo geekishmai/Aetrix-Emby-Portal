@@ -882,14 +882,22 @@ class Pan115Client:
         的 UA，网页端用播放器 UA 签出的地址拉流会被 CDN 拒
         （实测 403「no cookie」），app 通道用播放器 UA 签名 +
         同 UA 拉流实测 206。认证错误两条通道同命，不回落直接抛。
+
+        ``app_first=True`` 时 app 通道失败**不回落网页端**：网页端
+        在播放器 UA 下签出的地址正是上面说的必拒形态，回落等于把
+        死地址当成功 302 发给播放器（台账记 ok、播放器撞 403、
+        服务端零感知）。如实抛错（认证→expired、50028→
+        size_limit、其余→transient），调用方按档定性、用户重试
+        即可；app 通道恢复后自然能播。
         """
         if app_first:
             try:
                 return self._download_url_app(pickcode)
-            except Pan115AuthError:
+            except Pan115Error as exc:
+                logger.warning(
+                    "115 app 通道取链失败，播放器场景不回落网页端："
+                    "err=%s", exc)
                 raise
-            except Pan115Error:
-                return self._download_url_web(pickcode)
         try:
             return self._download_url_web(pickcode)
         except Pan115ChannelLimitError:

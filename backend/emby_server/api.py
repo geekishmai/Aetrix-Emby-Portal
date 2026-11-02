@@ -6460,8 +6460,9 @@ async def video_stream(
                 variant=play_variants.BYOS115_DIRECT,
                 result="ok",
                 resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-            _alive115 = await run_db(_ub115.check_115_download_alive,
-                                     _url115)
+            _alive115 = await run_db(
+                _ub115.check_115_download_alive, _url115,
+                request.headers.get("user-agent") or "")
             if _alive115 == "dead":
                 # 死链不 302：播放器跟随 302 只会撞 404。记一 strike、
                 # 预算内重建一单，409 明示正在重新转存；预算耗尽时
@@ -6645,8 +6646,9 @@ async def video_stream(
                     method="transfer115_copy",
                     variant=play_variants.BYOS115_DIRECT, result="ok",
                     resolve_ms=int((time.perf_counter() - _byos_t0q) * 1000))
-                _alive115q = await run_db(_ub115q.check_115_download_alive,
-                                          _url115)
+                _alive115q = await run_db(
+                    _ub115q.check_115_download_alive, _url115,
+                    request.headers.get("user-agent") or "")
                 if _alive115q == "dead":
                     # 115 回落链也是死链：不 302，记 strike 并预算内重建；
                     # 仍报额度 409（主因是 Drive 副本额度满），重建后台跑。

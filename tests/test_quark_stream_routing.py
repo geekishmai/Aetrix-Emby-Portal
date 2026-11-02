@@ -276,7 +276,7 @@ def test_pan115_ready_variant_sign_consume_goes_115_copy(
 
     monkeypatch.setattr(ub, "resolve_user115_copy_url", fake_resolve_115)
     monkeypatch.setattr(ub, "check_115_download_alive",
-                        lambda url: "alive")
+                        lambda url, ua="": "alive")
 
     resp = _call(db, user, item)
     assert resp.status_code == 302

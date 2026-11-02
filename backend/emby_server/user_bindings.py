@@ -1379,23 +1379,32 @@ def _resolve_user_quark_copy_url_locked(db: Session,
     return url, client.cookie
 
 
-def _pan115_probe_http(url):
+def _pan115_probe_http(url, ua: str = ""):
     """115 现签地址的探测 HTTP 入口（测试打桩用）。
 
     与 transfer_variant._usercopy_probe_http 同款姿势：GET Range
     bytes=0-、跟随跳转、只读少量字节后关连接，不下整段。只返回
     最终状态码；调用方按状态码定性。
+
+    ``ua`` 为签名时的播放器 UA 时必须带上：115 现签地址绑签名
+    UA，用别的 UA 探测恒 403（2026-11-02 生产实证：app 通道
+    地址被探测的默认 UA 连打 3 次全 403），alive/dead 信号全
+    失真——死链测不出、活链也确认不了。不给 ua 时保持旧形态
+    （不显式设置 User-Agent）。
     """
     import httpx
 
-    with httpx.stream("GET", url, headers={"Range": "bytes=0-"},
+    headers = {"Range": "bytes=0-"}
+    if (ua or "").strip():
+        headers["User-Agent"] = ua.strip()
+    with httpx.stream("GET", url, headers=headers,
                       timeout=3.0, follow_redirects=True) as resp:
         for _chunk in resp.iter_bytes():
             break
         return resp.status_code
 
 
-def check_115_download_alive(url: str) -> str:
+def check_115_download_alive(url: str, ua: str = "") -> str:
     """115 现签下载地址的轻量存在性校验（serve_115_copy 302 前用）。
 
     返回 "alive" / "dead" / "unknown"：
@@ -1404,16 +1413,23 @@ def check_115_download_alive(url: str) -> str:
     - 其余（403/5xx/超时/异常）→ unknown：定性不清时不拦播放，
       调用方沿用旧行为 302，绝不因探测抖动多造一次播放失败。
     永不抛异常。
+
+    ``ua`` 必须传签名地址时用的播放器 UA（理由见 _pan115_probe_http）；
+    不传则探测恒 403 → 恒 unknown，本校验形同虚设。
     """
     if not (url or "").strip():
         return "unknown"
     try:
-        status = _pan115_probe_http(url)
+        status = _pan115_probe_http(url, ua)
     except Exception:  # noqa: BLE001 — 探测失败不阻断播放
+        logger.info("115 现签地址探测异常，按 unknown 放行：ua=%s",
+                    (ua or "")[:60])
         return "unknown"
     if status in (200, 206):
         return "alive"
     if status in (404, 410):
         return "dead"
+    logger.info("115 现签地址探测定性不清：status=%s ua=%s",
+                status, (ua or "")[:60])
     return "unknown"
 
