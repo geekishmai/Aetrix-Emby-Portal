@@ -70,6 +70,11 @@ def store(monkeypatch):
 def _env_on(monkeypatch):
     monkeypatch.setenv("UPSTREAM_PLAYBACK_ENABLED", "1")
     monkeypatch.setenv("APPLECMS_ENABLED", "1")
+    # detail 解析缓存关（#1766 集成）：缓存键按（源id, vod），本文件
+    # 每个用例的新库里源 id 都从 1 起，进程级缓存会把前一用例的
+    # detail 串给后一用例（条目消失用例被串成命中缓存不报错）；本
+    # 文件按无缓存口径断言，与 test_applecms_playback.py 的钉法一致。
+    monkeypatch.setenv("APPLECMS_DETAIL_CACHE_ENABLED", "0")
     monkeypatch.setenv(uim.MAPPING_ENABLED_ENV, "1")
     monkeypatch.delenv("APPLECMS_TIER_GATE", raising=False)
     monkeypatch.delenv("APPLECMS_PARSE_LINES_ENABLED", raising=False)

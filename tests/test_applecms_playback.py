@@ -77,6 +77,9 @@ def _probe_status(status, retry_after=None):
 def _env_on(monkeypatch):
     monkeypatch.setenv(TOTAL, "1")
     monkeypatch.setenv("APPLECMS_ENABLED", "1")
+    # 本文件的既有用例按无缓存口径断言网络错误映射等旧语义：
+    # detail 解析缓存关掉（缓存行为由 test_applecms_detail_cache 专测）。
+    monkeypatch.setenv("APPLECMS_DETAIL_CACHE_ENABLED", "0")
     monkeypatch.delenv("APPLECMS_TIER_GATE", raising=False)
     monkeypatch.delenv("APPLECMS_PARSE_LINES_ENABLED", raising=False)
 

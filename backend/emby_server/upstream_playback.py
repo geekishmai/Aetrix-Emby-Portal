@@ -69,7 +69,16 @@
   路径（它默认关，若 gate 播放则播放恒关，是错的）。
 - 取数：``upstream_item_id`` 即 vod_id（映射行记的上游条目 id
   对苹果 CMS 型就是 vod_id）；``episode_index`` 从 1 起，调用方
-  未传时默认 1（播第 1 集）。detail 现取现解析，播放地址绝不落库。
+  未传时默认 1（播第 1 集）。detail 解析结果走 TTL 缓存（见下
+  条），播放地址绝不落库。
+- detail 解析缓存（播放优化 A2）：``fetch_detail`` 的网络请求
+  结果按（源, vod）走既有 CacheManager（与画质缓存同通道、
+  不落库），TTL 按源分层（有采样证据的源长、无证据的短），
+  解析出的播放主机属地域 403 族时封顶短 TTL；命中缓存后探活
+  403/404 或解析失败，先淘汰该条再回源重解析一次——重解析走
+  现取的全部既有语义（含探活 403 软放行），仍失败按原错误
+  报错。缓存总开关 ``APPLECMS_DETAIL_CACHE_ENABLED`` 默认开，
+  关时不读不写、行为与无缓存时逐字一致。
 - 探活与错误码全复用既有：CMS 接口非 1 → 502
   upstream_unavailable；detail 空列表（vod 消失）→ 404
   upstream_item_not_found；429 → 429；401 → 409
@@ -221,6 +230,144 @@ def store_cms_quality(mapping_id, quality: dict) -> None:
                          json.dumps(merged, ensure_ascii=False),
                          ttl=CMS_QUALITY_CACHE_TTL_SEC)
     except Exception:  # noqa: BLE001 — 同 read_cms_quality 口径
+        pass
+
+
+#: 苹果 CMS detail 解析缓存开关 env 键（默认开）：关时不读不写
+#: 缓存，取流行为与无缓存时逐字一致，是本节的回滚口。
+APPLECMS_DETAIL_CACHE_ENV = "APPLECMS_DETAIL_CACHE_ENABLED"
+
+#: detail 缓存默认 TTL env 键（秒）：没有分层证据的源只给短 TTL。
+APPLECMS_DETAIL_CACHE_TTL_DEFAULT_ENV = "APPLECMS_DETAIL_CACHE_TTL_DEFAULT_SEC"
+
+#: detail 缓存分源 TTL env 键：``源id:秒,源id:秒`` 形态，覆盖默认层。
+APPLECMS_DETAIL_CACHE_TTL_BY_SOURCE_ENV = "APPLECMS_DETAIL_CACHE_TTL_BY_SOURCE_SEC"
+
+#: 地域 403 族播放主机 TTL 封顶 env 键（秒）。
+APPLECMS_DETAIL_CACHE_TTL_BLOCKED_CAP_ENV = "APPLECMS_DETAIL_CACHE_TTL_BLOCKED_CAP_SEC"
+
+#: detail 缓存默认 TTL（秒）：采样证据只覆盖少数源，其余源的
+#: detail 内容无时效证据，只给 1 小时短 TTL。
+CMS_DETAIL_CACHE_TTL_DEFAULT_SEC = 3600
+
+#: detail 缓存分源 TTL 默认表（秒，2026-11-02 播放地址采样定案）：
+#: 非凡（7）播放地址无签名、其 CDN 自报 30 天缓存，给 24 小时
+#: （只有其自报时效的 1/30，留足余量）；暴风（9）/ 如意（13）
+#: 无签名、三轮重抓逐字节不变但零缓存头，保守 12 小时。
+CMS_DETAIL_CACHE_TTL_BY_SOURCE_DEFAULT = "7:86400,9:43200,13:43200"
+
+#: 地域 403 族 TTL 封顶（秒）：见 _CMS_REGION_BLOCKED_HOST_PREFIXES。
+CMS_DETAIL_CACHE_TTL_BLOCKED_CAP_SEC = 3600
+
+#: 地域 403 族播放主机前缀（2026-11-02 采样定案）：非凡
+#: ``vip.ffzy-play*`` 与如意 ``svip.ryplay*`` 两族对数据中心 IP
+#: 一律 403（The region has been denied），其地址时效无正面
+#: 证据，解析出这类主机时该条 TTL 一律封顶到短值。
+_CMS_REGION_BLOCKED_HOST_PREFIXES = ("vip.ffzy-play", "svip.ryplay")
+
+
+def cms_detail_cache_enabled() -> bool:
+    """detail 解析缓存总开关（env，默认开）。每次调用现读。"""
+    return (str(os.getenv(APPLECMS_DETAIL_CACHE_ENV, "1") or "1")
+            .strip().lower() not in {"0", "false", "no", "off", ""})
+
+
+def cms_detail_cache_key(source_id, vod_id) -> str:
+    """CMS detail 解析缓存键：按（源, vod）一条一份。"""
+    return f"cmsd:{int(source_id)}:{str(vod_id).strip()}"
+
+
+def _cms_detail_ttl_env_int(env_key: str, fallback: int) -> int:
+    """TTL 类 env 读法：正整数才认，脏值/非正数回落默认，不炸路径。"""
+    try:
+        value = int(str(os.getenv(env_key, "") or "").strip())
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def _parse_cms_detail_ttl_table(raw) -> dict:
+    """解析 ``源id:秒,源id:秒`` 分源 TTL 表；脏条目逐条跳过。"""
+    table: dict = {}
+    for part in str(raw or "").split(","):
+        sid, sep, ttl = part.partition(":")
+        if not sep:
+            continue
+        try:
+            sid_int, ttl_int = int(sid.strip()), int(ttl.strip())
+        except (TypeError, ValueError):
+            continue
+        if ttl_int > 0:
+            table[sid_int] = ttl_int
+    return table
+
+
+def cms_detail_cache_ttl(source_id, address: Optional[str] = None) -> int:
+    """detail 缓存 TTL 分层（秒）：分源层 → 默认层，403 族封顶。
+
+    分层依据见 ``CMS_DETAIL_CACHE_TTL_BY_SOURCE_DEFAULT`` 注释
+    （env 分源表只覆盖它显式列出的源，未列出的仍走内置默认表）；
+    解析出的播放地址主机属地域 403 族时，无论哪一层都封顶到
+    ``CMS_DETAIL_CACHE_TTL_BLOCKED_CAP_SEC``（env 可覆盖）。
+    """
+    ttl = _parse_cms_detail_ttl_table(
+        os.getenv(APPLECMS_DETAIL_CACHE_TTL_BY_SOURCE_ENV, "")).get(
+            int(source_id))
+    if ttl is None:
+        ttl = _parse_cms_detail_ttl_table(
+            CMS_DETAIL_CACHE_TTL_BY_SOURCE_DEFAULT).get(int(source_id))
+    if ttl is None:
+        ttl = _cms_detail_ttl_env_int(
+            APPLECMS_DETAIL_CACHE_TTL_DEFAULT_ENV,
+            CMS_DETAIL_CACHE_TTL_DEFAULT_SEC)
+    host = urllib.parse.urlparse(address or "").hostname or ""
+    if host.startswith(_CMS_REGION_BLOCKED_HOST_PREFIXES):
+        cap = _cms_detail_ttl_env_int(
+            APPLECMS_DETAIL_CACHE_TTL_BLOCKED_CAP_ENV,
+            CMS_DETAIL_CACHE_TTL_BLOCKED_CAP_SEC)
+        ttl = min(ttl, cap)
+    return ttl
+
+
+def read_cms_detail(source_id, vod_id) -> Optional[dict]:
+    """读 CMS detail 解析缓存（取流路径写、取流路径消费）。
+
+    内容形态就是 ``applecms_fetcher.fetch_detail`` 返回的 vod
+    dict。无缓存/缓存坏了返回 None——调用方回落现取，不报错。
+    """
+    try:
+        from backend.database import CacheManager
+        raw = CacheManager.get(cms_detail_cache_key(source_id, vod_id))
+    except Exception:  # noqa: BLE001 — 缓存只是补强，故障不外溢
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def store_cms_detail(source_id, vod_id, detail: dict, ttl: int) -> None:
+    """写 CMS detail 解析缓存。全程 fail-safe，同 store_cms_quality。"""
+    if not isinstance(detail, dict) or not detail:
+        return
+    try:
+        from backend.database import CacheManager
+        CacheManager.set(cms_detail_cache_key(source_id, vod_id),
+                         json.dumps(detail, ensure_ascii=False),
+                         ttl=ttl)
+    except Exception:  # noqa: BLE001 — 同 read_cms_detail 口径
+        pass
+
+
+def evict_cms_detail(source_id, vod_id) -> None:
+    """淘汰一条 CMS detail 解析缓存。全程 fail-safe。"""
+    try:
+        from backend.database import CacheManager
+        CacheManager.delete(cms_detail_cache_key(source_id, vod_id))
+    except Exception:  # noqa: BLE001 — 淘汰失败不外溢，最坏下次再淘
         pass
 
 
@@ -384,6 +531,16 @@ class UpstreamPlaybackError(Exception):
         if self.retry_after is not None:
             body["retry_after"] = self.retry_after
         return body
+
+
+class _CmsEvictableFailure(UpstreamPlaybackError):
+    """缓存条目专属失败标记：status / code / message 与既有错误逐字一致。
+
+    只在「本次 detail 来自缓存」且失败属可淘汰类（探活 403/404、
+    解析失败）时抛出；``_resolve_applecms_stream`` 捕获后淘汰缓存
+    并回源重解析一次。不命中的调用方按普通 UpstreamPlaybackError
+    处理，对外行为无异。
+    """
 
 
 def playback_enabled() -> bool:
@@ -688,6 +845,103 @@ def _map_applecms_error(exc, source_id: int) -> UpstreamPlaybackError:
         source_id=source_id)
 
 
+def _fetch_cms_detail_network(source, vod_id: str, *,
+                              http_get: Optional[Callable] = None,
+                              headers: Optional[dict] = None) -> dict:
+    """现取 CMS detail（网络）：错误映射与空 detail 口径原样。
+
+    ``AppleCMSError`` → ``_map_applecms_error`` 映射；detail 为
+    None（vod 消失）→ 404 upstream_item_not_found。成功返回 vod dict。
+    """
+    from backend.emby_server import applecms_fetcher as acf
+    try:
+        detail = acf.fetch_detail(
+            source.base_url, vod_id, http_get=http_get,
+            headers=_source_headers(source) if headers is None else headers)
+    except acf.AppleCMSError as exc:
+        raise _map_applecms_error(exc, source.id) from exc
+    if detail is None:
+        raise UpstreamPlaybackError(
+            404, "upstream_item_not_found",
+            "上游已无此条目", source_id=source.id)
+    return detail
+
+
+def _play_from_cms_detail(source, detail, episode_index, *,
+                          http_probe: Optional[Callable] = None,
+                          http_get_text: Optional[Callable] = None,
+                          quality_mapping_id=None,
+                          parse_resolver: Optional[Callable] = None,
+                          soft_pass_403: bool = True) -> str:
+    """由一份 detail 解析播放地址并探活下发（CMS 分支后半段）。
+
+    解析失败（``resolve_play`` 非 ok）抛 ``_CmsEvictableFailure``
+    （status/code 与既有口径逐字一致）；探活 403：``soft_pass_403``
+    为 True 时按既有软放行下发，为 False（detail 来自缓存）时抛
+    ``_CmsEvictableFailure`` 让调用方淘汰重解析；探活 404 同样抛
+    ``_CmsEvictableFailure``，其余探活状态走
+    ``_classify_probe_status`` 原样分类。成功时回填画质并返回地址。
+    """
+    from backend.emby_server import applecms_fetcher as acf
+    try:
+        episode = int(episode_index)
+    except (TypeError, ValueError):
+        episode = -1
+    result = acf.resolve_play(
+        detail, episode,
+        parse_lines_enabled=applecms_parse_lines_enabled(),
+        parse_resolver=parse_resolver)
+    if result[0] != "ok":
+        reason = result[1]
+        if reason == "episode_out_of_range":
+            raise _CmsEvictableFailure(
+                404, "upstream_item_not_found",
+                "上游无此集", source_id=source.id)
+        messages = {
+            "parse_not_enabled": "解析型线路未开启，该条目暂无直链可播",
+            "parse_rule_missing": "本站无解析规则，该条目暂无直链可播",
+            "no_direct_group": "该条目暂无直链可播",
+        }
+        raise _CmsEvictableFailure(
+            502, "upstream_unavailable",
+            messages.get(reason, "该条目暂无直链可播"),
+            source_id=source.id)
+    _, _group_name, address = result
+    probe = _default_http_range_probe if http_probe is None else http_probe
+    probe_status, retry_after = probe(
+        address, _source_headers(source), UPSTREAM_PROBE_TIMEOUT_SEC)
+    if probe_status == 403:
+        if not soft_pass_403:
+            raise _CmsEvictableFailure(
+                403, "upstream_forbidden",
+                "上游拒绝了本次播放，请检查该源权限",
+                source_id=source.id)
+        # 探活软放行（CMS 分支专属，2026-11-02 定案）：多家 CMS 播放
+        # CDN 对数据中心 IP 一律 403——403 只证明「服务器这个 IP 被
+        # 拒」，不证明链死；detail 刚刚现取成功（源活着、条目在、
+        # 直链组在、集序号不越界）才是可用性信号。照常下发 302，
+        # 播放器在用户家里自拉。日志只记 id 不记地址。其余状态仍走
+        # 统一分类（404 判死 / 401 凭据 / 429 额度 / 5xx 不可用）；
+        # Emby/Jellyfin 分支不经这里，403 仍判 upstream_forbidden。
+        logger.info("cms_probe_soft_pass source_id=%s", source.id)
+        _capture_cms_quality(source, quality_mapping_id, detail, address,
+                             http_get_text=http_get_text)
+        return address
+    try:
+        _classify_probe_status(probe_status, source.id, retry_after)
+    except UpstreamPlaybackError as exc:
+        if probe_status == 404:
+            raise _CmsEvictableFailure(
+                exc.status, exc.code, exc.message,
+                source_id=exc.source_id,
+                retry_after=exc.retry_after) from exc
+        raise
+    logger.info("上游播放解析成功 source_id=%s", source.id)
+    _capture_cms_quality(source, quality_mapping_id, detail, address,
+                         http_get_text=http_get_text)
+    return address
+
+
 def _resolve_applecms_stream(source, vod_id: str, *,
                              episode_index: int = 1,
                              http_get: Optional[Callable] = None,
@@ -705,8 +959,10 @@ def _resolve_applecms_stream(source, vod_id: str, *,
 
     vod_id 即调用方传入的 ``upstream_item_id``（映射行里记的上游
     条目 id 对苹果 CMS 型就是 vod_id）；``episode_index`` 从 1 起，
-    默认 1（调用方未传集序号时播第 1 集）。detail 现取现解析，
-    播放地址只出现在返回的 302 地址与探活请求里，不写库、不进日志
+    默认 1（调用方未传集序号时播第 1 集）。detail 先查解析缓存
+    （``read_cms_detail``）、未命中才现取，命中后失败淘汰重解析
+    一次（见 ``cms_detail_cache_ttl`` 一节）；播放地址只出现在
+    返回的 302 地址与探活请求里，不写库、不进日志
     （日志只含 source_id）。CMS 密封凭据不走 Emby 认证口：
     本分支只用源上配的 UA / Referer / 附加头（``_source_headers``）
     发请求；CMS 若需密钥，走附加头配置，不走密封凭据。
@@ -720,60 +976,34 @@ def _resolve_applecms_stream(source, vod_id: str, *,
             403, "upstream_forbidden",
             "该源分级映射未配置，苹果 CMS 播放暂不可用",
             source_id=source.id)
-    from backend.emby_server import applecms_fetcher as acf
     headers = _source_headers(source)
-    try:
-        detail = acf.fetch_detail(
-            source.base_url, vod_id, http_get=http_get, headers=headers)
-    except acf.AppleCMSError as exc:
-        raise _map_applecms_error(exc, source.id) from exc
-    if detail is None:
-        raise UpstreamPlaybackError(
-            404, "upstream_item_not_found",
-            "上游已无此条目", source_id=source.id)
-    try:
-        episode = int(episode_index)
-    except (TypeError, ValueError):
-        episode = -1
-    result = acf.resolve_play(
-        detail, episode,
-        parse_lines_enabled=applecms_parse_lines_enabled(),
-        parse_resolver=parse_resolver)
-    if result[0] != "ok":
-        reason = result[1]
-        if reason == "episode_out_of_range":
-            raise UpstreamPlaybackError(
-                404, "upstream_item_not_found",
-                "上游无此集", source_id=source.id)
-        messages = {
-            "parse_not_enabled": "解析型线路未开启，该条目暂无直链可播",
-            "parse_rule_missing": "本站无解析规则，该条目暂无直链可播",
-            "no_direct_group": "该条目暂无直链可播",
-        }
-        raise UpstreamPlaybackError(
-            502, "upstream_unavailable",
-            messages.get(reason, "该条目暂无直链可播"),
-            source_id=source.id)
-    _, _group_name, address = result
-    probe = _default_http_range_probe if http_probe is None else http_probe
-    probe_status, retry_after = probe(
-        address, _source_headers(source), UPSTREAM_PROBE_TIMEOUT_SEC)
-    if probe_status == 403:
-        # 探活软放行（CMS 分支专属，2026-11-02 定案）：多家 CMS 播放
-        # CDN 对数据中心 IP 一律 403——403 只证明「服务器这个 IP 被
-        # 拒」，不证明链死；detail 刚刚现取成功（源活着、条目在、
-        # 直链组在、集序号不越界）才是可用性信号。照常下发 302，
-        # 播放器在用户家里自拉。日志只记 id 不记地址。其余状态仍走
-        # 统一分类（404 判死 / 401 凭据 / 429 额度 / 5xx 不可用）；
-        # Emby/Jellyfin 分支不经这里，403 仍判 upstream_forbidden。
-        logger.info("cms_probe_soft_pass source_id=%s", source.id)
-        _capture_cms_quality(source, quality_mapping_id, detail, address,
-                             http_get_text=http_get_text)
-        return address
-    _classify_probe_status(probe_status, source.id, retry_after)
-    logger.info("上游播放解析成功 source_id=%s", source.id)
-    _capture_cms_quality(source, quality_mapping_id, detail, address,
-                         http_get_text=http_get_text)
+    cache_on = cms_detail_cache_enabled()
+    if cache_on:
+        cached_detail = read_cms_detail(source.id, vod_id)
+        if cached_detail is not None:
+            try:
+                return _play_from_cms_detail(
+                    source, cached_detail, episode_index,
+                    http_probe=http_probe, http_get_text=http_get_text,
+                    quality_mapping_id=quality_mapping_id,
+                    parse_resolver=parse_resolver, soft_pass_403=False)
+            except _CmsEvictableFailure:
+                # 命中缓存后失败（探活 403/404 或解析失败）：淘汰
+                # 该条并回源重解析一次，不许把死缓存一直发给用户；
+                # 落到下方现取路径，只重解析这一次。
+                evict_cms_detail(source.id, vod_id)
+                logger.info(
+                    "cms_detail_cache_evicted source_id=%s", source.id)
+    detail = _fetch_cms_detail_network(
+        source, vod_id, http_get=http_get, headers=headers)
+    address = _play_from_cms_detail(
+        source, detail, episode_index,
+        http_probe=http_probe, http_get_text=http_get_text,
+        quality_mapping_id=quality_mapping_id,
+        parse_resolver=parse_resolver, soft_pass_403=True)
+    if cache_on:
+        store_cms_detail(source.id, vod_id, detail,
+                         cms_detail_cache_ttl(source.id, address))
     return address
 
 
