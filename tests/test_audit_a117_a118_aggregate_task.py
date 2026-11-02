@@ -213,12 +213,19 @@ def test_a118_live_thread_not_marked_stale_on_second_enqueue(
     try:
         # 认领轮询：正常毫秒级；15 秒是给高负载下线程调度抖动的
         # 宽限（曾有一次 13 秒慢轮合跑失败），不断言时序、只断言终态。
+        # 等的不只是行 running：execute_task 先提交认领、之后才
+        # _register_live 登记活线程，只等行 running 就往下走时，
+        # 高负载下登记还没落定，心跳一冻、二次入队便把活任务误判
+        # interrupted（CI 假红两轮实证）。退出条件带上登记落定，
+        # 等不到仍在下面断言处照常红，断言口径不变（#1732 同款）。
         deadline = time.time() + 15
         while time.time() < deadline:
-            if _task_row(db_factory, task_id).status == "running":
+            if (_task_row(db_factory, task_id).status == "running"
+                    and task_id in jobs._live_task_ids()):
                 break
             time.sleep(0.05)
         assert _task_row(db_factory, task_id).status == "running"
+        assert task_id in jobs._live_task_ids()
         # 模拟长库：执行线程在窗内不刷心跳，心跳冻在认领时刻。
         session = db_factory()
         try:
