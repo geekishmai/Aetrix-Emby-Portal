@@ -27,6 +27,8 @@ class _Clock:
 def clock(monkeypatch):
     c = _Clock()
     monkeypatch.setattr(database, "get_redis", lambda: None)
+    # 本文件测的是进程内限速语义本身；多进程保守收紧另有专测
+    monkeypatch.setenv("PAN115_GUARD_FALLBACK_PROCS", "1")
     monkeypatch.setattr(guard.time, "time", c.time)
     monkeypatch.setattr(guard.time, "sleep", c.sleep)
     for name in ("PAN115_GUARD_ENABLED", "PAN115_API_RPS", "PAN115_LIST_RPS", "PAN115_LINK_RPS"):
@@ -151,3 +153,15 @@ def test_client_stops_calling_115_during_cooldown(clock, monkeypatch):
     with pytest.raises(guard.Pan115CooldownError, match="冷却"):
         client._call("GET", url)
     assert len(calls) == 1, "冷却期间不许再打 115"
+
+
+def test_fallback_without_redis_is_conservative(monkeypatch):
+    """Redis 不可用时进程内兜底按并发进程数收紧速率、不给突发（防总速率×N）"""
+    monkeypatch.setattr(guard, "_redis", lambda: None)
+    monkeypatch.setenv("PAN115_GUARD_FALLBACK_PROCS", "3")
+    guard.reset_for_tests()
+    now = 1000.0
+    # 列目录 2/s：兜底下间隔 1.5s，第一次放行，紧接着第二次要等约 1.5s
+    assert guard._gcra_wait("k:list", 2.0, 5.0, now) == 0.0
+    wait = guard._gcra_wait("k:list", 2.0, 5.0, now)
+    assert 1.4 < wait <= 1.5 + 1e-6

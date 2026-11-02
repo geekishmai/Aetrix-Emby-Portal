@@ -96,6 +96,28 @@ def _redis():
     return get_redis()
 
 
+_fallback_warned_at = 0.0
+
+
+def _fallback_procs() -> float:
+    """进程内兜底时假定的并发进程数（api / worker / p115 sidecar = 3）。
+
+    Redis 不可用时每个进程各自限速，账号总速率会变成 N 倍——2026-11-03
+    实测 Redis 抖动的一小时里列目录到过约 4.4 次/秒（上限 2）。兜底时把
+    每个进程的速率除以 N、突发压到 1，宁可慢不可超。
+    """
+    return max(1.0, env_float("PAN115_GUARD_FALLBACK_PROCS", 3.0))
+
+
+def _note_fallback() -> None:
+    global _fallback_warned_at
+    now = time.monotonic()
+    if now - _fallback_warned_at >= 60.0:
+        _fallback_warned_at = now
+        logger.warning("pan115_guard Redis 不可用，退回进程内限速（速率按 1/%g 保守收紧）",
+                       _fallback_procs())
+
+
 def _gcra_wait(key: str, rate: float, burst: float, now: float) -> float:
     interval = 1.0 / rate
     tau = interval * (burst - 1)
@@ -105,6 +127,11 @@ def _gcra_wait(key: str, rate: float, burst: float, now: float) -> float:
             return float(client.eval(_GCRA_LUA, 1, key, now, interval, tau))
         except Exception:  # noqa: BLE001 — Redis 故障退回进程内
             logger.debug("pan115_guard Redis 令牌桶失败，退回进程内", exc_info=True)
+    procs = _fallback_procs()
+    if procs > 1:
+        _note_fallback()
+        interval = interval * procs
+        tau = 0.0
     with _mem_lock:
         tat = max(_mem_tat.get(key, now), now)
         allow_at = tat - tau
