@@ -729,7 +729,9 @@ def _http_json(
     if resp.status_code in (401, 403):
         raise Pan115AuthError(f"115 返回 HTTP {resp.status_code}，Cookie 可能已失效")
     if resp.status_code >= 400:
-        raise Pan115Error(f"115 返回 HTTP {resp.status_code}")
+        err = Pan115Error(f"115 返回 HTTP {resp.status_code}")
+        err.status = resp.status_code   # 给 pan115_guard 识别 429 / 405
+        raise err
     try:
         body = resp.json()
     except Exception:  # noqa: BLE001 — 115 偶发返回 HTML 登录页
@@ -1789,14 +1791,22 @@ class Pan115Client:
 
     def _call(self, method: str, url: str, *, params: Optional[dict] = None,
               data: Optional[dict] = None) -> dict:
+        from backend.emby_server import pan115_guard
+
         kind = _call_kind(url)
+        try:
+            pan115_guard.before_call(self.cookie, kind)
+        except pan115_guard.Pan115CooldownError as exc:
+            raise Pan115Error(str(exc)) from exc   # 冷却中不发请求，也不计调用次数
         try:
             body = _http_json(method, url, params=params, data=data, cookie=self.cookie,
                               ua=self.ua)
-        except Exception:
+        except Exception as exc:
             _bump_call(kind, error=True)
+            pan115_guard.after_error(self.cookie, getattr(exc, "status", None))
             raise
         _bump_call(kind)
+        pan115_guard.after_body(self.cookie, body)
         return body
 
 
