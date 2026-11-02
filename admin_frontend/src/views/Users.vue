@@ -323,7 +323,7 @@ const subDialog = reactive({
 const grantPreview = computed(() => {
   const u = subDialog.user
   if (!u) return ''
-  const base = u.has_subscription && u.subscription_end ? new Date(u.subscription_end) : new Date()
+  const base = u.has_subscription && u.subscription_end ? parseServerTime(u.subscription_end) : new Date()
   const from = base.getTime() > Date.now() ? base : new Date()
   const end = new Date(from.getTime() + subDialog.days * 86400000)
   return `${from.toISOString().slice(0, 10)} → ${end.toISOString().slice(0, 10)}`
