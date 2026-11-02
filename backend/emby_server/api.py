@@ -7465,7 +7465,8 @@ async def video_stream(
                 result="error", error_kind=exc.kind,
                 resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
             _detail = exc.message if exc.kind in (
-                "auth_error", "expired", "throttled", "size_limit") else \
+                "auth_error", "expired", "throttled", "size_limit",
+                "unsupported") else \
                 "播放变体当前不可用：byos115_direct"
             raise HTTPException(status_code=409, detail=_detail) from exc
         _pt.mark("byos115_direct")

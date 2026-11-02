@@ -223,104 +223,20 @@ def test_115_list_dir_sha1_passthrough(monkeypatch):
 
 # ---------- 工人 ----------
 
-def test_115_worker_success_fid_pickcode(db, monkeypatch):
-    _mount115(db)
-    item = _item115(db)
-    _binding115(db, 7)
-    job = _job115(db, item.id)
-    fake = _FakePan115()
-    _patch_115(monkeypatch, fake)
-    result = tv.run_transfer_job_once(db, job, object())
-    assert result["outcome"] == "done" and job.status == "done"
-    assert fake.copy_calls == [("srcfid", "d1")]
-    row = db.query(em.TransferVariant).one()
-    assert row.status == "ready" and row.variant_file_id == "newfid"
-    assert row.pickcode == "PC-NEW"
-    assert row.variant_drive_id == "pan115:user-7"
-    assert row.owner_scope == "user" and row.owner_ref == "7"
 
 
-def test_115_worker_copy_response_no_fid_dir_match(db, monkeypatch):
-    _mount115(db)
-    item = _item115(db)
-    _binding115(db, 7)
-    job = _job115(db, item.id)
-    fake = _FakePan115(copy_result="no_fid")
-    _patch_115(monkeypatch, fake)
-    result = tv.run_transfer_job_once(db, job, object())
-    assert result["outcome"] == "done"
-    row = db.query(em.TransferVariant).one()
-    assert row.variant_file_id == "newfid" and row.pickcode == "PC-NEW"
 
 
 # ---------- 转存后目录核对（FMBY discover_transfer_target 口径） ----------
 
-def test_115_worker_copy_receipt_unverified_copy_unresolved(db, monkeypatch):
-    _mount115(db)
-    item = _item115(db)
-    _binding115(db, 7)
-    job = _job115(db, item.id)
-    fake = _FakePan115(copy_result="ghost")
-    _patch_115(monkeypatch, fake)
-    result = tv.run_transfer_job_once(db, job, object())
-    assert result["outcome"] == "failed"
-    assert result["error_kind"] == "copy_unresolved"
-    assert db.query(em.TransferVariant).count() == 0  # 核不到不登记
 
 
-def test_115_worker_dir_id_wins_over_receipt(db, monkeypatch):
-    _mount115(db)
-    item = _item115(db)
-    _binding115(db, 7)
-    job = _job115(db, item.id)
-    fake = _FakePan115(copy_result="dir_wins")
-    _patch_115(monkeypatch, fake)
-    result = tv.run_transfer_job_once(db, job, object())
-    assert result["outcome"] == "done"
-    row = db.query(em.TransferVariant).one()
-    assert row.variant_file_id == "dirfid"  # 目录核到的 id 为准
-    assert row.pickcode == "PC-DIR"
 
 
-def test_115_worker_auth_error_no_retry_marks_binding(db, monkeypatch):
-    _mount115(db)
-    item = _item115(db)
-    binding = _binding115(db, 7)
-    job = _job115(db, item.id)
-    fake = _FakePan115(copy_result="auth")
-    _patch_115(monkeypatch, fake)
-    result = tv.run_transfer_job_once(db, job, object())
-    assert result["outcome"] == "failed"
-    assert result["error_kind"] == "auth_error"
-    db.refresh(binding)
-    assert binding.status != "active"
-    assert binding.last_error_kind == "expired"
 
 
-def test_115_worker_no_binding(db, monkeypatch):
-    _mount115(db)
-    item = _item115(db)
-    job = _job115(db, item.id)
-    fake = _FakePan115()
-    _patch_115(monkeypatch, fake)
-    result = tv.run_transfer_job_once(db, job, object())
-    assert result["outcome"] == "failed"
-    assert result["error_kind"] == "no_binding"
 
 
-def test_115_worker_no_source_fid(db, monkeypatch):
-    # 工人分发器先拦无 fid 条目（item_gone）；门禁层的 no_source_fid
-    # 语义由 test_115_gate_115_path_no_fid_failed 覆盖（不建任务）。
-    _mount115(db)
-    item = _item115(db, drive_file_id="")
-    _binding115(db, 7)
-    job = _job115(db, item.id)
-    fake = _FakePan115()
-    _patch_115(monkeypatch, fake)
-    result = tv.run_transfer_job_once(db, job, object())
-    assert result["outcome"] == "failed"
-    assert result["error_kind"] == "item_gone"
-    assert fake.copy_calls == []
 
 
 def test_115_worker_source_scope_unsupported(db, monkeypatch):
@@ -341,54 +257,12 @@ def test_115_worker_source_scope_unsupported(db, monkeypatch):
 
 # ---------- 门禁 ----------
 
-def test_115_gate_115_path_no_fid_failed(db, monkeypatch):
-    _enable(monkeypatch)
-    _mount115(db)
-    item = _item115(db, drive_file_id="")
-    _binding115(db, 7)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate == {"verdict": "failed", "reason": "no_source_fid"}
-    assert db.query(em.TransferJob).count() == 0
 
 
-def test_115_gate_creates_job_preparing(db, monkeypatch):
-    _enable(monkeypatch)
-    _mount115(db)
-    item = _item115(db)
-    _binding115(db, 7)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing" and gate["reason"] == "job_created"
-    job = db.query(em.TransferJob).one()
-    assert job.provider == "pan115" and job.owner_scope == "user"
-    assert job.dest_drive_id == "pan115:user-7"
 
 
-def test_115_gate_ready_serve_copy(db, monkeypatch):
-    _enable(monkeypatch)
-    _mount115(db)
-    item = _item115(db)
-    _binding115(db, 7)
-    row = em.TransferVariant(item_id=item.id, source_file_id="srcfid",
-                             variant_file_id="newfid",
-                             variant_drive_id="pan115:user-7",
-                             owner_scope="user", owner_ref="7",
-                             status="ready", pickcode="PC-NEW")
-    db.add(row)
-    db.commit()
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "serve_115_copy"
-    assert gate["variant"].pickcode == "PC-NEW"
 
 
-def test_115_gate_no_duplicate_job(db, monkeypatch):
-    _enable(monkeypatch)
-    _mount115(db)
-    item = _item115(db)
-    _binding115(db, 7)
-    _job115(db, item.id)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing" and gate["reason"] == "job_in_flight"
-    assert db.query(em.TransferJob).count() == 1
 
 
 # ---------- 巡检 ----------
@@ -404,18 +278,6 @@ def _ready_115_row(db, item_id, pickcode="PC-NEW", fid="newfid"):
     return row
 
 
-def test_115_patrol_download_url_ok_clears_strike(db, monkeypatch):
-    item = _item115(db)
-    _binding115(db, 7)
-    row = _ready_115_row(db, item.id)
-    row.stale_count = 1
-    db.commit()
-    fake = _FakePan115()
-    _patch_115(monkeypatch, fake)
-    tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert row.status == "ready" and row.stale_count == 0
-    assert fake.download_calls == ["PC-NEW"]
 
 
 def test_115_patrol_auth_no_strike(db, monkeypatch):
@@ -429,34 +291,8 @@ def test_115_patrol_auth_no_strike(db, monkeypatch):
     assert row.status == "ready" and row.stale_count == 0
 
 
-def test_115_patrol_gone_strikes_twice(db, monkeypatch):
-    item = _item115(db)
-    _binding115(db, 7)
-    row = _ready_115_row(db, item.id)
-    fake = _FakePan115(download_behavior="gone")
-    _patch_115(monkeypatch, fake)
-    tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert row.status == "ready" and row.stale_count == 1
-    tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert row.status == "stale" and row.stale_count == 2
 
 
-def test_115_patrol_pickcode_fallback_fills(db, monkeypatch):
-    item = _item115(db)
-    _binding115(db, 7)
-    row = _ready_115_row(db, item.id, pickcode="")
-    fake = _FakePan115()
-    # 目标目录里已有该 fid 的文件（带 pickcode），供回落匹配。
-    fake.dirs["d1"] = [{"fid": "newfid", "cid": "c-new", "name": "a.mkv",
-                        "is_dir": False, "size": 1000,
-                        "pickcode": "PC-NEW"}]
-    _patch_115(monkeypatch, fake)
-    tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert row.status == "ready" and row.pickcode == "PC-NEW"
-    assert fake.download_calls == ["PC-NEW"]
 
 
 # ---------- 115 简单上传（跨 provider Drive→115 用，115cli 口径） ----------

@@ -297,30 +297,6 @@ def test_legacy_none_scope_binding_still_scans(db):
     assert isinstance(provider, byos_scan.UserDriveEnumerator)
 
 
-def test_pan115_provider_uses_only_the_binding_cookie(db, monkeypatch):
-    seen = {}
-
-    class _Stub115:
-        def __init__(self, cookie, ua=""):
-            seen["cookie"] = cookie
-
-        def check(self):
-            return {"ok": True}
-
-        def list_dir(self, cid="0", limit=200):
-            return [{"name": "Film.mkv", "is_dir": False,
-                     "pickcode": "PC9", "cid": "c9", "size": 10}]
-
-    monkeypatch.setattr(transfer115, "Pan115Client", _Stub115)
-    binding = _make_binding(db, 7, "pan115", "mine",
-                            seal_secret("cookie-mine"))
-    provider = byos_scan.binding_provider(db, binding)
-    assert provider._cookie_override == "cookie-mine"
-    assert provider._byos_no_cache is True
-    files = list(byos_scan.iter_binding_scan_files(provider, binding.id))
-    assert seen["cookie"] == "cookie-mine"
-    assert files[0].stored_path == f"byos://{binding.id}/Film.mkv"
-    assert files[0].file_id == ""  # 115 无稳定 file_id，留空绝不猜
 
 
 # ---------------------------------------------------------------- 整轮扫描

@@ -1532,7 +1532,12 @@ def probe_user_copy_quota_decision(user_id, fid) -> str:
 
 
 def ready_user115_variant(db, item_id, user_id):
-    """该用户该条目 ready 的 115 副本行（或 None）。额度回落只看本人 115。"""
+    """该用户该条目 ready 的 115 副本行（或 None）。额度回落只看本人 115。
+
+    115 用户绑定线已下线（2026-11-02 删除单）：恒回 None——存量
+    115 副本行代码层视为不存在，额度回落不再改道用户 115 副本。
+    """
+    return None
     try:
         return _newest_ready_for_scheme(db, item_id, "user", str(user_id),
                                         "pan115:")
@@ -1691,15 +1696,41 @@ def _is_storage_quota_response(resp):
 # 选路与触发（纯读/纯触发，不碰播放链的写路径）
 # ---------------------------------------------------------------------------
 
+# 已下线 provider 的落盘前缀（2026-11-02 删除单：夸克/115 用户
+# 绑定线删除）。用户副本行 variant_drive_id 以这两个前缀开头者，
+# 代码层一律视为不存在（选路/门禁/巡检/复活/执行全部同口径）。
+REMOVED_DEST_PREFIXES = ("quark:", "pan115:")
+#: 建单拒绝与在途单终态化的稳定 error_kind（删除单专用）。
+PROVIDER_REMOVED_KIND = "provider_removed"
+PROVIDER_REMOVED_DETAIL = "该网盘已下线，请改绑 Google Drive。"
+
+
+def _dest_is_removed(dest) -> bool:
+    """落盘标识是否属于已下线 provider（quark:/pan115: 前缀）。"""
+    return (dest or "").startswith(REMOVED_DEST_PREFIXES)
+
+
 def _newest_ready(db, item_id, owner_scope, owner_ref=None):
-    """该条目该 scope 下最新的一行 ready 登记（按 id 倒序取 1）。"""
+    """该条目该 scope 下最新的一行 ready 登记（按 id 倒序取 1）。
+
+    user scope 时跳过已下线 provider 的副本行（夸克/115 存量行
+    视为不存在）：取最近若干行逐行过滤，避免最新一行是旧夸克
+    副本时把次新的 Drive 副本也挡掉。
+    """
     q = (db.query(em.TransferVariant)
          .filter(em.TransferVariant.item_id == item_id,
                  em.TransferVariant.owner_scope == owner_scope,
                  em.TransferVariant.status == "ready"))
     if owner_ref is not None:
         q = q.filter(em.TransferVariant.owner_ref == owner_ref)
-    return q.order_by(em.TransferVariant.id.desc()).first()
+    q = q.order_by(em.TransferVariant.id.desc())
+    if owner_scope != "user":
+        return q.first()
+    for row in q.limit(20).all():
+        if _dest_is_removed(row.variant_drive_id):
+            continue
+        return row
+    return None
 
 
 def has_active_drive_binding(db, user_id) -> bool:
@@ -1725,8 +1756,13 @@ def _active_binding(db, user_id, provider):
     只取本人行，绝不跨用户；绑定行本身不携带凭据原文，凭据由
     各执行器按绑定行另行解封（Drive 走 drive_oauth、115 走
     upstream_sources.unseal_secret），本函数不碰凭据。
+    已下线 provider（pan115/quark，2026-11-02 删除单）恒回
+    None：存量绑定行视为不存在——门禁 counterpart 只剩 Drive、
+    建单前置校验按无绑定拒绝、预热/想看等消费方同口径。
     """
     if user_id is None:
+        return None
+    if provider in ("pan115", "quark"):
         return None
     return (db.query(em.UserStorageBinding)
             .filter(em.UserStorageBinding.user_id == user_id,
@@ -1829,6 +1865,11 @@ def create_user_job(db, item, user_id, provider, trigger="playback",
     已失败的任务不挡重建（否则重触发永远撞上自己留下的失败行，
     等于没修）；其它调用方一律不传，重触发预算由门禁侧把关。
     """
+    if provider in ("pan115", "quark"):
+        # 目标盘已下线（2026-11-02 删除单）：明确拒绝建单，
+        # 不落行、不靠 no_binding 误导文案。
+        raise TransferError(PROVIDER_REMOVED_KIND,
+                            PROVIDER_REMOVED_DETAIL)
     if not master_enabled():
         raise TransferError("master_off", "转存变体总闸未开")
     item_id = getattr(item, "id", None)
@@ -1996,6 +2037,12 @@ def create_cross_provider_job(db, item, user_id, source_provider,
         raise TransferError(
             "bad_dest_provider",
             f"跨 provider 转存落点非法：{dest_provider}")
+    if dest_provider in ("pan115", "quark"):
+        # 落点已下线（2026-11-02 删除单）：明确拒绝建单。源为
+        # pan115、落点 Drive 的跨单不受影响（搬的是共享挂载
+        # 内容、落用户 Drive 盘）。
+        raise TransferError(PROVIDER_REMOVED_KIND,
+                            PROVIDER_REMOVED_DETAIL)
     dest = {"drive": f"userdrive:{user_id}",
             "pan115": f"pan115:user-{user_id}",
             "quark": f"quark:user-{user_id}"}[dest_provider]
@@ -2522,7 +2569,12 @@ def revive_binding_failed_jobs(db, user_id):
                     em.TransferJob.error_kind == "no_binding"))
         .all()
     )
+    revived = 0
     for job in rows:
+        if _dest_is_removed(job.dest_drive_id):
+            # 落点已下线（2026-11-02 删除单）：不许被重绑复活，
+            # 否则工人会去执行落夸克/115 盘的死单。
+            continue
         job.status = "pending"
         job.attempts = 0
         job.error_kind = None
@@ -2530,7 +2582,8 @@ def revive_binding_failed_jobs(db, user_id):
         job.next_retry_at = None
         job.lease_expires_at = None
         job.claimed_by = None
-    return len(rows)
+        revived += 1
+    return revived
 
 
 def run_pending_share_revokes(db, limit_users=20):
@@ -8352,6 +8405,12 @@ def run_transfer_job_once(db, job, drive_api):
     if (job.attempts or 0) >= MAX_ATTEMPTS:
         return _fail_job(db, job, "retriable",
                          "attempts 已达上限（执行入口兜底门控）")
+    if (getattr(job, "owner_scope", "") == "user"
+            and _dest_is_removed(getattr(job, "dest_drive_id", ""))):
+        # 落点已下线（2026-11-02 删除单）：存量在途单直接终态化，
+        # 不许工人再对夸克/115 用户盘发任何请求。
+        return _fail_job(db, job, PROVIDER_REMOVED_KIND,
+                         PROVIDER_REMOVED_DETAIL)
     item = None
     if job.item_id is not None:
         item = (db.query(em.MediaItem)
@@ -8989,6 +9048,13 @@ def _fail_user_jobs_without_binding(db, jobs):
             kept.append(job)
             continue
         dest = (getattr(job, "dest_drive_id", "") or "").strip()
+        if _dest_is_removed(dest):
+            # 落点已下线（2026-11-02 删除单）：当场终态化为
+            # provider_removed，不进认领、不计 attempts（与执行
+            # 入口兜底同口径，不许误报成 no_binding）。
+            _fail_job(db, job, PROVIDER_REMOVED_KIND,
+                      PROVIDER_REMOVED_DETAIL)
+            continue
         provider = None
         if dest.startswith("userdrive:"):
             provider = "drive"
@@ -9695,14 +9761,9 @@ def patrol_once(db, drive_api_factory, now=None):
     - get_file 成功 → stale_count 清零；
     - 404/403 → strike+1，满 2 次置 stale（解除锚定，下次播放回原件；
       重拷只由下次播放 Quota 事件在节流允许时触发，巡检不自动重拷）；
-    - 115 stale 行每轮同样重验：download_url 成功（或两通道撞限时
-      转存目录按 fid 核到）→ 复活为 ready（stale_count 清零，计
-      revived）；核不到/认证错/通道限且目录核不到 → 保持 stale，
-      不重复记 strike；Drive stale 行不在本单救回范围；
-    - 夸克行走 _patrol_quark_row（download_url 验活，口径同 115）：
-      此前无分流时 quark: 行落进 Drive get_file 分支必然 404 被
-      误记 strike/stale（2026-11-02 生产实证，见 _patrol_quark_row）；
-      stale 的夸克行与 115 行一样纳入重验、可复活；
+    - 已下线 provider 的副本行（variant_drive_id 以 quark: /
+      pan115: 开头，2026-11-02 删除单）整行跳过：不再验活、不再
+      取链、不记 strike、不复活，行数据原样留存（二期清理）；
     - 其它异常（429/5xx/网络）→ 只记日志，不记 strike。
     孤儿文件的自动删除不在 v1（删用户数据自动执行风险高，留复核）。
     """
@@ -9712,14 +9773,11 @@ def patrol_once(db, drive_api_factory, now=None):
     client = drive_api_factory()
     rows = db.query(em.TransferVariant).filter(
         em.TransferVariant.status == "ready").all()
-    # 旧逻辑只查 ready，stale 永不重验——#1575 修通道后旧 stale 行
-    # 也回不来。本单只把 stale 的 115/夸克行纳入重验（Drive stale
-    # 行的 get_file 验活口径不同，不在本单范围，仍排除）。
-    rows += db.query(em.TransferVariant).filter(
-        em.TransferVariant.status == "stale",
-        (em.TransferVariant.variant_drive_id.startswith("pan115:")
-         | em.TransferVariant.variant_drive_id.startswith("quark:"))).all()
     for row in rows:
+        if _dest_is_removed(row.variant_drive_id):
+            # 已下线 provider 的存量副本行：整行跳过，不发任何
+            # 夸克/115 请求（2026-11-02 删除单）。
+            continue
         stats["checked"] += 1
         item = (db.query(em.MediaItem)
                 .filter(em.MediaItem.id == row.item_id,

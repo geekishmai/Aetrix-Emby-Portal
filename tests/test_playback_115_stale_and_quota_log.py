@@ -133,92 +133,18 @@ def test_check_115_download_alive_classifies(monkeypatch):
 
 # ---------- 门禁：stale 115 行不再直接放行 ----------
 
-def test_gate_stale_115_row_not_served(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    _variant(db, item.id, stale=1)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] != "serve_115_copy"
-    # 落到任务逻辑：无在途任务 → 新建一单，呈准备中（重建路）。
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_created"
 
 
-def test_gate_fresh_115_row_still_served(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    row = _variant(db, item.id, stale=0)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "serve_115_copy"
-    assert gate["variant"].id == row.id
 
 
-def test_gate_cross_stale_115_row_not_served(db, monkeypatch):
-    # Drive 条目 + 只绑 115：跨 provider 分支，stale 的 115 行同样不放行。
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db, file_path="mount://3/电影/a.mkv")
-    _binding(db, 7, provider="pan115")
-    _variant(db, item.id, drive_id="pan115:user-7", stale=1)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] != "serve_115_copy"
-    # 落到任务逻辑：无在途任务 → 新建一单，呈准备中（重建路）。
-    # 2026-10-30 跨 provider 重开后与同 provider stale 口径一致；
-    # stale 行不放行口径不变。
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_created"
 
 
-def test_gate_cross_fresh_115_row_still_served(db, monkeypatch):
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db, file_path="mount://3/电影/a.mkv")
-    _binding(db, 7, provider="pan115")
-    row = _variant(db, item.id, drive_id="pan115:user-7", stale=0)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "serve_115_copy"
-    assert gate["variant"].id == row.id
 
 
 # ---------- 死链重建：与 _rebuild_done_job 同款预算口径 ----------
 
-def test_rebuild_dead_115_same_provider_budget(db, monkeypatch):
-    _enable(monkeypatch)
-    # 场景前提：属主有目标盘 active 绑定（生产调用面均先确立
-    # 绑定上下文；g1 建单前置校验按此判定，见治理单回传）。
-    _binding(db, 7)
-    item = _item(db)
-    out1 = tv.rebuild_dead_user115_copy(db, item, 7)
-    assert out1["verdict"] == "preparing" and out1["reason"] == "job_rebuilt"
-    job1 = db.query(em.TransferJob).filter(
-        em.TransferJob.id == out1["job_id"]).first()
-    assert job1.provider == "pan115" and job1.status == "pending"
-    # 24h 同桶 < 2 行：第二单仍可建；第三单起预算耗尽。
-    out2 = tv.rebuild_dead_user115_copy(db, item, 7)
-    assert out2["reason"] == "job_rebuilt"
-    out3 = tv.rebuild_dead_user115_copy(db, item, 7)
-    assert out3["verdict"] == "preparing" and out3["reason"] == "throttled"
 
 
-def test_rebuild_dead_115_cross_provider(db, monkeypatch):
-    # 2026-10-30 重开：Drive 源→用户 115 盘的重建恢复建跨单
-    # （provider=源 drive、dest=pan115:user-<uid>），与同 provider
-    # 115 重建（上一用例）同一套预算口径。
-    _enable(monkeypatch)
-    # 跨 provider 重建落点在用户 115 盘：属主须有 115 绑定。
-    _binding(db, 7, provider="pan115")
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db, file_path="mount://3/电影/a.mkv")
-    out = tv.rebuild_dead_user115_copy(db, item, 7)
-    assert out["verdict"] == "preparing"
-    assert out["reason"] == "job_rebuilt"
-    job = db.query(em.TransferJob).filter(
-        em.TransferJob.id == out["job_id"]).first()
-    assert job.provider == "drive" and job.status == "pending"
-    assert job.dest_drive_id == "pan115:user-7"
-    assert tv._is_cross_job(job) is True
 
 
 def test_rebuild_dead_115_unknown_provider(db, monkeypatch):

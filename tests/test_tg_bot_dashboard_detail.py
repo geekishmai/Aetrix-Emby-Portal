@@ -145,12 +145,14 @@ def test_bindings_line(db):
     assert "🔗 <b>网盘绑定</b> | Drive 已绑 ✓" in features.compact_dashboard(db, drive)
     pan = _user(db, tg=TG + 2, name="pan")
     _binding(db, pan.id, "pan115")
-    assert "🔗 <b>网盘绑定</b> | 115 已绑 ✓" in features.compact_dashboard(db, pan)
+    # 2026-11-02 夸克/115 绑盘线下线：只有 115 存量绑定的用户在
+    # 机器人展示口径里视为未绑定（115 行不再透出）。
+    assert "🔗 <b>网盘绑定</b> | 未绑定，绑定后才能点播" in features.compact_dashboard(db, pan)
     both = _user(db, tg=TG + 3, name="both")
     _binding(db, both.id, "drive")
     _binding(db, both.id, "pan115")
     text = features.compact_dashboard(db, both)
-    assert "Drive 已绑" in text and "115 已绑" in text
+    assert "Drive 已绑" in text and "115 已绑" not in text
     invalid = _user(db, tg=TG + 4, name="invalid")
     _binding(db, invalid.id, "drive", status="invalid")
     assert "🔗 <b>网盘绑定</b> | 未绑定，绑定后才能点播" in features.compact_dashboard(db, invalid)

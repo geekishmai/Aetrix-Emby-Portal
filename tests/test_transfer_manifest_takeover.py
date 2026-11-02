@@ -204,19 +204,6 @@ def test_manifest_trusted_sha1_partial_manifest_rejected(db):
     assert tman.manifest_trusted_sha1(db, key, len(_PAYLOAD)) is None
 
 
-def test_executor_uses_manifest_sha1_for_first_rapid(
-        db, monkeypatch, stage_env):
-    monkeypatch.setattr(tv, "_115_SIMPLE_UPLOAD_LIMIT", 1024)
-    _seed_manifest(db)
-    item = _item(db)  # 条目本身无 content_hash
-    _binding(db, 7)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    res = tv.run_transfer_job_once(db, _cross_job(db, item.id, user_id=7), sa)
-    assert res["outcome"] == "done"
-    # 秒传首查即带清单 sha1（无清单时首查只能带空串、先哈希后二查）
-    assert fake115.rapid_calls[0] == _PAYLOAD_SHA1
 
 
 # ---------- 续传恢复优先级：落盘行 > sidecar（接管开时） ----------
@@ -243,25 +230,8 @@ def _rewrite_db_session_upload_id(db, job_id, upload_id):
     db.commit()
 
 
-def test_db_session_wins_over_sidecar_when_takeover_on(
-        db, monkeypatch, stage_env):
-    item, job, fake115, sa = _run_fail_once(db, monkeypatch, stage_env)
-    # 落盘行比 sidecar 新（模拟 sidecar 写入后又有进展只落了 DB）
-    _rewrite_db_session_upload_id(db, job.id, "UP-DB")
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    resumed = fake115.multipart_calls[1]
-    assert resumed is not None and resumed.get("upload_id") == "UP-DB"
 
 
-def test_sidecar_wins_when_takeover_off(db, monkeypatch, stage_env):
-    tv.write_transfer_config(db, transfer_manifest_takeover_enabled=False)
-    item, job, fake115, sa = _run_fail_once(db, monkeypatch, stage_env)
-    _rewrite_db_session_upload_id(db, job.id, "UP-DB")
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    resumed = fake115.multipart_calls[1]
-    assert resumed is not None and resumed.get("upload_id") == "UP-1"
 
 
 # ---------- 调度合并 ----------
@@ -277,64 +247,9 @@ def _leader(db, item_id, user_id=7, lease_alive=True):
     return job
 
 
-def test_follower_defers_to_running_leader(db, monkeypatch, stage_env):
-    item = _item(db)
-    _binding(db, 7)
-    _binding(db, 8)
-    leader = _leader(db, item.id, user_id=7)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    follower = _cross_job(db, item.id, user_id=8)
-    res = tv.run_transfer_job_once(db, follower, sa)
-    assert res["outcome"] == "deferred"
-    assert res["leader_job_id"] == leader.id
-    db.refresh(follower)
-    assert follower.status == "pending"
-    assert follower.attempts == 0  # 让路不烧尝试次数
-    assert follower.error_kind is None
-    assert follower.next_retry_at is not None
-    assert sa.download_calls == 0  # 一字节源都没碰
 
 
-def test_follower_runs_when_leader_lease_expired(db, monkeypatch, stage_env):
-    item = _item(db)
-    _binding(db, 7)
-    _binding(db, 8)
-    _leader(db, item.id, user_id=7, lease_alive=False)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    follower = _cross_job(db, item.id, user_id=8)
-    res = tv.run_transfer_job_once(db, follower, sa)
-    assert res["outcome"] == "done"
 
 
-def test_no_merge_when_takeover_off(db, monkeypatch, stage_env):
-    tv.write_transfer_config(db, transfer_manifest_takeover_enabled=False)
-    item = _item(db)
-    _binding(db, 7)
-    _binding(db, 8)
-    _leader(db, item.id, user_id=7)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    follower = _cross_job(db, item.id, user_id=8)
-    res = tv.run_transfer_job_once(db, follower, sa)
-    assert res["outcome"] == "done"  # 接管关＝逐字旧行为，不让路
 
 
-def test_leader_completion_then_follower_uses_stage(
-        db, monkeypatch, stage_env):
-    item = _item(db)
-    _binding(db, 7)
-    _binding(db, 8)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    job7 = _cross_job(db, item.id, user_id=7)
-    assert tv.run_transfer_job_once(db, job7, sa)["outcome"] == "done"
-    calls_after_leader = sa.download_calls
-    job8 = _cross_job(db, item.id, user_id=8)
-    assert tv.run_transfer_job_once(db, job8, sa)["outcome"] == "done"
-    assert sa.download_calls == calls_after_leader  # 跟随单零重读源

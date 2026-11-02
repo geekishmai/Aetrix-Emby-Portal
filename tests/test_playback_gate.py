@@ -91,10 +91,18 @@ def test_gate_allows_active_drive(db):
     gate.ensure_binding_playback_allowed(db, user)
 
 
-def test_gate_allows_active_pan115(db):
+def test_gate_blocks_active_pan115_only(db):
+    # 夸克/115 绑定线已下线（2026-11-02 删除单）：只剩 115 绑定
+    # 的用户视为无绑定，门禁拦截。
     user = _user(db, "u1")
     _binding(db, user.id, "active", provider="pan115")
-    gate.ensure_binding_playback_allowed(db, user)
+    _assert_blocked(db, user.id)
+
+
+def test_gate_blocks_active_quark_only(db):
+    user = _user(db, "u1")
+    _binding(db, user.id, "active", provider="quark")
+    _assert_blocked(db, user.id)
 
 
 def test_gate_allows_active_among_invalid(db):

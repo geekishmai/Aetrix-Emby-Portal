@@ -228,12 +228,10 @@ def _bindings_line(db, user_id: int) -> str:
     )
     providers = {r.provider for r in rows}
     names = []
+    # 夸克/115 用户绑定线已下线（2026-11-02 删除单）：存量行不
+    # 再展示为「已绑」，账号卡只认 Drive。
     if "drive" in providers:
         names.append("Drive 已绑 ✓")
-    if "pan115" in providers:
-        names.append("115 已绑 ✓")
-    for p in sorted(providers - {"drive", "pan115"}):
-        names.append(f"{_esc(p)} 已绑 ✓")
     if not names:
         return "网盘：未绑定，绑定后才能点播"
     return "网盘：" + "、".join(names)

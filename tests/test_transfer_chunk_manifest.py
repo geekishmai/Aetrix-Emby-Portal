@@ -443,64 +443,9 @@ def _run_fail_then_done(db, monkeypatch, stage_env):
     return item, job, fake115, sa
 
 
-def test_executor_persists_delivery_and_manifest(db, monkeypatch, stage_env):
-    item, job, fake115, sa = _run_fail_then_done(db, monkeypatch, stage_env)
-    # 首尝失败后：交付行已落盘（active、会话与 part↔块映射齐）。
-    drow = db.query(em.TransferDelivery).filter_by(job_id=job.id).one()
-    assert drow.state == "active" and drow.dest_provider == "pan115"
-    assert drow.dest_ref == "900"
-    saved = json.loads(drow.session)
-    assert saved["upload_id"] == "UP-1"
-    assert saved["parts"] == [{"PartNumber": 1, "ETag": "E1",
-                               "chunk_from": 0, "chunk_to": 0}]
-    # 哈希遍已把清单长全：complete + 双锚 + 块哈希直算一致。
-    mrow = db.query(em.TransferContentManifest).one()
-    assert mrow.manifest_state == "complete"
-    assert mrow.whole_sha1 == _PAYLOAD_SHA1
-    assert mrow.whole_md5 == hashlib.md5(_PAYLOAD).hexdigest()
-    got = tm.unpack_chunk_hashes(mrow.chunk_hashes, mrow.chunk_bitmap,
-                                 mrow.chunk_count)
-    assert got == {0: hashlib.sha256(_PAYLOAD).hexdigest()}
-    # 再尝走 sidecar 续传 done：交付行转 completed、sidecar 清掉。
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    assert fake115.multipart_calls[1].get("upload_id") == "UP-1"
-    db.refresh(drow)
-    assert drow.state == "completed"
-    assert list(stage_env.glob("mp-*.json")) == []
 
 
-def test_executor_restores_session_from_db_when_sidecar_lost(
-        db, monkeypatch, stage_env):
-    item, job, fake115, sa = _run_fail_then_done(db, monkeypatch, stage_env)
-    for sidecar in stage_env.glob("mp-*.json"):
-        sidecar.unlink()  # 模拟容器重建把 stage/sidecar 清掉
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    resumed = fake115.multipart_calls[1]
-    assert resumed is not None and resumed.get("upload_id") == "UP-1"
-    # 恢复出的会话 parts 已归一（块映射字段不漏进执行面）。
-    assert resumed.get("parts") == [{"PartNumber": 1, "ETag": "E1"}]
 
 
-def test_executor_accounting_disabled_legacy_behavior(
-        db, monkeypatch, stage_env):
-    tv.write_transfer_config(db, transfer_manifest_accounting_enabled=False)
-    item, job, fake115, sa = _run_fail_then_done(db, monkeypatch, stage_env)
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    assert fake115.multipart_calls[1].get("upload_id") == "UP-1"  # sidecar 续传照旧
-    assert db.query(em.TransferDelivery).count() == 0
-    assert db.query(em.TransferContentManifest).count() == 0
 
 
-def test_executor_accounting_tables_missing_fail_open(
-        db, monkeypatch, stage_env):
-    bind = db.get_bind()
-    em.TransferDelivery.__table__.drop(bind)
-    em.TransferContentManifest.__table__.drop(bind)
-    item, job, fake115, sa = _run_fail_then_done(db, monkeypatch, stage_env)
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"  # 记账全灭，转存语义不受影响
-    db.refresh(job)
-    assert job.status == "done"

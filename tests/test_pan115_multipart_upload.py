@@ -203,177 +203,26 @@ def _variant_rows(db):
 
 # ---------- 路由：>上限走分片、恰上限走 simple、秒传命中不走分片 ----------
 
-def test_big_boundary_limit_plus_one_goes_multipart(db, monkeypatch):
-    _enable(monkeypatch)
-    size = _LIMIT + 1
-    item = _item(db, size=size, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="miss")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=size))
-    assert res["outcome"] == "done"
-    assert len(fake.rapid_calls) == 1  # 先试秒传（顺序写死）
-    assert len(fake.multipart_calls) == 1
-    assert fake.multipart_calls[0][1] == size
-    assert fake.multipart_calls[0][2] == _PAYLOAD_SHA1
-    assert fake.simple_calls == []  # 超限文件不许碰 simple_upload
-    row = _variant_rows(db)[0]
-    assert row.variant_file_id == "mpfid" and row.pickcode == "pcmp"
 
 
-def test_exactly_limit_uses_simple_not_multipart(db, monkeypatch):
-    _enable(monkeypatch)
-    size = _LIMIT
-    item = _item(db, size=size, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="miss")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=size))
-    assert res["outcome"] == "done"
-    assert fake.multipart_calls == []
-    assert len(fake.simple_calls) == 1
-    assert len(fake.simple_calls[0]) == size
 
 
-def test_rapid_hit_big_skips_multipart_and_simple(db, monkeypatch):
-    _enable(monkeypatch)
-    size = _LIMIT + 1
-    item = _item(db, size=size, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="hit")
-    _patch_cross(monkeypatch, fake)
-    sa = _FakeSA(size=size)
-    res = tv.run_transfer_job_once(db, job, sa)
-    assert res["outcome"] == "done"
-    assert fake.multipart_calls == [] and fake.simple_calls == []
-    assert sa.download_calls == 0  # 命中不搬一字节、也不算哈希
 
 
 # ---------- 分片失败口径：不登记变体、error_kind 细分 ----------
 
-def test_multipart_part_failure_fails_job_no_variant(db, monkeypatch):
-    # 与 simple 腿同一失败口径：Pan115Error 走有界重试，attempts
-    # 耗尽后 failed/retriable；全程不登记变体、不回落 simple。
-    _enable(monkeypatch)
-    size = _LIMIT + 1
-    item = _item(db, size=size, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    job.attempts = tv.MAX_ATTEMPTS - 1  # 门控在 attempts>=MAX 时直接终态，预设 MAX 会截走本次运行、丢分片文案；留一次让本次真实走完分片失败再耗尽
-    db.commit()
-    fake = _FakeUser115(rapid="miss", multipart="error")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=size))
-    assert res["outcome"] == "failed"
-    db.refresh(job)
-    assert job.error_kind == "retriable"
-    assert "分片" in (job.error_detail or "") or \
-        "OSS" in (job.error_detail or "")
-    assert _variant_rows(db) == []
-    assert fake.simple_calls == []  # 失败不静默回落 simple（也装不下）
 
 
-def test_multipart_dir_match_failure_copy_unresolved(db, monkeypatch):
-    _enable(monkeypatch)
-    size = _LIMIT + 1
-    item = _item(db, size=size, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="miss", multipart="no_place")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=size))
-    assert res["outcome"] == "failed"
-    assert res["error_kind"] == "copy_unresolved"
-    assert _variant_rows(db) == []
 
 
-def test_multipart_sha1_mismatch_fails(db, monkeypatch):
-    # 分片路从严：回调 sha1 与源端透传 sha1 不一致 = 落盘字节与源
-    # 不是同一份（多段拼接），判失败不登记（与 simple 路回调优先
-    # 的口径区别在此，分片拼接没有「以回调为准」的余地）。
-    _enable(monkeypatch)
-    size = _LIMIT + 1
-    stream_sha1 = hashlib.sha1(_PAYLOAD[:size]).hexdigest()
-    item = _item(db, size=size, content_hash=stream_sha1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    wrong = hashlib.sha1(b"someone-elses-bytes").hexdigest()
-    fake = _FakeUser115(rapid="miss", multipart="read_all",
-                        callback_sha1=wrong)
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=size))
-    assert res["outcome"] == "failed"
-    assert res["error_kind"] == "remote_error"
-    db.refresh(job)
-    assert "sha1" in (job.error_detail or "")
-    assert _variant_rows(db) == []
 
 
-def test_multipart_auth_error_marks_binding(db, monkeypatch):
-    _enable(monkeypatch)
-    size = _LIMIT + 1
-    item = _item(db, size=size, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    binding = _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="miss", multipart="auth")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=size))
-    assert res["outcome"] == "failed"
-    assert res["error_kind"] == "auth_error"
-    db.refresh(binding)
-    assert binding.status != "active"
-    assert _variant_rows(db) == []
 
 
 # ---------- 无可信 sha1 的大文件：先流式算哈希，再试秒传/分片 ----------
 
-def test_no_sha1_big_hash_pass_then_multipart(db, monkeypatch):
-    _enable(monkeypatch)
-    size = _LIMIT + 1
-    expect_sha1 = hashlib.sha1(_PAYLOAD[:size]).hexdigest()
-    item = _item(db, size=size)  # 无 content_hash
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="miss")
-    _patch_cross(monkeypatch, fake)
-    sa = _FakeSA(size=size)
-    res = tv.run_transfer_job_once(db, job, sa)
-    assert res["outcome"] == "done"
-    assert sa.download_calls > 0  # 哈希遍真过了源字节
-    # 算完的 sha1 先喂秒传、再喂分片（顺序不变）
-    assert fake.rapid_calls[0][2] == expect_sha1
-    assert fake.multipart_calls[0][2] == expect_sha1
-    db.refresh(item)
-    assert item.content_hash_algo == "sha1"
-    assert item.content_hash == expect_sha1  # 沉淀给下一单
 
 
-def test_no_sha1_small_no_hash_pass(db, monkeypatch):
-    # 小文件维持现行口径：不为算哈希多下一整遍给 simple 添堵——
-    # 哈希只在流经 simple 的那一程顺手沉淀（rapid 文件已有同名
-    # 用例，此处只钉「无 sha1 小文件不试秒传、直接 simple」）。
-    _enable(monkeypatch)
-    size = _LIMIT
-    item = _item(db, size=size)
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="hit")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=size))
-    assert res["outcome"] == "done"
-    assert fake.rapid_calls == []
-    assert fake.multipart_calls == []
-    assert len(fake.simple_calls) == 1
 
 
 # ---------- 开关：pan115_multipart_upload_enabled（#1454 口径） ----------
@@ -386,39 +235,8 @@ def test_multipart_switch_default_on(db):
     assert payload["pan115_multipart_upload_enabled"] is True
 
 
-def test_multipart_switch_off_big_unsupported_no_hash_pass(db, monkeypatch):
-    _enable(monkeypatch)
-    tv.write_transfer_config(db, pan115_multipart_upload_enabled=False)
-    assert tv.pan115_multipart_upload_enabled(db) is False
-    size = _LIMIT + 1
-    item = _item(db, size=size)  # 无 sha1：开关关时不许白算哈希遍
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="miss")
-    _patch_cross(monkeypatch, fake)
-    sa = _FakeSA(size=size)
-    res = tv.run_transfer_job_once(db, job, sa)
-    assert res["outcome"] == "failed"
-    assert res["error_kind"] == "unsupported"
-    assert sa.download_calls == 0
-    assert fake.multipart_calls == [] and fake.simple_calls == []
 
 
-def test_multipart_switch_off_with_sha1_rapid_still_tried(db, monkeypatch):
-    # 开关只管分片路：有可信 sha1 时秒传照试，命中与大小无关。
-    _enable(monkeypatch)
-    tv.write_transfer_config(db, pan115_multipart_upload_enabled=False)
-    size = _LIMIT + 1
-    item = _item(db, size=size, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="hit")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=size))
-    assert res["outcome"] == "done"
-    assert len(fake.rapid_calls) == 1
-    assert fake.multipart_calls == []
 
 
 # ---------- 客户端协议（p115oss/py115 对照，测试侧独立加解密） ----------

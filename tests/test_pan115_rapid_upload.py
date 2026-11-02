@@ -187,185 +187,36 @@ def _patch_cross(monkeypatch, fake115):
 
 # ---------- ① 全量上传后 sha1 沉淀 ----------
 
-def test_cross_upload_persists_sha1(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115()
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "done"
-    assert fake.simple_calls == [_PAYLOAD]  # 字节真流过一遍
-    assert fake.rapid_calls == []  # 无存量 sha1 时不试秒传、不多下整遍
-    db.refresh(item)
-    assert item.content_hash_algo == "sha1"
-    assert item.content_hash == _PAYLOAD_SHA1
 
 
-def test_cross_upload_callback_sha1_wins_over_stream(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    other = hashlib.sha1(b"other-bytes").hexdigest()
-    fake = _FakeUser115(callback_sha1=other)
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "done"
-    db.refresh(item)
-    # 取舍：回调是 115 对实际落盘字节算的哈希（目标端事实），赢源端透传值
-    assert item.content_hash == other
 
 
-def test_cross_upload_md5_overwritten_by_sha1(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db, content_hash=hashlib.md5(_PAYLOAD).hexdigest(),
-                 content_hash_algo="md5")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115()
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "done"
-    assert fake.rapid_calls == []  # md5 不是可信 sha1，不许拿去试秒传
-    db.refresh(item)
-    assert item.content_hash_algo == "sha1"
-    assert item.content_hash == _PAYLOAD_SHA1
 
 
 # ---------- ② 秒传命中不消费字节读取器 ----------
 
-def test_cross_rapid_hit_skips_byte_reader(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db, content_hash=_PAYLOAD_SHA1, content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="hit")
-    _patch_cross(monkeypatch, fake)
-    sa = _FakeSA()
-    res = tv.run_transfer_job_once(db, job, sa)
-    assert res["outcome"] == "done"
-    assert len(fake.rapid_calls) == 1
-    assert fake.simple_calls == []
-    assert sa.download_calls == 0  # 全程没碰字节读取器
-    row = db.query(em.TransferVariant).one()
-    assert row.variant_file_id == "rapidfid" and row.pickcode == "pcrapid"
 
 
-def test_cross_rapid_sign_check_uses_range_reader(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db, content_hash=_PAYLOAD_SHA1, content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="sign_then_hit")
-    _patch_cross(monkeypatch, fake)
-    sa = _FakeSA()
-    res = tv.run_transfer_job_once(db, job, sa)
-    assert res["outcome"] == "done"
-    assert fake.sign_ranges == [_PAYLOAD[0:100]]  # 区间字节来自源 Range
-    assert fake.simple_calls == []
 
 
 # ---------- ③ 未命中回落 simple_upload ----------
 
-def test_cross_rapid_miss_falls_back_to_simple_upload(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db, content_hash=_PAYLOAD_SHA1, content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="miss")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "done"
-    assert len(fake.rapid_calls) == 1
-    assert fake.simple_calls == [_PAYLOAD]
-    row = db.query(em.TransferVariant).one()
-    assert row.variant_file_id == "upfid"
 
 
 # ---------- ⑤ 协议异常回落不失败 ----------
 
-def test_cross_rapid_error_falls_back_not_fail(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db, content_hash=_PAYLOAD_SHA1, content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="error")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "done"
-    assert len(fake.rapid_calls) == 1
-    assert fake.simple_calls == [_PAYLOAD]
 
 
-def test_cross_rapid_auth_error_marks_binding(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db, content_hash=_PAYLOAD_SHA1, content_hash_algo="sha1")
-    binding = _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="auth")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "failed"
-    assert res["error_kind"] == "auth_error"
-    assert fake.simple_calls == []  # 鉴权失败不许回落去撞第二次
-    db.refresh(binding)
-    assert binding.status != "active"
 
 
 # ---------- ④ >5 GiB：命中可 done、未命中走分片 ----------
 
-def test_cross_big_rapid_hit_done(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db, size=_BIG_SIZE, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="hit")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=_BIG_SIZE))
-    assert res["outcome"] == "done"
-    assert fake.simple_calls == []
-    row = db.query(em.TransferVariant).one()
-    assert row.variant_file_id == "rapidfid"
 
 
-def test_cross_big_rapid_miss_goes_multipart(db, monkeypatch):
-    # 行为变更（2026-10-30 分片上传根治单）：>5 GiB 秒传未命中
-    # 不再判 unsupported，改走 multipart_upload；simple 仍不许碰
-    # 超限文件。分片路细账在 test_pan115_multipart_upload.py。
-    _enable(monkeypatch)
-    item = _item(db, size=_BIG_SIZE, content_hash=_PAYLOAD_SHA1,
-                 content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="miss")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA(size=_BIG_SIZE))
-    assert res["outcome"] == "done"
-    assert len(fake.rapid_calls) == 1  # 先试了秒传才轮到分片
-    assert len(fake.multipart_calls) == 1
-    assert fake.simple_calls == []
-    row = db.query(em.TransferVariant).one()
-    assert row.variant_file_id == "mpfid"
 
 
 # ---------- 开关：关时不试秒传 ----------
 
-def test_rapid_switch_off_skips_attempt(db, monkeypatch):
-    _enable(monkeypatch)
-    tv.write_transfer_config(db, pan115_rapid_upload_enabled=False)
-    assert tv.pan115_rapid_upload_enabled(db) is False
-    item = _item(db, content_hash=_PAYLOAD_SHA1, content_hash_algo="sha1")
-    _binding(db, 7)
-    job = _cross_job(db, item.id)
-    fake = _FakeUser115(rapid="hit")
-    _patch_cross(monkeypatch, fake)
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "done"
-    assert fake.rapid_calls == []
-    assert fake.simple_calls == [_PAYLOAD]
 
 
 def test_rapid_switch_default_on(db):
@@ -446,38 +297,6 @@ def test_cross_115_to_drive_persists_source_sha1(db, monkeypatch):
     assert item.content_hash == _PAYLOAD_SHA1
 
 
-def test_same_provider_115_copy_persists_dir_sha1(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db, file_path="mount://9/电影/a.mkv", size=len(_PAYLOAD))
-    _binding(db, 7)
-    job = _cross_job(db, item.id, provider="pan115", dest="pan115:user-7",
-                     drive_id="pan115:mount-9")
-
-    class _FakeCopy115:
-        def __init__(self):
-            self.dirs = {"0": [{"cid": "d1", "name": "aetrix-transfer",
-                                "is_dir": True}],
-                         "d1": []}
-
-        def list_dir(self, cid="0", limit=200):
-            return [dict(e) for e in self.dirs.get(cid or "0", [])]
-
-        def mkdir(self, parent_cid, name):
-            return {}
-
-        def copy_file(self, source_fid, dest_cid):
-            self.dirs["d1"].append(
-                {"fid": "newfid", "cid": "c-new", "name": "a.mkv",
-                 "is_dir": False, "size": len(_PAYLOAD),
-                 "pickcode": "PC-NEW", "sha1": _PAYLOAD_SHA1})
-            return {"fid": "newfid", "pickcode": "PC-NEW"}
-
-    _patch_cross(monkeypatch, _FakeCopy115())
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "done"
-    db.refresh(item)
-    assert item.content_hash_algo == "sha1"
-    assert item.content_hash == _PAYLOAD_SHA1
 
 
 # ---------- 客户端协议（p115cipher 对照，测试侧独立加解密） ----------

@@ -152,13 +152,11 @@ def _latest_user_job(db, episode_id, user_id):
 
 
 def _ready_variant(db, episode_id, user_id):
-    return (db.query(em.TransferVariant)
-            .filter(em.TransferVariant.item_id == episode_id,
-                    em.TransferVariant.owner_scope == "user",
-                    em.TransferVariant.owner_ref == str(user_id),
-                    em.TransferVariant.status == "ready")
-            .order_by(em.TransferVariant.id.desc())
-            .first())
+    # 走 transfer_variant._newest_ready 单口：已下线 provider 的
+    # 存量副本行（夸克/115）在那里统一过滤、视为不存在。
+    from backend.emby_server import transfer_variant as tv
+
+    return tv._newest_ready(db, episode_id, "user", str(user_id))
 
 
 def process_series_follows(db) -> dict:

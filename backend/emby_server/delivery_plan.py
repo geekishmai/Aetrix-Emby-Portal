@@ -124,14 +124,21 @@ def write_config(db, *, enabled: bool, ttl_sec: int) -> dict:
 def _probe_user_copy_ready(db, user_id, item):
     """本人 ready 副本腿：与 transfer_variant._newest_ready 的
     user 分支同口径（item + owner_scope=user + owner_ref 本人
-    + status=ready，id 倒序取 1）。绝不把别人的副本写进计划。"""
-    row = (db.query(em.TransferVariant)
-           .filter(em.TransferVariant.item_id == item.id,
-                   em.TransferVariant.owner_scope == "user",
-                   em.TransferVariant.owner_ref == str(user_id),
-                   em.TransferVariant.status == "ready")
-           .order_by(em.TransferVariant.id.desc())
-           .first())
+    + status=ready，id 倒序取 1）。绝不把别人的副本写进计划。
+    已下线 provider 的副本行（quark:/pan115: 前缀，2026-11-02
+    删除单）不算腿：取最近若干行逐行过滤，与 _newest_ready 同口径。"""
+    row = None
+    for cand in (db.query(em.TransferVariant)
+                 .filter(em.TransferVariant.item_id == item.id,
+                         em.TransferVariant.owner_scope == "user",
+                         em.TransferVariant.owner_ref == str(user_id),
+                         em.TransferVariant.status == "ready")
+                 .order_by(em.TransferVariant.id.desc())
+                 .limit(20).all()):
+        if (cand.variant_drive_id or "").startswith(("quark:", "pan115:")):
+            continue
+        row = cand
+        break
     if row is None:
         return None
     return {"leg": "user_copy_ready", "state": "ready",
@@ -366,6 +373,8 @@ def plan_ready_leg(db, item, user):
           and row.owner_scope == "user"
           and row.owner_ref == str(user_id)
           and int(row.item_id) == int(item.id)
+          and not (row.variant_drive_id or "").startswith(
+              ("quark:", "pan115:"))
           and bool((row.variant_file_id or "").strip()))
     if not ok:
         logger.info("delivery_plan outcome=fallback user=%s item=%s "

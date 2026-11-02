@@ -338,8 +338,9 @@ def test_flag_on_member_mapped_want_master_off_failed(client, db, engine, monkey
     assert _jobs(engine) == 0
 
 
-def test_flag_on_member_pan115_want_enqueues(client, db, engine, monkeypatch):
-    """115 条目 + 115 绑定：走 pan115 分支真建任务。"""
+def test_flag_on_member_pan115_want_removed_failed(client, db, engine, monkeypatch):
+    """115 条目想看：115 用户绑定线已下线（2026-11-02 删除单），
+    明示不支持、不建任务（不再走 pan115 分支建单）。"""
     monkeypatch.setenv("STORE_ENABLED", "1")
     monkeypatch.setenv("TRANSFER_VARIANT_ENABLED", "1")
     user = _user(db, "member-115")
@@ -350,15 +351,13 @@ def test_flag_on_member_pan115_want_enqueues(client, db, engine, monkeypatch):
     want = client.post("/api/user/store/want", json={"tmdb_id": "607"})
     assert want.status_code == 200, want.text
     body = want.json()
-    assert body["state"] == "wanted"
-    assert body["job_id"] is not None
-    job = _job_rows(engine)[0]
-    assert job.provider == "pan115"
-    assert job.dest_drive_id == f"pan115:user-{user.id}"
+    assert body["state"] == "failed"
+    assert "已下线" in body["message"]
+    assert _jobs(engine) == 0
 
 
 def test_flag_on_member_pan115_want_no_fid_failed(client, db, engine, monkeypatch):
-    """115 条目无源 fid：无从 copy，不建任务。"""
+    """115 条目无源 fid：下线口径优先于无 fid 口径，同样明示已下线、不建任务。"""
     monkeypatch.setenv("STORE_ENABLED", "1")
     monkeypatch.setenv("TRANSFER_VARIANT_ENABLED", "1")
     user = _user(db, "member-115-nofid")
@@ -372,7 +371,7 @@ def test_flag_on_member_pan115_want_no_fid_failed(client, db, engine, monkeypatc
     assert want.status_code == 200, want.text
     body = want.json()
     assert body["state"] == "failed"
-    assert body["message"] == NO_SOURCE_FID_MESSAGE
+    assert "已下线" in body["message"]
     assert _jobs(engine) == 0
 
 

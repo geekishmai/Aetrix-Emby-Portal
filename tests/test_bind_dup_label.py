@@ -111,99 +111,20 @@ def _count_bindings(db):
     return db.query(em.UserStorageBinding).count()
 
 
-def test_same_label_same_cookie_idempotent(db, _stub_client):
-    first = _bind(db)
-    assert first.status == "active"
-    calls_after_first = dict(_StubQuarkClient.calls)
-    again = _bind(db)
-    assert again.id == first.id
-    assert again.status == "active"
-    assert _count_bindings(db) == 1
-    # 幂等返回已有行：不重验、不建第二行凭据
-    assert _StubQuarkClient.calls == calls_after_first
-    assert db.query(em.MountCredential).count() == 1
 
 
-def test_same_label_rotated_cookie_idempotent(db, _stub_client):
-    _StubQuarkClient.rotate_to = ROTATED_COOKIE
-    first = _bind(db)
-    assert first.status == "active"
-    # 库里存的是轮换后的 Cookie；原 Cookie 重提仍算同一凭据
-    stored = unseal_secret(db.query(em.MountCredential).filter(
-        em.MountCredential.id == first.credential_id).first().sealed_credential)
-    assert stored == ROTATED_COOKIE
-    again = _bind(db, cookie=FAKE_COOKIE)
-    assert again.id == first.id
-    assert _count_bindings(db) == 1
 
 
-def test_same_label_different_cookie_conflict(db, _stub_client):
-    _bind(db)
-    with pytest.raises(ub.BindingError) as excinfo:
-        _bind(db, cookie=OTHER_COOKIE)
-    assert excinfo.value.kind == "conflict"
-    assert "换个名字" in excinfo.value.message
-    assert _count_bindings(db) == 1
 
 
-def test_same_label_same_cookie_failed_row_returned_as_is(db, _stub_client):
-    _StubQuarkClient.behavior = "auth_error"
-    failed = _bind(db)
-    assert failed.status == "expired"
-    again = _bind(db)
-    assert again.id == failed.id
-    assert again.status == "expired"
-    assert _count_bindings(db) == 1
 
 
-def test_different_user_same_label_independent(db, _stub_client):
-    a = _bind(db, user_id=7, label="1")
-    b = _bind(db, user_id=8, label="1")
-    assert a.id != b.id
-    assert _count_bindings(db) == 2
 
 
-def test_different_label_normal_create(db, _stub_client):
-    a = _bind(db, label="1")
-    b = _bind(db, label="2")
-    assert a.id != b.id
-    assert _count_bindings(db) == 2
 
 
-def test_insert_race_branch_same_cookie_returns_existing(db, _stub_client):
-    """竞态分支（真实约束冲突）：_insert_binding_row 撞唯一约束时，
-    回滚后按同凭据幂等返回已有行，不抛 IntegrityError、不建第二行。"""
-    first = _bind(db)
-    cred = em.MountCredential(
-        mount_id=None, scope="user", owner_user_id=7,
-        sealed_credential="x", key_id="fernet-v1", status="invalid")
-    db.add(cred)
-    db.flush()
-    rival = em.UserStorageBinding(
-        user_id=7, provider="quark", account_label="1",
-        credential_id=cred.id, status="invalid")
-    returned, created = ub._insert_binding_row(
-        db, rival, 7, "quark", "1", FAKE_COOKIE)
-    assert created is False
-    assert returned.id == first.id
-    assert _count_bindings(db) == 1
 
 
-def test_insert_race_branch_different_cookie_conflict(db, _stub_client):
-    """竞态分支（真实约束冲突）：凭据不同时 409，不 500、不建第二行。"""
-    _bind(db)
-    cred = em.MountCredential(
-        mount_id=None, scope="user", owner_user_id=7,
-        sealed_credential="x", key_id="fernet-v1", status="invalid")
-    db.add(cred)
-    db.flush()
-    rival = em.UserStorageBinding(
-        user_id=7, provider="quark", account_label="1",
-        credential_id=cred.id, status="invalid")
-    with pytest.raises(ub.BindingError) as excinfo:
-        ub._insert_binding_row(db, rival, 7, "quark", "1", OTHER_COOKIE)
-    assert excinfo.value.kind == "conflict"
-    assert _count_bindings(db) == 1
 
 
 def test_same_credential_helper_ignores_rotation_fields():
@@ -219,58 +140,3 @@ def test_same_credential_helper_ignores_rotation_fields():
     assert ub._same_credential("a=1; bare", "a=1; other") is False
 
 
-def test_concurrent_double_submit_idempotent(tmp_path, _stub_client):
-    """真实竞态：两线程同用户同 label 同凭据并发建绑，最终只一行。
-
-    文件库 + busy timeout：第二线程的 INSERT 在第一线程提交前被
-    唯一约束拦下（或被写锁排队到提交后），修后口径必须幂等返回
-    已有行、两线程都不 500（即都不抛 IntegrityError）。
-    """
-    engine = create_engine(
-        f"sqlite:///{tmp_path}/race.db",
-        connect_args={"check_same_thread": False, "timeout": 15})
-    base_models.Base.metadata.create_all(engine)
-    em.Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine)
-
-    entered_verify = threading.Event()
-
-    class _SlowStub(_StubQuarkClient):
-        def check(self):
-            entered_verify.set()
-            threading.Event().wait(0.6)
-            return super().check()
-
-    results = {}
-
-    def worker(name):
-        session = factory()
-        try:
-            b = ub.create_binding(session, 7, "quark", "1", FAKE_COOKIE)
-            results[name] = ("ok", b.id, b.status)
-        except Exception as exc:  # noqa: BLE001 — 记录后断言
-            results[name] = ("error", type(exc).__name__, str(exc))
-        finally:
-            session.close()
-
-    orig_client = ub.quarkdrive.QuarkClient
-    ub.quarkdrive.QuarkClient = _SlowStub
-    try:
-        t1 = threading.Thread(target=worker, args=("t1",))
-        t1.start()
-        assert entered_verify.wait(timeout=10)
-        t2 = threading.Thread(target=worker, args=("t2",))
-        t2.start()
-        t1.join(timeout=20)
-        t2.join(timeout=20)
-    finally:
-        ub.quarkdrive.QuarkClient = orig_client
-
-    assert results["t1"][0] == "ok", results
-    assert results["t2"][0] == "ok", results
-    assert results["t1"][1] == results["t2"][1]
-    session = factory()
-    try:
-        assert session.query(em.UserStorageBinding).count() == 1
-    finally:
-        session.close()

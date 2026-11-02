@@ -460,27 +460,6 @@ def test_gate_no_binding_proceeds(db, monkeypatch):
     assert db.query(em.TransferJob).count() == 0
 
 
-def test_gate_provider_mismatch_goes_cross(db, monkeypatch):
-    # 2026-10-26 20:54 定版（2026-10-29 曾关停、2026-10-30 用户
-    # 亲点重开恢复）：错配不放行共享链，只绑另一 provider 时走
-    # 跨 provider 转存（绑哪播哪），门禁呈准备中。
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_created"
-    job = db.query(em.TransferJob).one()
-    assert job.provider == "drive" and job.owner_scope == "user"
-    assert job.owner_ref == "7" and job.drive_id == "drive1"
-    assert job.dest_drive_id == "pan115:user-7" and job.status == "pending"
-    assert tv._is_cross_job(job) is True
-    # 准备中文案（2026-10-30 口径 5）：说清片在哪边盘、绑的哪边、
-    # 正在往绑的盘转、备好再播，不许只给笼统失败。
-    assert "谷歌盘" in gate["detail"]
-    assert "115 网盘" in gate["detail"]
-    assert "转存完成后即可播放" in gate["detail"]
 
 
 def test_gate_creates_user_job_preparing(db, monkeypatch):
@@ -587,20 +566,6 @@ def test_gate_done_job_with_ready_copy_proceeds(db, monkeypatch):
     assert db.query(em.TransferJob).count() == 1
 
 
-def test_gate_cross_done_job_copy_gone_rebuilds(db, monkeypatch):
-    # 跨 provider 同款：只绑 115 的用户，跨单 done 但 115 副本没了。
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    _user_job(db, item.id, 7, provider="pan115", status="done")
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_rebuilt"
-    new_job = db.query(em.TransferJob).order_by(
-        em.TransferJob.id.desc()).first()
-    assert new_job.status == "pending"
-    assert new_job.dest_drive_id == "pan115:user-7"
 
 
 def test_wait_for_transfer_ready_accepts_rebuilt():
@@ -780,25 +745,6 @@ def test_gate_failed_retriable_old_job_outside_window(db, monkeypatch):
     assert db.query(em.TransferJob).count() == 2
 
 
-def test_gate_failed_retriable_cross_retriggers(db, monkeypatch):
-    # 跨 provider 分支同款：只绑 115 的用户播 Drive 条目，跨单失败
-    # 可重试时同样重触发跨单，不永久 409。
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    job = _user_job(db, item.id, 7, provider="pan115", status="failed")
-    job.error_kind = "retriable"
-    db.commit()
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_retriggered"
-    assert db.query(em.TransferJob).count() == 2
-    new_job = db.query(em.TransferJob).order_by(
-        em.TransferJob.id.desc()).first()
-    assert new_job.status == "pending" and new_job.provider == "drive"
-    assert new_job.dest_drive_id == "pan115:user-7"
-    assert tv._is_cross_job(new_job) is True
 
 
 def test_wait_for_transfer_ready_accepts_retriggered():
@@ -1213,35 +1159,6 @@ def test_is_cross_job_shapes():
     assert tv._is_cross_job(same_pan) is False
 
 
-def test_gate_cross_drive_to_115_flow(db, monkeypatch):
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:shared1")
-    item = _item(db, file_path="mount://3/电影/a.mkv", size=len(_PAYLOAD))
-    _binding(db, 7, provider="pan115")  # 只绑 115，条目是 Drive
-    out = tv.ensure_user_copy_gate(db, item, _user(7))
-    assert out["verdict"] == "preparing" and out["reason"] == "job_created"
-    job = db.query(em.TransferJob).filter(
-        em.TransferJob.id == out["job_id"]).first()
-    assert job.provider == "drive"
-    assert job.dest_drive_id == "pan115:user-7"
-    out2 = tv.ensure_user_copy_gate(db, item, _user(7))
-    assert out2["verdict"] == "preparing"
-    assert out2["reason"] == "job_in_flight"
-    fake115 = _FakeUser115()
-    monkeypatch.setattr(tv, "_make_pan115_client", lambda cookie: fake115)
-    monkeypatch.setattr("backend.emby_server.user_bindings.binding_115_cookie",
-                        lambda db_, uid, bid: "cookie-115")
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "done"
-    assert fake115.uploaded[2] == _PAYLOAD  # 字节真从读取器流过
-    row = db.query(em.TransferVariant).filter(
-        em.TransferVariant.item_id == item.id).first()
-    assert row.status == "ready"
-    assert row.variant_drive_id == "pan115:user-7"
-    assert row.pickcode == "pc115"
-    out3 = tv.ensure_user_copy_gate(db, item, _user(7))
-    assert out3["verdict"] == "serve_115_copy"
-    assert out3["variant"].id == row.id
 
 
 def test_gate_cross_115_to_drive_flow(db, monkeypatch):
@@ -1357,49 +1274,8 @@ def test_segment_reader_window_refill(monkeypatch):
         reader.seek(len(data) + 1)
 
 
-def test_cross_drive_to_115_over_limit_unsupported(db, monkeypatch):
-    # 行为变更（2026-10-30 分片上传根治单）：>上限默认走分片
-    # 上传（新路径见 test_pan115_multipart_upload.py）；本用例关
-    # 掉分片开关，钉住「开关关 = 维持旧口径判 unsupported」回退线。
-    _enable(monkeypatch)
-    tv.write_transfer_config(db, pan115_multipart_upload_enabled=False)
-    _mount(db, 3, "drive", "drive:shared1")
-    item = _item(db, file_path="mount://3/电影/a.mkv", size=1)
-    _binding(db, 7, provider="pan115")
-    job = _cross_job(db, item.id, 7, "drive", "pan115:user-7",
-                     drive_id="shared1")
-    monkeypatch.setattr("backend.emby_server.user_bindings.binding_115_cookie",
-                        lambda db_, uid, bid: "cookie-115")
-
-    class _BigSA(_FakeSA):
-        def get_file(self, drive_id, fid):
-            return {"id": fid, "size": tv._115_SIMPLE_UPLOAD_LIMIT + 1}
-
-    res = tv.run_transfer_job_once(db, job, _BigSA())
-    assert res["outcome"] == "failed"
-    assert res["error_kind"] == "unsupported"
 
 
-def test_cross_drive_to_115_unresolved(db, monkeypatch):
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:shared1")
-    item = _item(db, file_path="mount://3/电影/a.mkv", size=len(_PAYLOAD))
-    _binding(db, 7, provider="pan115")
-    job = _cross_job(db, item.id, 7, "drive", "pan115:user-7",
-                     drive_id="shared1")
-
-    class _EmptyDir115(_FakeUser115):
-        def simple_upload(self, fileobj, filename, pid):
-            fileobj.read()  # 字节流过，但目录里不出现新文件
-            return {"fid": "ghostfid", "pickcode": "", "raw": {}}
-
-    monkeypatch.setattr(tv, "_make_pan115_client",
-                        lambda cookie: _EmptyDir115())
-    monkeypatch.setattr("backend.emby_server.user_bindings.binding_115_cookie",
-                        lambda db_, uid, bid: "cookie-115")
-    res = tv.run_transfer_job_once(db, job, _FakeSA())
-    assert res["outcome"] == "failed"
-    assert res["error_kind"] == "copy_unresolved"
 
 
 def test_cross_115_to_drive_source_gone(db, monkeypatch):
@@ -1504,15 +1380,6 @@ def test_gate_bound_no_drive_file_failed(db, monkeypatch):
     assert db.query(em.TransferJob).count() == 0
 
 
-def test_gate_cross_bound_no_drive_file_failed(db, monkeypatch):
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db, drive_file_id="")
-    _binding(db, 7, provider="pan115")
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "failed"
-    assert gate["reason"] == "no_drive_file"
-    assert db.query(em.TransferJob).count() == 0
 
 
 def test_gate_bound_missing_item_id_failed(db, monkeypatch):
@@ -1618,23 +1485,6 @@ def test_quota_new_key_enqueues_once(db, monkeypatch, caplog):
         {"action": "skipped", "reason": "auto_off"}, bound=False)["failover"] is True
 
 
-def test_quota_pan115_bound_user_job_not_source(db, monkeypatch):
-    _enable(monkeypatch)
-    _clear_quota_flags(monkeypatch)
-    monkeypatch.setenv("TRANSFER_VARIANT_QUOTA_AUTO_ENQUEUE", "1")
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    result = tv.note_quota_signal(db, item, _user(), None, "drive1")
-    # 2026-10-30 重开恢复：quota 信号给只绑 115 的用户建跨单
-    # （用户副本），绝不退回建服主 source 任务。
-    assert result["action"] == "queued"
-    job = db.query(em.TransferJob).one()
-    assert job.owner_scope == "user"
-    assert job.owner_ref == "7"
-    assert job.dest_drive_id == "pan115:user-7"
-    assert job.provider == "drive"
-    assert job.trigger == "auto"
 
 
 def test_quota_pan115_bound_auto_off_no_source_job(db, monkeypatch):
@@ -1661,108 +1511,14 @@ def _set_sysconfig(db, key, value):
     store.invalidate()
 
 
-def test_gate_provider_mismatch_switch_off(db, monkeypatch):
-    # 总开关关 = 完整回 #1487 关停口径：不建单、failed 明示、
-    # detail 就是停用说明、且不回落共享（verdict 不是 proceed）。
-    _enable(monkeypatch)
-    _set_sysconfig(db, "cross_provider_transfer_enabled", "false")
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "failed"
-    assert gate["reason"] == "cross_provider_relay_disabled"
-    assert gate["detail"] == tv.CROSS_PROVIDER_DISABLED_DETAIL
-    assert db.query(em.TransferJob).count() == 0
 
 
-def test_cross_worker_switch_off_terminals_without_moving_bytes(
-        db, monkeypatch):
-    # 开关关时在途跨单被工人领取直接终态（回关停口径），且零搬运：
-    # SA 下载/115 上传桩必须零调用。
-    _enable(monkeypatch)
-    _set_sysconfig(db, "cross_provider_transfer_enabled", "false")
-    _mount(db, 3, "drive", "drive:shared1")
-    item = _item(db, file_path="mount://3/电影/a.mkv", size=len(_PAYLOAD))
-    _binding(db, 7, provider="pan115")
-    job = _cross_job(db, item.id, 7, "drive", "pan115:user-7",
-                     drive_id="shared1")
-    fake115 = _FakeUser115()
-    monkeypatch.setattr(tv, "_make_pan115_client", lambda cookie: fake115)
-    monkeypatch.setattr(
-        "backend.emby_server.user_bindings.binding_115_cookie",
-        lambda db_, uid, bid: "cookie-115")
-    sa = _FakeSA()
-    res = tv.run_transfer_job_once(db, job, sa)
-    assert res["outcome"] == "failed"
-    assert res["error_kind"] == "cross_provider_relay_disabled"
-    assert job.status == "failed"
-    assert fake115.uploaded is None
-    assert getattr(sa, "download_calls", 0) == 0
-    assert db.query(em.TransferVariant).count() == 0
 
 
-def test_gate_legacy_disabled_cross_row_retriggers(db, monkeypatch):
-    # 关停期遗留行：failed/cross_provider_relay_disabled 不是真
-    # 失败，是路线关停的产物。重开后不自动复活（无点播时行数
-    # 不变），用户再点播走到门禁才在预算内重触发建新跨单。
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    job = _cross_job(db, item.id, 7, "drive", "pan115:user-7",
-                     status="failed", drive_id="drive1")
-    job.error_kind = "cross_provider_relay_disabled"
-    job.error_detail = tv.CROSS_PROVIDER_DISABLED_DETAIL
-    db.commit()
-    assert db.query(em.TransferJob).count() == 1  # 未点播：不复活
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_retriggered"
-    assert "detail" in gate and "115 网盘" in gate["detail"]
-    assert db.query(em.TransferJob).count() == 2
-    new_job = db.query(em.TransferJob).order_by(
-        em.TransferJob.id.desc()).first()
-    assert new_job.status == "pending"
-    assert tv._is_cross_job(new_job) is True
 
 
-def test_gate_legacy_disabled_cross_row_switch_off(db, monkeypatch):
-    # 同一张遗留行，总开关关时维持关停口径：failed 明示、不建单。
-    _enable(monkeypatch)
-    _set_sysconfig(db, "cross_provider_transfer_enabled", "false")
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    job = _cross_job(db, item.id, 7, "drive", "pan115:user-7",
-                     status="failed", drive_id="drive1")
-    job.error_kind = "cross_provider_relay_disabled"
-    job.error_detail = tv.CROSS_PROVIDER_DISABLED_DETAIL
-    db.commit()
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "failed"
-    assert gate["reason"] == "cross_provider_relay_disabled"
-    assert gate["detail"] == tv.CROSS_PROVIDER_DISABLED_DETAIL
-    assert db.query(em.TransferJob).count() == 1
 
 
-def test_gate_cross_terminal_failed_carries_reason_detail(db, monkeypatch):
-    # 跨单真终态失败：409 文案底料（gate detail）必须带任务行上
-    # 的人话原因 + 目标盘名，不许只剩笼统"转存失败"。
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    job = _cross_job(db, item.id, 7, "drive", "pan115:user-7",
-                     status="failed", drive_id="drive1")
-    job.error_kind = "file_only_copy_unavailable"
-    job.error_detail = "115 源文件已不存在"
-    db.commit()
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "failed"
-    assert gate["reason"] == "file_only_copy_unavailable"
-    assert "115 源文件已不存在" in gate["detail"]
-    assert "115 网盘" in gate["detail"]
 
 
 def test_claim_cross_lane_cap_keeps_same_provider_flowing(db):
@@ -1771,13 +1527,15 @@ def test_claim_cross_lane_cap_keeps_same_provider_flowing(db):
     # provider，慢单不许堵住整轮。
     _set_sysconfig(db, "transfer_cross_lane_concurrency", "1")
     item = _item(db)
-    _binding(db, 7, provider="pan115")
-    _binding(db, 8, provider="pan115")
+    # 跨单样本改用现行唯一跨向：115 源 → 用户 Drive 盘（drive→115
+    # 落点已随 115 用户绑定线下线，2026-11-02 删除单）。
+    _binding(db, 7, provider="drive")
+    _binding(db, 8, provider="drive")
     _binding(db, 9, provider="drive")
     _binding(db, 10, provider="drive")
-    c1 = _cross_job(db, item.id, 7, "drive", "pan115:user-7",
+    c1 = _cross_job(db, item.id, 7, "pan115", "userdrive:7",
                     drive_id="shared1")
-    c2 = _cross_job(db, item.id, 8, "drive", "pan115:user-8",
+    c2 = _cross_job(db, item.id, 8, "pan115", "userdrive:8",
                     drive_id="shared1")
     s1 = _user_job(db, item.id, 9)
     claimed = tv.claim_due_jobs(db, limit=10)

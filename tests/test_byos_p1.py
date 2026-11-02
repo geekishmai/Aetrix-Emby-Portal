@@ -110,13 +110,6 @@ def _bind(db, user_id=7, label="主号"):
 
 # ---------- 模型约束 ----------
 
-def test_label_unique_per_user_provider(db):
-    _bind(db, 7, "主号")
-    with pytest.raises(ub.BindingError):
-        ub.create_binding(db, 7, "pan115", "主号", "COOKIE-2")
-    # 不同用户可重名（唯一约束是 user_id + provider + label 三元）
-    b3 = ub.create_binding(db, 8, "pan115", "主号", "COOKIE-3")
-    assert b3.account_label == "主号"
 
 
 def test_provider_and_status_check_constraints(db):
@@ -154,22 +147,6 @@ def test_mount_attached_credential_unique_still_enforced(db):
 
 # ---------- 建绑与验活 ----------
 
-def test_create_binding_success_stores_reference_not_secret(db):
-    b = _bind(db, 7, "主号")
-    assert b.status == "active"
-    assert b.last_verified_at is not None
-    cred = db.query(em.MountCredential).filter(
-        em.MountCredential.id == b.credential_id).first()
-    assert cred is not None
-    assert cred.scope == "user" and cred.owner_user_id == 7
-    assert cred.status == "active"
-    assert cred.sealed_credential != "COOKIE-XYZ"
-    assert unseal_secret(cred.sealed_credential) == "COOKIE-XYZ"
-    assert cred.key_id == "fernet-v1"
-    out = ub.serialize_binding(b)
-    assert "COOKIE-XYZ" not in str(out) and "sealed" not in str(out).lower()
-    assert out["has_credential"] is True
-    assert "credential_id" not in out
 
 
 def test_create_binding_empty_credential_rejected(db):
@@ -178,38 +155,12 @@ def test_create_binding_empty_credential_rejected(db):
     assert db.query(em.UserStorageBinding).count() == 0
 
 
-def test_create_binding_auth_error_persists_expired(db):
-    _Stub115Client.behavior = "auth_error"
-    b = ub.create_binding(db, 7, "pan115", "过期号", "COOKIE-OLD")
-    assert b.status == "expired" and b.last_error_kind == "expired"
-    cred = db.query(em.MountCredential).filter(
-        em.MountCredential.id == b.credential_id).first()
-    assert cred.status == "expired"
-    assert ub.serialize_binding(b)["error_message"] == "115 登录已过期，请重新绑定。"
 
 
-def test_create_binding_throttled_persists_invalid(db):
-    _Stub115Client.behavior = "throttled"
-    b = ub.create_binding(db, 7, "pan115", "被限号", "COOKIE-T")
-    assert b.status == "invalid" and b.last_error_kind == "throttled"
-    assert "稍后再试" in ub.serialize_binding(b)["error_message"]
 
 
-def test_create_binding_transient_rolls_back(db):
-    _Stub115Client.behavior = "transient"
-    with pytest.raises(ub.BindingError) as excinfo:
-        ub.create_binding(db, 7, "pan115", "抖动号", "COOKIE-J")
-    assert excinfo.value.kind == "transient"
-    assert db.query(em.UserStorageBinding).count() == 0
-    assert db.query(em.MountCredential).count() == 0
 
 
-def test_create_binding_limit_from_config(db, monkeypatch):
-    monkeypatch.setenv("BYOS_BINDING_LIMIT_PER_USER", "1")
-    _bind(db, 7, "一号")
-    with pytest.raises(ub.BindingError):
-        ub.create_binding(db, 7, "pan115", "二号", "COOKIE-2")
-    assert ub.binding_limit_per_user() == 1
 
 
 def test_create_binding_drive_rejected_in_p1(db):
@@ -224,13 +175,6 @@ def test_create_binding_drive_rejected_in_p1(db):
 
 # ---------- 解绑与重验 ----------
 
-def test_delete_binding_removes_both_rows(db):
-    b = _bind(db, 7, "主号")
-    cid = b.credential_id
-    ub.delete_binding(db, 7, b.id)
-    assert db.query(em.UserStorageBinding).count() == 0
-    assert db.query(em.MountCredential).filter(
-        em.MountCredential.id == cid).count() == 0
 
 
 @pytest.fixture()
@@ -271,82 +215,20 @@ def test_delete_binding_fk_enforced_removes_both_rows(fk_db):
         em.MountCredential.id == cred.id).count() == 0
 
 
-def test_delete_foreign_binding_not_found(db):
-    b = _bind(db, 7, "主号")
-    with pytest.raises(ub.BindingError) as excinfo:
-        ub.delete_binding(db, 8, b.id)
-    assert excinfo.value.kind == "not_found"
-    assert db.query(em.UserStorageBinding).count() == 1
 
 
-def test_verify_binding_recovers_expired(db):
-    _Stub115Client.behavior = "auth_error"
-    b = ub.create_binding(db, 7, "pan115", "过期号", "COOKIE-OLD")
-    assert b.status == "expired"
-    _Stub115Client.behavior = "ok"
-    b2 = ub.verify_binding(db, 7, b.id)
-    assert b2.status == "active" and b2.last_error_kind is None
 
 
-def test_get_active_binding_picks_earliest(db):
-    _bind(db, 7, "先绑")
-    _bind(db, 7, "后绑")
-    got = ub.get_active_binding(db, 7, "pan115")
-    assert got.account_label == "先绑"
-    assert ub.get_active_binding(db, 8, "pan115") is None
 
 
 # ---------- 115 直链解析 ----------
 
-def test_resolve_user115_direct_url_fresh_each_time(db, monkeypatch):
-    m = _mount115(db)
-    it = _item(db, m)
-    _bind(db, 7, "主号")
-
-    def _fake_locate(self, rel):
-        return {"pickcode": "PC1", "name": "f.mkv"}
-
-    monkeypatch.setattr(mount_lib.Pan115Mount, "_locate", _fake_locate)
-    url1 = ub.resolve_user115_direct_url(db, 7, it)
-    url2 = ub.resolve_user115_direct_url(db, 7, it)
-    assert url1 == url2 == "https://down.115.com/PC1"
-    # 现签现取：两次都真调 download_url，不走共享 pickcode 缓存
-    assert _Stub115Client.calls["download_url"] == 2
 
 
-def test_resolve_user115_direct_url_no_binding(db):
-    m = _mount115(db)
-    it = _item(db, m)
-    with pytest.raises(ub.BindingError) as excinfo:
-        ub.resolve_user115_direct_url(db, 7, it)
-    assert excinfo.value.kind == "not_found"
 
 
-def test_resolve_user115_direct_url_non115_mount(db):
-    m = em.StorageMount(name="local", mount_type="local", path="/media")
-    db.add(m)
-    db.commit()
-    it = _item(db, m)
-    _bind(db, 7, "主号")
-    with pytest.raises(ub.BindingError):
-        ub.resolve_user115_direct_url(db, 7, it)
 
 
-def test_resolve_user115_direct_url_auth_marks_expired(db, monkeypatch):
-    m = _mount115(db)
-    it = _item(db, m)
-    b = _bind(db, 7, "主号")
-
-    def _fake_locate(self, rel):
-        return {"pickcode": "PC1", "name": "f.mkv"}
-
-    monkeypatch.setattr(mount_lib.Pan115Mount, "_locate", _fake_locate)
-    _Stub115Client.behavior = "auth_error"
-    with pytest.raises(ub.BindingError) as excinfo:
-        ub.resolve_user115_direct_url(db, 7, it)
-    assert excinfo.value.kind == "expired"
-    db.refresh(b)
-    assert b.status == "expired"
 
 
 def test_byos_provider_instance_bypasses_shared_list_cache(db):
@@ -361,19 +243,6 @@ def test_byos_provider_instance_bypasses_shared_list_cache(db):
 
 # ---------- 变体清单 ----------
 
-def test_list_variants_byos_appended_after_mainline(db):
-    m = _mount115(db)
-    it = _item(db, m)
-    names = [v.name for v in pv.list_variants(
-        db, it, user115_direct_available=True)]
-    assert names == [pv.MOUNT_RELAY, pv.BYOS115_DIRECT]
-    names_off = [v.name for v in pv.list_variants(db, it)]
-    assert names_off == [pv.MOUNT_RELAY]
-    # 非挂载条目：信号不得外溢
-    local = em.MediaItem(guid="g2", library_id=it.library_id,
-                         item_type="movie", name="本", file_path="/media/a.mkv")
-    assert [v.name for v in pv.list_variants(
-        db, local, user115_direct_available=True)] == [pv.LOCAL_FILE]
 
 
 def test_resolve_requested_variant_byos(db):

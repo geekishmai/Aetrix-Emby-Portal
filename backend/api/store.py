@@ -195,6 +195,16 @@ def post_want(
             library_item_id=row.id,
             message=UNKNOWN_PROVIDER_MESSAGE,
         )
+    if provider == "pan115":
+        # 115 用户绑定线已下线（2026-11-02 删除单）：明示不支持，
+        # 不许用「先绑定」文案把用户引进死循环（115 已绑不了）。
+        return WantRecord(
+            tmdb_id=key,
+            state="failed",
+            in_library=True,
+            library_item_id=row.id,
+            message="该片源所在网盘（115）已下线，想看转存暂不支持。",
+        )
     has_binding = (
         tv.has_active_drive_binding(db, user.id)
         if provider == "drive"

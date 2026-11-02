@@ -373,6 +373,9 @@ def binding_provider(db: Session, binding: em.UserStorageBinding,
         except drive_oauth.DriveOAuthError as exc:
             raise BindingScanError(exc.kind, str(exc)) from exc
         return UserDriveEnumerator(token, http_get=http_get)
+    if binding.provider in ub.REMOVED_PROVIDERS:
+        # 已下线 provider 的存量绑定不许再扫描入库（2026-11-02 删除单）。
+        raise BindingScanError("unsupported", ub.REMOVED_PROVIDER_MESSAGE)
     if binding.provider == ub.PROVIDER_PAN115:
         try:
             cookie = ub.binding_115_cookie(db, binding.user_id, binding.id)
