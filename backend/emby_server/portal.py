@@ -759,6 +759,8 @@ def _binding_error_status(exc) -> int:
         return 404
     if exc.kind == "transient":
         return 502
+    if exc.kind == "conflict":
+        return 409
     return 400
 
 
