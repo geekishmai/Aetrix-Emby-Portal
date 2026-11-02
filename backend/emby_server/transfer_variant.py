@@ -4558,7 +4558,20 @@ def _dest_provider_of_dest(dest):
 
 
 def _recent_user_jobs(db, item_id, owner_ref, window_sec=THROTTLE_SEC):
-    """该条目该用户桶内、节流窗内的全部任务行（不限落点）。"""
+    """该条目该用户桶内、节流窗内的全部任务行（不限落点、不限状态）。
+
+    failed 行必须留给调用方看，两个消费方都依赖它：
+    - _user_throttle_state 的换绑豁免分类按落点方案判读历史单，
+      终态不改变「历史单落在哪个方案」这一事实（旧方案 failed 单
+      仍是换绑证据、同方案 failed 单仍构成节流，见
+      test_transfer_rebind_waiver 的既定口径）；
+    - 找源确认的分流 helper（_throttled_confirm_response）在
+      Python 层区分在途/失败，靠本函数返回死单才能识别「最新单
+      已失败」并走 force 重建。
+    PA-039 的「死单不挡重建」由确认层分流＋_latest_job 的
+    statuses 过滤兑现，不在本函数藏行（曾在此加 status 过滤，
+    豁免记账与同方案节流随之误判，CI 实证后撤销）。
+    """
     cutoff = datetime.now() - timedelta(seconds=window_sec)
     return (db.query(em.TransferJob)
             .filter(em.TransferJob.item_id == item_id,
@@ -4651,8 +4664,14 @@ def _recent_job_exists(db, item_id, owner_scope="source", owner_ref=None,
     return q.first() is not None
 
 
-def _latest_job(db, item_id, owner_scope, owner_ref=None):
-    """该条目该归属桶内最新的一行任务（或 None）。"""
+def _latest_job(db, item_id, owner_scope, owner_ref=None, statuses=None):
+    """该条目该归属桶内最新的一行任务（或 None）。
+
+    statuses 为 None 时不限状态（首播门禁/next302/商店等调用方
+    依赖看到 failed 行做各自的分流，保持原行为）；传状态元组时
+    只认这些有效状态——PA-039：找源确认的 already_queued 回落
+    分支传 ("pending", "running", "done")，绝不指着死单。
+    """
     q = (db.query(em.TransferJob)
          .filter(em.TransferJob.item_id == item_id,
                  em.TransferJob.owner_scope == owner_scope))
@@ -4660,6 +4679,8 @@ def _latest_job(db, item_id, owner_scope, owner_ref=None):
         q = q.filter(em.TransferJob.owner_ref.is_(None))
     else:
         q = q.filter(em.TransferJob.owner_ref == owner_ref)
+    if statuses is not None:
+        q = q.filter(em.TransferJob.status.in_(statuses))
     return q.order_by(em.TransferJob.id.desc()).first()
 
 
