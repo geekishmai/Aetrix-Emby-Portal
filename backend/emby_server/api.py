@@ -1483,7 +1483,9 @@ def _synthetic_cms_base_source(item, mapping, base: str,
     取流时现取）：先用本地行数据走 _media_source 拼同形空壳，再把
     取流路径回填的画质缓存（m3u8 主清单解析出的宽高/带宽/范围、
     备注画质标记，见 upstream_playback.read_cms_quality）叠成
-    Bitrate 与一条视频轨摘要。没缓存就只有空壳——参数缺失只是
+    Bitrate 与一条视频轨摘要；缓存带 media playlist 分段时长
+    （duration_sec）且本地行时长为空时，再用它填 RunTimeTicks。
+    没缓存就只有空壳——参数缺失只是
     展示粗糙，点播不受影响。Size 永远不报：m3u8 推不出文件
     大小，不编造。
     """
@@ -1495,6 +1497,14 @@ def _synthetic_cms_base_source(item, mapping, base: str,
     bandwidth = cached.get("bandwidth") or 0
     if bandwidth:
         dto["Bitrate"] = int(bandwidth)
+    duration_sec = cached.get("duration_sec") or 0
+    if duration_sec and not dto.get("RunTimeTicks"):
+        # 本地行时长为空时用分段时长求和回填（ticks 口径与
+        # _run_time_ticks 一致）；本地已有真实时长时不覆盖。
+        try:
+            dto["RunTimeTicks"] = int(float(duration_sec) * TICKS)
+        except (TypeError, ValueError):
+            pass
     if width or height:
         video = {
             "Index": 0, "Type": "Video",
