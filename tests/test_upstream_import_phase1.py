@@ -569,10 +569,14 @@ def test_detail_hosted_movie_has_upstream_line(pclient, bound_token, pseed):
     # 条目名，绝不带源名凑数（2026-11-02 站主口径）
     assert lines[0]["Name"] == HOSTED_NAME
     assert SRC2_NAME not in lines[0]["Name"]
-    # 本地合成源不带取流地址（没有本地文件可取），只有上游线路能播
+    # 空壳源已删（2026-11-02 详情 DTO 口径定版）：托管行详情
+    # 不再附带没有本地文件可取的本地合成源——它会被客户端渲
+    # 染成一条不可用来源（Rex 实证一红一绿）；只下发上游线
+    # 路，回归见 tests/test_cms_dto_phantom_source.py。
     local = [s for s in body["MediaSources"]
              if ":upstream" not in str(s.get("Id", ""))]
-    assert local and not local[0].get("DirectPlayUrl")
+    assert local == []
+    assert body["MediaSourceCount"] == 1
 
 
 def test_playbackinfo_hosted_movie_only_upstream_source(
