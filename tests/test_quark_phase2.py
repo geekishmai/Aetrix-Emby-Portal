@@ -5,8 +5,10 @@
 - QuarkClient 扩链（list_dir 分页归一、download_url、mkdir、
   upload 秒传命中零字节、未命中分片 auth+PUT+commit+finish 全链、
   Cookie 轮换吸收、401 定性 Auth、pre 缺上传主机响亮报错）——
-  全部桩 _send，不碰真实夸克；API 形态未经活体验证，测试只锁
-  本客户端的请求构造与信封处理口径，不冒充上游已验。
+  全部桩 _send，不碰真实夸克。上传链形态已于 2026-11-02 用站主
+  本人绑定活体验证（pre 的 upload_url 主机名、auth 规范串 Date
+  行、complete 的 MD5+callback 组合，见 quarkdrive 模块头），
+  测试锁的即活体定案的请求构造。
 - user_bindings：binding_quark_cookie 唯一解封口（本人/quark
   行/归属校验）、resolve_user_quark_copy_url（现取直链 + 轮换
   回写 + 失效落 expired）。
@@ -256,7 +258,9 @@ def test_mkdir_body_and_conflict_hint(send_stub):
 
 _PRE = {"task_id": "task1", "upload_id": "up1", "obj_key": "obj/key.mkv",
         "bucket": "bkt", "part_size": 4, "auth_info": "ai",
-        "upload_host": "oss.example.com"}
+        "upload_url": "http://pds.quark.cn",
+        "callback": {"callbackUrl": "https://cb.example/hook",
+                     "callbackBody": "bucket=$(bucket)&object=$(object)"}}
 
 
 def _wire_upload(send_stub, *, hash_finish=False, pre=None):
@@ -272,8 +276,8 @@ def _wire_upload(send_stub, *, hash_finish=False, pre=None):
         counter["n"] += 1
         return _Resp(headers={"ETag": f'"etag{counter["n"]}"'})
 
-    send_stub.route("PUT", "oss.example.com", _put)
-    send_stub.route("POST", "oss.example.com", _Resp(text=""))
+    send_stub.route("PUT", "pds.quark.cn", _put)
+    send_stub.route("POST", "pds.quark.cn", _Resp(text=""))
     send_stub.route("POST", "/file/upload/finish",
                     _Resp(body=_ok({"fid": "newfid"})))
 
@@ -285,7 +289,7 @@ def test_upload_rapid_hit_moves_no_bytes(send_stub):
     out = client.upload_file(reader, "a.mkv", 10, "dirfid",
                              md5="m" * 32, sha1="s" * 40)
     assert out == {"outcome": "rapid", "fid": "newfid"}
-    assert send_stub.find("PUT", "oss.example.com") == []
+    assert send_stub.find("PUT", "pds.quark.cn") == []
     assert reader.tell() == 0
 
 
@@ -296,12 +300,13 @@ def test_upload_full_chain(send_stub):
     out = client.upload_file(_BytesReader(data), "a.mkv", 10, "dirfid",
                              md5="m" * 32, sha1="s" * 40)
     assert out == {"outcome": "uploaded", "fid": "newfid"}
-    puts = send_stub.find("PUT", "oss.example.com")
+    puts = send_stub.find("PUT", "pds.quark.cn")
     assert len(puts) == 3  # part_size=4 → 4+4+2
     assert b"".join(c["content"] for c in puts) == data
     assert all(c["headers"]["Authorization"] == "AUTHKEY" for c in puts)
     assert "partNumber=1&uploadId=up1" in puts[0]["url"]
-    commit = [c for c in send_stub.find("POST", "oss.example.com")]
+    assert puts[0]["url"].startswith("https://bkt.pds.quark.cn/")
+    commit = [c for c in send_stub.find("POST", "pds.quark.cn")]
     assert len(commit) == 1
     body = commit[0]["content"].decode("utf-8")
     for etag in ("etag1", "etag2", "etag3"):
@@ -309,6 +314,35 @@ def test_upload_full_chain(send_stub):
     finish = send_stub.find("POST", "/file/upload/finish")
     assert finish[0]["json"] == {"task_id": "task1",
                                  "obj_key": "obj/key.mkv"}
+    # auth 规范串形状（2026-11-02 活体定案，43004 回归锁）：
+    # 分片 auth_meta 的 Date 行（第 4 行）必须填真实 GMT 日期且与
+    # x-oss-date 同值——旧实现留空，上游回 43004 date is required。
+    auth_calls = send_stub.find("POST", "/file/upload/auth")
+    part_meta = auth_calls[0]["json"]["auth_meta"].split("\n")
+    assert part_meta[0] == "PUT"
+    assert part_meta[1] == ""  # 分片 MD5 行留空
+    assert part_meta[3], "auth_meta 的 Date 行不许留空（43004）"
+    assert part_meta[4] == f"x-oss-date:{part_meta[3]}"
+    assert part_meta[-1].endswith("partNumber=1&uploadId=up1")
+    # complete 的 auth_meta：MD5 行 = 请求体 b64 md5、带
+    # x-oss-callback 规范头行；POST 本身带 Content-MD5 与
+    # x-oss-callback 头（活体验证组合）。
+    import base64 as _b64
+    import hashlib as _hl
+    import json as _json
+    commit_meta = auth_calls[-1]["json"]["auth_meta"].split("\n")
+    assert commit_meta[0] == "POST"
+    expect_md5 = _b64.b64encode(
+        _hl.md5(commit[0]["content"]).digest()).decode()
+    assert commit_meta[1] == expect_md5
+    cb_lines = [ln for ln in commit_meta
+                if ln.startswith("x-oss-callback:")]
+    assert len(cb_lines) == 1
+    cb = _json.loads(_b64.b64decode(cb_lines[0].split(":", 1)[1]))
+    assert cb["callbackUrl"] == "https://cb.example/hook"
+    assert commit[0]["headers"]["Content-MD5"] == expect_md5
+    assert commit[0]["headers"]["x-oss-callback"] == \
+        cb_lines[0].split(":", 1)[1]
 
 
 def test_upload_without_hashes_skips_rapid(send_stub):
@@ -328,17 +362,49 @@ def test_upload_pre_nested_metadata_part_size(send_stub):
     out = client.upload_file(_BytesReader(b"0123456789"), "a.mkv", 10,
                              "dirfid")
     assert out["outcome"] == "uploaded"
-    assert len(send_stub.find("PUT", "oss.example.com")) == 3
+    assert len(send_stub.find("PUT", "pds.quark.cn")) == 3
 
 
 def test_upload_missing_host_fails_loudly(send_stub):
     pre = dict(_PRE)
-    pre.pop("upload_host")
+    pre.pop("upload_url")
     _wire_upload(send_stub, hash_finish=False, pre=pre)
     client = quarkdrive.QuarkClient("cookie")
     with pytest.raises(quarkdrive.QuarkError) as excinfo:
         client.upload_file(_BytesReader(b"0123"), "a.mkv", 4, "dirfid")
     assert "主机" in str(excinfo.value)
+
+
+def test_auth_meta_date_line_filled():
+    """43004 回归锁（2026-11-02 活体定案）：规范串第 4 行 Date
+    必须填真实 GMT 日期且与 x-oss-date 同值；旧实现留空，上游
+    /file/upload/auth 回 HTTP 403 code=43004（date is required），
+    非秒传转存全灭。"""
+    meta, date = quarkdrive._auth_meta(
+        "PUT", "bkt", "obj/key.mkv", content_type="video/x-matroska",
+        query="partNumber=1&uploadId=up1")
+    lines = meta.split("\n")
+    assert lines[0] == "PUT"
+    assert lines[1] == ""
+    assert lines[3] == date and date.endswith(" GMT")
+    assert lines[4] == f"x-oss-date:{date}"
+    assert lines[-1] == "/bkt/obj/key.mkv?partNumber=1&uploadId=up1"
+
+
+def test_upload_oss_error_body_surfaces_code(send_stub):
+    """OSS 面非 2xx 必须带回上游错误体里的 Code/Message（脱敏
+    截断后），且不定性为用户登录失效——此前只报状态码、死因
+    不可考。"""
+    _wire_upload(send_stub, hash_finish=False)
+    send_stub.route("PUT", "pds.quark.cn", _Resp(
+        status=403,
+        text=("<Error><Code>SignatureDoesNotMatch</Code>"
+              "<Message>signature mismatch</Message></Error>")))
+    client = quarkdrive.QuarkClient("cookie")
+    with pytest.raises(quarkdrive.QuarkError) as excinfo:
+        client.upload_file(_BytesReader(b"0123"), "a.mkv", 4, "dirfid")
+    assert not isinstance(excinfo.value, quarkdrive.QuarkAuthError)
+    assert "SignatureDoesNotMatch" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
