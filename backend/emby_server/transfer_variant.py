@@ -8308,11 +8308,19 @@ def notify_transfer_wakeup(job_id=None):
 
 def _wake_subscriber_loop(stop_event):
     """Redis 订阅线程：收到唤醒即置进程内 Event，订阅断了就重连等
-    下一轮兜底扫，绝不炸主循环。"""
+    下一轮兜底扫，绝不炸主循环。
+
+    2026-11-03：改用**独立订阅客户端**（``make_redis_subscriber_client``，
+    socket_timeout=None、独立连接池、不参与熔断计数）。此前复用
+    ``get_redis()``：主客户端 1s 读超时让 pubsub.listen 每秒抛
+    TimeoutError，且每轮泄漏未关闭的连接——连接池耗尽后主链路命令失败 →
+    熔断器打开 → guard 退回进程内限速、三进程叠加超预算（实测 4.4 次/秒）。
+    """
     while not stop_event.is_set():
+        pubsub = None
         try:
-            from backend.database import get_redis
-            client = get_redis()
+            from backend.database import make_redis_subscriber_client
+            client = make_redis_subscriber_client()
             if client is None:
                 stop_event.wait(30)
                 continue
@@ -8324,9 +8332,15 @@ def _wake_subscriber_loop(stop_event):
                 if message.get("type") == "message":
                     _WAKE_EVENT.set()
         except Exception:
-            logger.warning("转存工人：唤醒订阅断开，30 秒后重连",
-                           exc_info=True)
+            logger.warning("转存工人：唤醒订阅断开，30 秒后重连")
             stop_event.wait(30)
+        finally:
+            # 订阅连接必须显式关闭：每轮泄漏一条连接会耗尽池（熔断根因之一）
+            if pubsub is not None:
+                try:
+                    pubsub.close()
+                except Exception:  # noqa: BLE001 — 关闭失败不影响重连
+                    pass
 
 
 def _reclaim_leases_once(session_factory, source="janitor"):
