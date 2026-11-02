@@ -51,9 +51,16 @@ IDENTIFY_FRODO_FILL_ENABLED = env_int("IDENTIFY_FRODO_FILL_ENABLED", 0, 0, 1)
 IDENTIFY_UNFILLED_RETRY_SEC = env_int("IDENTIFY_UNFILLED_RETRY_SEC", 300, 0, 86400)
 
 #: 补资料段允许写的资料字段（白名单制：不在表里的字段一律不写）。
-#: overview / poster_path / backdrop_path / community_rating 四项而已——
-#: 演员、季海报、字幕、NFO 等仍归现行写库路径，本段不越权。
-FILL_FIELDS = ("overview", "poster_path", "backdrop_path", "community_rating")
+#: overview / poster_path / backdrop_path / community_rating / genres
+#: 五项——演员、季海报、字幕、NFO 等仍归现行写库路径，本段不越权。
+#: genres 是 2026-11-02 补进来的：CMS 托管行无本地文件、不走扫描，
+#: 扫描期 apply()/apply_details() 写类型的路它走不到，只剩本段；
+#: 此前白名单不含 genres，托管行 TMDB 命中后类型永远为空（库 58
+#: 实查 tmdb 1614 行 genres 0 行）。genres 候选只来自 TMDB 证据
+#: （见 fill_candidates_from_fetched），Frodo / 中文聚合的字段集
+#: 不变、不供 genres——类型以 TMDB 为准，不引第二来源。
+FILL_FIELDS = ("overview", "poster_path", "backdrop_path", "community_rating",
+               "genres")
 
 #: Frodo 补资料时问的缺口字段（overview / 评分 / 海报三项；backdrop 不问
 #: Frodo——它的 image 口径是海报，不是背景图）。
@@ -577,8 +584,35 @@ def fill_candidates_from_fetched(fetched: dict) -> dict:
         "poster_path": fetched.get("poster") or details.get("poster_path") or "",
         "backdrop_path": fetched.get("fanart") or details.get("backdrop_path") or "",
         "community_rating": details.get("vote_average"),
+        "genres": _genres_candidate(fetched, details),
     }
     return {k: v for k, v in candidates.items() if not _empty(v)}
+
+
+def _genres_candidate(fetched: dict, details: dict) -> str:
+    """类型候选（只认 TMDB 证据，返回逗号拼接名串，无证据返回空串）。
+
+    详情 genres 优先——走 tmdb._genres_from_details，与单段写库的
+    apply_details 同一个解析口径（本地化 name 优先、上限 4、去重）；
+    详情缺失时用搜索命中的 genre_ids 经 tmdb._GENRE_NAMES 同一张
+    映射表翻译（与 apply() 同口径），映射表里没有的 id 跳过、不写
+    数字原文。Frodo / 聚合等其他源不供类型：类型以 TMDB 为准。
+    """
+    from backend.emby_server.tmdb import _GENRE_NAMES, _genres_from_details
+
+    names = _genres_from_details(details)
+    if names:
+        return ",".join(names)
+    hit = fetched.get("tmdb_hit") or {}
+    genre_ids = hit.get("genre_ids") or []
+    out = []
+    for gid in genre_ids:
+        name = _GENRE_NAMES.get(gid)
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= 4:
+            break
+    return ",".join(out)
 
 
 #: 补资料段图片字段 → (远程 URL 字段, _set_image 的 kind)。
@@ -840,8 +874,10 @@ def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
     filled = []
     candidates = fill_candidates_from_fetched(fetched)
     fetched = fetched or {}
-    # 文字字段（简介 / 评分）：只填空缺，原口径不变。
-    for field in ("overview", "community_rating"):
+    # 文字字段（简介 / 评分 / 类型）：只填空缺，原口径不变。类型此前
+    # 不在白名单里，托管行（无扫描路径）永远补不上，2026-11-02 补入；
+    # 候选只来自 TMDB 证据（见 fill_candidates_from_fetched）。
+    for field in ("overview", "community_rating", "genres"):
         if _empty(getattr(item, field, None)) and field in candidates:
             setattr(item, field, candidates[field])
             filled.append(field)
