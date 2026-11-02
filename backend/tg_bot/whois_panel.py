@@ -13,7 +13,10 @@ callbacks 的 whois:* 回调，每次点击都重新校验点击者 is_staff。
 - cred：资格与凭证（公益资格状态/到期、各服查看凭证状态/到期）；
 - gift：赠送菜单（预设档位按钮，无自由输入）；
 - ask/do：写操作二次确认——ask 只出确认页（写明对谁、做什么、
-  多少），do 才真正执行；执行后回 main 页并回显最新状态。
+  多少），do 才真正执行；执行后回 main 页并回显最新状态。赠送类
+  do 回调带一次性 nonce（PA-058）：ask 生成、执行后失效，同一 ask
+  双击只发放一次，第二次回已执行提示；封禁/解封因 changed 标志
+  本就幂等，不走 nonce。
 
 写操作只许三类（用户 2026-11-02 点选），全部复用现行服务、不另
 写一套：封禁/解封走 backend.user_lifecycle.set_user_active（与网站
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import html
 import logging
+import secrets
 from datetime import datetime
 
 from backend import models
@@ -49,6 +53,32 @@ OPS: dict[str, tuple[str, str]] = {
 }
 
 _GIFT_OPS = ("gp50", "gp100", "gp500", "gw7", "gw30", "gv30")
+
+#: 赠送确认一次性 nonce（PA-058）：ask 生成、do 执行后失效。
+#: 进程内存放（poller 单进程；进程重启后旧确认页失效，须重新打开
+#: 确认页）。已执行集合只记最近 1000 条防无界增长。
+_DO_NONCES: dict[str, tuple[int, str]] = {}
+_DONE_NONCES: set[str] = set()
+_MAX_DONE_NONCES = 1000
+
+
+def _consume_gift_nonce(target_id: int, op: str,
+                        nonce: str | None) -> str:
+    """消费赠送确认 nonce：ok＝首次有效、done＝已执行过、expired＝失效/不匹配。"""
+    if nonce is None:
+        return "expired"
+    pending = _DO_NONCES.get(nonce)
+    if pending is not None:
+        if pending != (target_id, op):
+            return "expired"
+        del _DO_NONCES[nonce]
+        _DONE_NONCES.add(nonce)
+        while len(_DONE_NONCES) > _MAX_DONE_NONCES:
+            _DONE_NONCES.remove(next(iter(_DONE_NONCES)))
+        return "ok"
+    if nonce in _DONE_NONCES:
+        return "done"
+    return "expired"
 
 
 def _esc(value) -> str:
@@ -199,8 +229,14 @@ def confirm_page(db, user, op: str) -> tuple[str, dict]:
         ],
     )
     back_page = "gift" if op in _GIFT_OPS else "main"
+    nonce = ""
+    if op in _GIFT_OPS:
+        # PA-058：赠送确认带一次性 nonce，do 回调形如 whois:do:{uid}:{op}:{nonce}。
+        nonce = secrets.token_hex(8)
+        _DO_NONCES[nonce] = (uid, op)
+    do_data = f"whois:do:{uid}:{op}" + (f":{nonce}" if nonce else "")
     markup = {"inline_keyboard": [
-        [{"text": "✅ 确认执行", "callback_data": f"whois:do:{uid}:{op}"}],
+        [{"text": "✅ 确认执行", "callback_data": do_data}],
         [{"text": "⬅️ 取消", "callback_data": f"whois:{back_page}:{uid}"}],
     ]}
     return text, markup
@@ -237,15 +273,22 @@ def _manage_guard_refusal(db, admin, target, op: str) -> str | None:
     return None
 
 
-def execute(db, admin, target, op: str) -> str:
+def execute(db, admin, target, op: str, nonce: str | None = None) -> str:
     """执行已确认的写操作，返回结果回显文案（面板 main 页展示）。
 
     全部走现行服务（见模块头注），本函数只做编排＋审计＋提交。
     封禁/解封前先过管理员目标守卫（PA-056，见 _manage_guard_refusal）。
+    赠送类先消费一次性 nonce（PA-058）：已执行/失效一律不落账。
     """
     from backend.user_lifecycle import set_user_active
 
     name = _esc(target.username)
+    if op in _GIFT_OPS:
+        state = _consume_gift_nonce(target.id, op, nonce)
+        if state == "done":
+            return "ℹ️ 该赠送已经执行过，未重复发放。"
+        if state != "ok":
+            return "ℹ️ 该确认已失效，请重新打开确认页再操作。"
     if op == "ban":
         if target.id == admin.id:
             return "⛔ 不能封禁自己的账号（与网站管理端口径一致）。"
@@ -314,7 +357,7 @@ def execute(db, admin, target, op: str) -> str:
 
 
 def render(db, admin, user, page: str, op: str | None = None,
-           ) -> tuple[str, dict]:
+           nonce: str | None = None) -> tuple[str, dict]:
     """面板翻页统一渲染口（callbacks 调用；admin 已过 is_staff 校验）。"""
     if page == "bind":
         return bindings_page(db, user)
@@ -325,7 +368,7 @@ def render(db, admin, user, page: str, op: str | None = None,
     if page == "ask" and op in OPS:
         return confirm_page(db, user, op)
     if page == "do" and op in OPS:
-        note = execute(db, admin, user, op)
+        note = execute(db, admin, user, op, nonce=nonce)
         db.refresh(user)
         return main_page(db, user, note=note)
     return main_page(db, user)
