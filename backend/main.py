@@ -704,8 +704,15 @@ async def health_check():
             _obs_snapshot = {"enabled": False}
     except Exception:  # noqa: BLE001
         _obs_snapshot = {"enabled": False, "error": "snapshot_failed"}
+    try:
+        from backend.emby_server.transfer115 import call_stats as _pan115_call_stats
+        _pan115_calls = await run_in_threadpool(_pan115_call_stats)
+    except Exception:  # noqa: BLE001
+        _pan115_calls = {}
     return {
         "status": health["status"],
+        # 115 接口累计调用次数（跨进程，只有计数）：运维按差分看调用频率
+        "pan115_calls": _pan115_calls,
         "health_level": health["level"],
         "health_issues": health["issues"],
         "health_metrics": health["metrics"],

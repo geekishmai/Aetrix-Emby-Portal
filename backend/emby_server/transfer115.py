@@ -1789,8 +1789,67 @@ class Pan115Client:
 
     def _call(self, method: str, url: str, *, params: Optional[dict] = None,
               data: Optional[dict] = None) -> dict:
-        return _http_json(method, url, params=params, data=data, cookie=self.cookie,
-                          ua=self.ua)
+        kind = _call_kind(url)
+        try:
+            body = _http_json(method, url, params=params, data=data, cookie=self.cookie,
+                              ua=self.ua)
+        except Exception:
+            _bump_call(kind, error=True)
+            raise
+        _bump_call(kind)
+        return body
+
+
+#: 115 接口调用计数（Redis 哈希，跨 api / worker / ea 进程累计；进程内计数只看得到
+#: 自己那一份）。只记次数不记参数，给运维按差分盯「每 5 分钟打了 115 多少次」。
+PAN115_CALL_STATS_KEY = "aetrix:pan115:calls"
+
+
+def _call_kind(url: str) -> str:
+    path = url.split("?", 1)[0]
+    if path.endswith("/files/download") or path.endswith("/downurl"):
+        return "download_url"
+    if path.endswith("/files"):
+        return "list"
+    return "other"
+
+
+def _bump_call(kind: str, *, error: bool = False) -> None:
+    """计数失败（Redis 不可用等）静默忽略：统计不许拖垮真实调用"""
+    from backend.database import redis_call
+
+    def _incr(client):
+        pipe = client.pipeline()
+        pipe.hincrby(PAN115_CALL_STATS_KEY, kind, 1)
+        pipe.hincrby(PAN115_CALL_STATS_KEY, "total", 1)
+        if error:
+            pipe.hincrby(PAN115_CALL_STATS_KEY, "errors", 1)
+        pipe.execute()
+
+    try:
+        redis_call(_incr)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def call_stats() -> dict:
+    """累计调用次数 ``{total, list, download_url, other, errors}``；Redis 不可用返回空字典"""
+    from backend.database import redis_call
+
+    try:
+        raw = redis_call(lambda client: client.hgetall(PAN115_CALL_STATS_KEY), default=None)
+    except Exception:  # noqa: BLE001
+        raw = None
+    if not raw:
+        return {}
+    stats = {}
+    for key, value in raw.items():
+        key = key.decode() if isinstance(key, bytes) else str(key)
+        try:
+            stats[key] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return stats
 
 
 def _is_dir(entry: dict) -> bool:
