@@ -6534,12 +6534,29 @@ async def video_stream(
             # 只许在服务端中继里用（头只在服务端组装、绝不下
             # 发），绝不 302 裸发给播放器——与 115 副本的 302
             # 形态区别正在于此。
-            return _observe_traffic(await _relay_async(
-                _urlq, request,
-                headers={"Cookie": _cookieq,
-                         "Referer": _qd.QUARK_REFERER,
-                         "User-Agent": _qd.QUARK_UA},
-                media_type=media_type, pt=_pt))
+            try:
+                _relay_resp = await _relay_async(
+                    _urlq, request,
+                    headers={"Cookie": _cookieq,
+                             "Referer": _qd.QUARK_REFERER,
+                             "User-Agent": _qd.QUARK_UA},
+                    media_type=media_type, pt=_pt)
+            except HTTPException as _relay_exc:
+                # 中继段留痕（2026-11-02 深挖）：此前的 ok 打点记
+                # 在取链成功时、中继在那之后，上游 403/404 等中继
+                # 失败在台账里完全不可见（台账会显示这次起播
+                # 「ok」而用户实际没播出来）。与 115 死链段同款：
+                # ok 之后再补一条 error，kind 带上游状态码。
+                _note_play_start_safe(
+                    item, user_id=getattr(user, "id", None),
+                    method="transfer_quark_relay",
+                    variant=play_variants.BYOS_QUARK_RELAY,
+                    result="error",
+                    error_kind=f"relay_upstream_{_relay_exc.status_code}",
+                    total_ms=int(
+                        (time.perf_counter() - _byos_t0q) * 1000))
+                raise
+            return _observe_traffic(_relay_resp)
         _gate.raise_for_transfer_gate(_transfer_gate)
         _play_fid, _play_variant = _tv.prefer_user_variant(
             _play_fid, _play_variant, _transfer_gate)

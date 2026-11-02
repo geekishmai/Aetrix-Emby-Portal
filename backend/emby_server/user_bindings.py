@@ -1356,7 +1356,8 @@ def _resolve_user_quark_copy_url_locked(db: Session,
         # 判死去单点化：单次取链 401/403 先用库内最新 Cookie
         # 验活复核，复核也鉴权失败才落 expired；复核未判死按
         # 一过性处理（多半是并发轮换互踩），绑定状态不动。
-        if recheck_quark_binding(db, binding) == "dead":
+        _verdict = recheck_quark_binding(db, binding)
+        if _verdict == "dead":
             _mark_failed(db, binding, "expired")
             db.commit()
             raise BindingError(
@@ -1364,6 +1365,16 @@ def _resolve_user_quark_copy_url_locked(db: Session,
                 error_message("expired", PROVIDER_QUARK)) from exc
         absorb_quark_cookie_rotation(db, binding, cookie,
                                      client.cookie)
+        # 留痕（2026-11-02 深挖）：此前本分支静默转 transient，
+        # 起播台账只剩 kind=transient、上游真实 code/message 无处
+        # 可查（生产 5 次取链失败全部如此）。只记步位与已脱敏的
+        # 上游字段，凭据原文绝不入日志。
+        logger.warning(
+            "夸克取链鉴权失败但复核未判死 binding=%s step=%s "
+            "upstream_code=%s message=%s verdict=%s",
+            getattr(binding, "id", None), getattr(exc, "step", None),
+            getattr(exc, "upstream_code", None),
+            getattr(exc, "upstream_message", None), _verdict)
         raise BindingError(
             "transient",
             "夸克取链单次鉴权失败，复核未判死，请重试播放。") from exc
@@ -1374,6 +1385,18 @@ def _resolve_user_quark_copy_url_locked(db: Session,
             _mark_failed(db, binding, kind)
             db.commit()
             raise BindingError(kind, message) from exc
+        # 留痕（2026-11-02 深挖）：未分类失败一律收敛成 transient
+        # 时把步位/上游 code/message 一并落日志，否则台账与用户
+        # 文案都只剩笼统的 transient、死因不可考（同上）。非
+        # QuarkError（网络等）记异常类型即可。
+        logger.warning(
+            "夸克取链未分类失败转 transient binding=%s fid=%s "
+            "step=%s upstream_code=%s message=%s exc_type=%s",
+            getattr(binding, "id", None), fid,
+            getattr(exc, "step", None),
+            getattr(exc, "upstream_code", None),
+            getattr(exc, "upstream_message", None),
+            type(exc).__name__)
         raise BindingError("transient", f"夸克直链解析失败：{exc}") from exc
     absorb_quark_cookie_rotation(db, binding, cookie, client.cookie)
     return url, client.cookie

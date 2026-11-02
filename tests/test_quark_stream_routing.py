@@ -346,3 +346,48 @@ def test_userdrive_ready_variant_still_goes_drive_direct(
     assert resp.headers["location"] == \
         f"https://usercontent.test/{copy_fid}"
     assert probes.ensure_calls == [copy_fid]
+
+
+# ---------------------------------------------------------------------------
+# 夸克中继段失败必须在台账留痕（2026-11-02 深挖）：ok 打点在取链
+# 成功时就记下，中继上游 403/404 此前不补记——台账显示 ok、
+# 用户实际没播出来，死因不可考。
+# ---------------------------------------------------------------------------
+
+def test_quark_relay_upstream_error_notes_play_start(db, monkeypatch):
+    item = _item()
+    user = SimpleNamespace(id=829, is_staff=False)
+    row = _variant(item.id, 829, "quark:user-829", QUARK_FID)
+    probes = _Probes()
+    _stub_common(monkeypatch, item, probes)
+    monkeypatch.setattr(
+        "backend.emby_server.delivery_plan.plan_ready_leg",
+        lambda db_, it, u_: (QUARK_FID, row))
+    monkeypatch.setattr(
+        tv, "resolve_play_file_id",
+        lambda db_, it, u_: (ORIG_FID, None))
+    monkeypatch.setattr(
+        ub, "resolve_user_quark_copy_url",
+        lambda db_, user_id, fid: (
+            "https://quark.test/dl/RunningMan690.mkv", "cookie-xyz"))
+
+    async def fake_mount_relay(url, request, headers=None, media_type=None,
+                               pt=None, **kwargs):
+        raise HTTPException(status_code=403, detail="源站返回 403")
+
+    monkeypatch.setattr(streaming_mod, "serve_mount_relay_async",
+                        fake_mount_relay)
+
+    noted = []
+    monkeypatch.setattr(
+        api, "_note_play_start_safe",
+        lambda item_, **kw: noted.append(kw))
+
+    with pytest.raises(HTTPException) as excinfo:
+        _call(db, user, item)
+    assert excinfo.value.status_code == 403
+    relay_errors = [kw for kw in noted
+                    if kw.get("error_kind") == "relay_upstream_403"]
+    assert len(relay_errors) == 1
+    assert relay_errors[0]["result"] == "error"
+    assert relay_errors[0]["variant"] == "byos_quark_relay"
