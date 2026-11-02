@@ -296,6 +296,39 @@ def get_best_mapping(db: Session, local_item_id: int, *,
     return None
 
 
+def get_all_mappings(db: Session, local_item_id: int, *,
+                     validate: bool = True) -> list:
+    """读本地条目的全部有效映射（偏好序与 get_best_mapping 逐字一致）。
+
+    播放源列表按映射逐条下发（每条线路一个 MediaSource、点选哪条
+    定向解析哪条）需要全量读口；单条口径仍走 get_best_mapping。
+    ``validate=True``（默认，O-10 读契约）与 get_best_mapping
+    同口径：本地条目非活行 → 空列表；源不存在/未 enabled 的映射
+    逐条剔除。``validate=False`` 返回原始全量行（按同一偏好序），
+    只许追溯类调用方显式使用。
+    """
+    local_id = _as_pos_int(local_item_id, "local_item_id")
+    rows = (db.query(em.UpstreamItemMapping)
+            .filter(em.UpstreamItemMapping.local_item_id == local_id)
+            .order_by(em.UpstreamItemMapping.confidence.desc(),
+                      em.UpstreamItemMapping.updated_at.desc(),
+                      em.UpstreamItemMapping.id.desc())
+            .all())
+    if not rows or not validate:
+        return rows
+    if not _local_item_live(db, local_id):
+        return []
+    source_ids = {row.source_id for row in rows}
+    enabled_ids = {
+        source_id for (source_id,) in (
+            db.query(em.UpstreamSource.id)
+            .filter(em.UpstreamSource.id.in_(source_ids),
+                    em.UpstreamSource.enabled.is_(True))
+            .all())
+    }
+    return [row for row in rows if row.source_id in enabled_ids]
+
+
 def migrate_mappings(db: Session, from_local_id: int, to_local_id: int) -> int:
     """把一个本地条目的全部映射改挂到另一个条目（合并跟随用）。
 

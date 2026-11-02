@@ -702,13 +702,15 @@ def pseed():
     db.add(em.UpstreamItemMapping(
         local_item_id=series.id, source_id=src.id, upstream_item_id=SER_UP,
         confidence=1.0, evidence="tmdb"))
-    db.add(em.UpstreamItemMapping(
+    ep_map = em.UpstreamItemMapping(
         local_item_id=episode.id, source_id=src.id,
         upstream_item_id=EP_UP, confidence=1.0, evidence="tmdb",
-        episode_index=1))
+        episode_index=1)
+    db.add(ep_map)
+    db.flush()
     db.commit()
     data = {"series_guid": series.guid, "ep_guid": episode.guid,
-            "src": src.id}
+            "src": src.id, "ep_map_id": ep_map.id}
     db.close()
     yield data
     db = SessionLocal()
@@ -752,7 +754,7 @@ def free_token(pclient, pseed):
 
 def _upstream_line(body):
     return [s for s in body.get("MediaSources") or []
-            if str(s.get("Id", "")).endswith(":upstream")]
+            if ":upstream" in str(s.get("Id", ""))]
 
 
 def test_episode_detail_has_upstream_line(pclient, bound_token, pseed):
@@ -761,7 +763,9 @@ def test_episode_detail_has_upstream_line(pclient, bound_token, pseed):
     assert r.status_code == 200, r.text
     lines = _upstream_line(r.json())
     assert len(lines) == 1, r.json().get("MediaSources")
-    assert lines[0]["Name"] == f"{EP_NAME} · 上游 · {SRC3_NAME}"
+    # Name＝纯画质标口径：判不出回落条目名，绝不带源名（2026-11-02）
+    assert lines[0]["Name"] == EP_NAME
+    assert SRC3_NAME not in lines[0]["Name"]
 
 
 def test_episode_playbackinfo_only_upstream_source(
@@ -777,7 +781,7 @@ def test_episode_playbackinfo_only_upstream_source(
     assert r.status_code == 200, r.text
     sources = r.json().get("MediaSources") or []
     assert len(sources) == 1, sources
-    assert sources[0]["Id"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[0]["Id"] == f"{pseed['ep_guid']}:upstream:{pseed['ep_map_id']}"
     assert sources[0]["Size"] == 1_800_000_000
 
 
@@ -795,7 +799,7 @@ def test_series_playbackinfo_resolves_hosted_episode(
     assert r.status_code == 200, r.text
     sources = r.json().get("MediaSources") or []
     assert len(sources) == 1, sources
-    assert sources[0]["Id"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[0]["Id"] == f"{pseed['ep_guid']}:upstream:{pseed['ep_map_id']}"
 
 
 def test_episode_playbackinfo_unbound_user_blocked(

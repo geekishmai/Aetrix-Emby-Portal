@@ -745,12 +745,12 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
         # _upstream_line_media_source 内的 get_displayable_mapping 裁决。
         if (dto["MediaSources"] and item.item_type in ("movie", "episode")):
             from backend.emby_server import playback_gate as _gate_mod
-            _up_line = _upstream_line_media_source(
+            _up_lines = _upstream_line_media_sources(
                 item, dto["MediaSources"][0], base, user_id, db, api_key,
                 with_sign=bool(user_id)
                 and _gate_mod.has_active_binding(db, user_id))
-            if _up_line is not None:
-                dto["MediaSources"].append(_up_line)
+            if _up_lines:
+                dto["MediaSources"].extend(_up_lines)
                 dto["MediaSourceCount"] = len(dto["MediaSources"])
         # 片头片尾标记 → Chapters：复用 MediaSource 里已算好的（_chapters_for_item
         # 同一套口径），不重复跑两次 intro 管道
@@ -1443,11 +1443,15 @@ def _signed_local_stream_url(item, base: str, user_id, db,
 
 
 def _signed_upstream_line_url(item, base: str, user_id, db,
-                              api_key: str = "", with_sign: bool = True):
+                              api_key: str = "", with_sign: bool = True,
+                              mapping_id=None):
     """详情页「上游」线路的本站取流地址（U-02，与 _signed_local_stream_url 同口径）。
 
     地址只带本地条目 guid：/emby/Videos/{guid}/upstream/stream，
-    MediaSourceId={guid}:upstream 与来源列表里的线路 Id 对应。
+    MediaSourceId={guid}:upstream:{mapping_id} 与来源列表里的线路
+    Id 对应——点哪条取流口就定向解析哪条映射（选错硬报错、不换
+    线，见 upstream_playback.resolve_mapped_upstream_stream）。
+    mapping_id=None 时保持旧形态 {guid}:upstream（最佳映射口径）。
     (source_id, upstream_item_id) 永不下发——点播时取流口按本地条目
     现查映射复验（见 upstream_item_stream）。签名不另起签发点：
     向唯一构造点 _signed_local_stream_url 借同一 (uid, guid) 的
@@ -1464,41 +1468,93 @@ def _signed_upstream_line_url(item, base: str, user_id, db,
             item, base, user_id, db, api_key, with_sign=True)
         signed_qs = f"&uid={user_id}&exp={play_exp}&sign={play_sig}"
     key_qs = f"&api_key={api_key}" if api_key else ""
+    msid = (f"{item.guid}:upstream:{mapping_id}" if mapping_id is not None
+            else f"{item.guid}:upstream")
     url = (f"{base}/emby/Videos/{item.guid}/upstream/stream"
-           f"?MediaSourceId={item.guid}:upstream{key_qs}{signed_qs}")
+           f"?MediaSourceId={msid}{key_qs}{signed_qs}")
     return url, play_exp, play_sig
 
 
-def _upstream_line_media_source(item, base_source: dict, base: str, user_id,
-                                db, api_key: str = "",
-                                with_sign: bool = True):
-    """详情/PlaybackInfo 来源列表的上游线路 MediaSource（U-02）。
+def _synthetic_cms_base_source(item, mapping, base: str,
+                               api_key: str = "", db=None) -> dict:
+    """CMS 托管行线路的合成基础源：本地行空壳 + 画质缓存叠加。
 
-    本地条目有可展示的上游映射（开关开、映射命中、源存在且启用，
-    见 upstream_playback.get_displayable_mapping）时返回一条深拷贝
-    基础源改写的线路 dict，否则返回 None。线路排在既有来源之后：
-    Id={guid}:upstream、Name={条目名} · 上游 · {源名}（与既有变体行
-    「名 · 标签」同形）、Protocol=Http/IsRemote=True（字节在上游那侧）、
-    只报直放/直流（上游取流口 302 到上游直链，我方不转码）。
+    CMS 行没有本地文件、参数也不现查 CMS 接口（detail 只在点播
+    取流时现取）：先用本地行数据走 _media_source 拼同形空壳，再把
+    取流路径回填的画质缓存（m3u8 主清单解析出的宽高/带宽/范围、
+    备注画质标记，见 upstream_playback.read_cms_quality）叠成
+    Bitrate 与一条视频轨摘要。没缓存就只有空壳——参数缺失只是
+    展示粗糙，点播不受影响。Size 永远不报：m3u8 推不出文件
+    大小，不编造。
     """
     from backend.emby_server import upstream_playback as _up
-    if db is None or not _up.detail_line_enabled(db):
-        return None
-    found = _up.get_displayable_mapping(db, item.id)
-    if found is None:
-        return None
-    _mapping, source = found
-    if base_source is None:
+    dto = _media_source(item, base, api_key, db, synthesize=True)
+    cached = _up.read_cms_quality(mapping.id) or {}
+    width = cached.get("width") or 0
+    height = cached.get("height") or 0
+    bandwidth = cached.get("bandwidth") or 0
+    if bandwidth:
+        dto["Bitrate"] = int(bandwidth)
+    if width or height:
+        video = {
+            "Index": 0, "Type": "Video",
+            "Width": width or None, "Height": height or None,
+            "VideoRange": cached.get("video_range") or None,
+            "BitRate": int(bandwidth) if bandwidth else None,
+            "DisplayTitle": cached.get("label") or None,
+            "IsDefault": True, "IsForced": False, "IsExternal": False,
+        }
+        rest = [s for s in dto["MediaStreams"]
+                if (s.get("Type") or "").lower() != "video"]
+        dto["MediaStreams"] = [_strip_nulls(video)] + rest
+        dto["DefaultAudioStreamIndex"] = _default_audio_stream_index(
+            dto["MediaStreams"])
+    return dto
+
+
+def _upstream_line_for_mapping(item, mapping, source, base_source,
+                               base: str, user_id, db, api_key: str,
+                               with_sign: bool) -> dict:
+    """一条映射 = 一条上游线路 MediaSource（U-02 多线形态）。
+
+    Id={guid}:upstream:{mapping_id}、取流地址带同一 MediaSourceId
+    ——点哪条、取流口定向解析哪条。Name 纯画质标（站主
+    2026-11-02 亲定，不带源名/片名）：
+
+    - 有本地基础源（本地条目挂的上游线路）：沿 U-02 深拷贝口径
+      与主源同形，Name 用条目自身画质标（与主源一致）；
+    - 托管行 + Emby 型源：现查参数的轨道摘要拼标（见
+      _synthetic_upstream_base_source），查不到回落条目名；
+    - 托管行 + CMS 源：画质缓存里的标签（取流回填），没缓存
+      回落条目名（Emby 默认形态，不拿源名凑数）。
+
+    Protocol=Http/IsRemote=True（字节在上游那侧）、只报直放/直流
+    （上游取流口 302 到上游直链，我方不转码）。
+    """
+    from backend.emby_server import quality_label as ql
+    from backend.emby_server import upstream_playback as _up
+    if base_source is not None:
+        line = copy.deepcopy(base_source)
+        name = _quality_name_for_item(item)
+    elif getattr(source, "source_type", None) == "applecms":
+        line = _synthetic_cms_base_source(item, mapping, base, api_key, db)
+        cached = _up.read_cms_quality(mapping.id) or {}
+        name = (cached.get("label")
+                or ql.label_from_streams(line.get("MediaStreams"))
+                or item.name)
+    else:
         # 无本地源（上游托管行，进库一期）：合成基础源——本地行数据
         # 打底、媒体参数现查上游补强（见 _synthetic_upstream_base_source）。
-        base_source = _synthetic_upstream_base_source(
-            item, _mapping, source, base, api_key, db)
-    line = copy.deepcopy(base_source)
+        line = _synthetic_upstream_base_source(
+            item, mapping, source, base, api_key, db)
+        name = (ql.label_from_streams(line.get("MediaStreams"))
+                or item.name)
     url, _exp, _sig = _signed_upstream_line_url(
-        item, base, user_id, db, api_key, with_sign=with_sign)
+        item, base, user_id, db, api_key, with_sign=with_sign,
+        mapping_id=mapping.id)
     line.update({
-        "Id": f"{item.guid}:upstream",
-        "Name": f"{item.name} · 上游 · {source.name}",
+        "Id": f"{item.guid}:upstream:{mapping.id}",
+        "Name": name,
         "Path": None,
         "Protocol": "Http",
         "IsRemote": True,
@@ -1510,6 +1566,34 @@ def _upstream_line_media_source(item, base_source: dict, base: str, user_id,
     })
     line.pop("TranscodingUrl", None)
     return line
+
+
+def _upstream_line_media_sources(item, base_source, base: str, user_id,
+                                 db, api_key: str = "",
+                                 with_sign: bool = True) -> list:
+    """详情/PlaybackInfo 来源列表的上游线路（全部可展示映射各一条）。
+
+    开关关/无可展示映射返回空列表。线路排在既有来源之后，偏好序
+    与 get_best_mapping 一致（最佳在前）。
+    """
+    from backend.emby_server import upstream_playback as _up
+    if db is None or not _up.detail_line_enabled(db):
+        return []
+    return [
+        _upstream_line_for_mapping(
+            item, mapping, source, base_source, base, user_id, db,
+            api_key, with_sign)
+        for mapping, source in _up.get_displayable_mappings(db, item.id)
+    ]
+
+
+def _upstream_line_media_source(item, base_source: dict, base: str, user_id,
+                                db, api_key: str = "",
+                                with_sign: bool = True):
+    """单条口径兼容包装：返回最佳一条线路或 None（新代码用复数版）。"""
+    lines = _upstream_line_media_sources(
+        item, base_source, base, user_id, db, api_key, with_sign)
+    return lines[0] if lines else None
 
 
 def _synthetic_upstream_base_source(item, mapping, source, base: str,
@@ -1545,15 +1629,35 @@ def _synthetic_upstream_base_source(item, mapping, source, base: str,
     return dto
 
 
-def _upstream_only_media_source(db, item, request, user):
-    """PlaybackInfo 托管行专用：只组装上游线路一条源（同步，run_db 内跑）。
+def _upstream_only_media_sources(db, item, request, user):
+    """PlaybackInfo 托管行专用：组装全部上游线路源（同步，run_db 内跑）。
 
     签名轨与主流程同口径恒签（PlaybackInfo 入口已过付费墙与绑定
-    门禁）；无可展示映射返回 None，调用方回空源（原口径）。
+    门禁）；无可展示映射返回空列表，调用方回空源（原口径）。
     """
     base = _base_url(request)
-    return _upstream_line_media_source(
+    return _upstream_line_media_sources(
         item, None, base, user.id if user else None, db, "", True)
+
+
+def _quality_name_for_item(item: em.MediaItem) -> str:
+    """MediaSource.Name 的画质口径（站主 2026-11-02 亲定）。
+
+    纯画质标签（探测宽高/video_range 优先、文件名解析补缺，见
+    quality_label）；判不出回落条目名——Emby 默认形态，不许拿
+    片名以外的信息凑数。播放器来源卡的标题与分辨率页签都吃这个
+    字段：下发片名时卡片只剩「文件」、落进「其他」页签（用户
+    2026-11-02 截图实证）。
+    """
+    from backend.emby_server import quality_label as ql
+    video_range = None
+    for s in (item.streams or []):
+        if (s.stream_type or "").lower() == "video":
+            video_range = s.video_range
+            break
+    label = ql.label_for(item.width, item.height, video_range,
+                       item.file_path)
+    return label or item.name
 
 
 def _media_source(item: em.MediaItem, base: str, api_key: str = "", db: Session = None,
@@ -1564,7 +1668,7 @@ def _media_source(item: em.MediaItem, base: str, api_key: str = "", db: Session 
     _supports_transcoding = False
     dto = {
         "Id": item.guid,
-        "Name": item.name,
+        "Name": _quality_name_for_item(item),
         # 隐藏时置 None，由下面的 _strip_nulls 整个去掉（官方 Path 可空，客户端兼容）
         "Path": None if hide_media_path() else item.file_path,
         "Protocol": "File",
@@ -5682,12 +5786,12 @@ async def playback_info(
             # 口径不变。无映射仍回空源（原口径）。
             if item.item_type in ("movie", "episode"):
                 _up_only = await run_db(
-                    _upstream_only_media_source, db, item, request, user)
-                if _up_only is not None:
+                    _upstream_only_media_sources, db, item, request, user)
+                if _up_only:
                     _pt.mark("upstream_only_source")
                     _pt.done()
                     return _strip_nulls({
-                        "MediaSources": [_up_only],
+                        "MediaSources": _up_only,
                         "PlaySessionId": secrets.token_hex(8),
                         "ErrorCode": None,
                     })
@@ -5702,13 +5806,13 @@ async def playback_info(
                     _resolve_hosted_series_episode, db, user, item)
                 if _hosted_episode is not None:
                     _up_only = await run_db(
-                        _upstream_only_media_source, db,
+                        _upstream_only_media_sources, db,
                         _hosted_episode, request, user)
-                    if _up_only is not None:
+                    if _up_only:
                         _pt.mark("upstream_only_source_hosted_series")
                         _pt.done()
                         return _strip_nulls({
-                            "MediaSources": [_up_only],
+                            "MediaSources": _up_only,
                             "PlaySessionId": secrets.token_hex(8),
                             "ErrorCode": None,
                         })
@@ -6149,11 +6253,11 @@ async def playback_info(
     # PlaybackInfo 入口已过播放门禁，签名按主源同口径恒签。
     if sources and not _pi_quota_error:
         try:
-            _up_line = await run_db(
-                _upstream_line_media_source, item, sources[0], base,
+            _up_lines = await run_db(
+                _upstream_line_media_sources, item, sources[0], base,
                 user.id, db, api_key, True)
-            if _up_line is not None:
-                sources.append(_up_line)
+            if _up_lines:
+                sources.extend(_up_lines)
         except Exception as exc:  # noqa: BLE001 — 线路组装失败不打挂主响应
             logger.warning("上游线路组装失败 item=%s: %s", item.id, exc)
     _playback_variants = None
@@ -7525,10 +7629,29 @@ async def upstream_item_stream(
     from backend.emby_server import playback_gate as _gate
     await run_db(_gate.ensure_binding_playback_allowed, db, user)
     item = await run_db(_require_visible_item, db, user, item_id)
+    # 定向解析（多线形态）：MediaSourceId 带映射 id 时只解那一条，
+    # 形态对不上（别条目的 id / 非上游 id / id 段非数字）直接 404
+    # 硬报错——选错不偷偷换线。不带或只到 :upstream 的旧形态走
+    # 最佳映射（见 resolve_mapped_upstream_stream 的 mapping_id 口径）。
+    _mapping_id = None
+    _msid = (request.query_params.get("MediaSourceId") or "").strip()
+    if _msid:
+        _prefix = f"{item_id}:upstream"
+        if _msid == _prefix:
+            _mapping_id = None
+        elif _msid.startswith(_prefix + ":") and \
+                _msid[len(_prefix) + 1:].isdigit():
+            _mapping_id = int(_msid[len(_prefix) + 1:])
+        else:
+            _exc = _up.UpstreamPlaybackError(
+                404, "upstream_mapping_not_found", "所选线路已不可用")
+            return JSONResponse(status_code=_exc.status,
+                                content=_exc.to_body())
     _t0 = time.perf_counter()
     try:
         _url = await run_in_threadpool(
-            _up.resolve_mapped_upstream_stream, db, item.id)
+            _up.resolve_mapped_upstream_stream, db, item.id,
+            mapping_id=_mapping_id)
     except _up.UpstreamPlaybackError as exc:
         return JSONResponse(status_code=exc.status, content=exc.to_body())
     _note_mapped_upstream_play_start_safe(
