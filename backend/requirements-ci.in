@@ -6,6 +6,3 @@
 # CI 安装时与生产锁一起用 --require-hashes 装。
 zhconv
 pytest
-# pytest-xdist：冒烟套件并行（CI 提速二期）。只在 CI 的 pytest 步以
-# -n auto --dist loadfile 使用；版本与哈希同样钉进 requirements-ci.lock。
-pytest-xdist
