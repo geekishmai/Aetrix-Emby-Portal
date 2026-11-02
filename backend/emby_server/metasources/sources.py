@@ -542,7 +542,21 @@ def search_tvdb(title: str, year: Optional[int], kind: str, *, pool, gate) -> Op
     )
 
 
+def search_metatube(title: str, year: Optional[int], kind: str, *, pool, gate) -> Optional[Hit]:
+    """MetaTube（番号）：本地 metatube-server HTTP API（见 metatube 模块）。
+
+    未配置 ``METATUBE_BASE_URL`` 时抛 ``count_failure=False`` 的 SourceError
+    （配置问题不计熔断）；非番号标题返回 None 且不发网络。
+    """
+    from backend.emby_server.metasources import metatube
+
+    return metatube.search(title, year, kind, pool=pool, gate=gate)
+
+
 SPECS: list = [
+    SourceSpec("metatube", "MetaTube（番号）", False, "ja",
+               "番号（JAV）专用：只对番号形态标题发请求；需设置环境变量 "
+               "METATUBE_BASE_URL 后启用（未配置时整源不参与）", search_metatube),
     SourceSpec("bangumi", "Bangumi（番组）", False, "zh",
                "中文番剧最准；公开接口，按 UA 礼仪限速", search_bangumi),
     SourceSpec("douban", "豆瓣", False, "zh",
