@@ -8407,8 +8407,17 @@ def notify_transfer_wakeup(job_id=None):
 
 
 def _wake_subscriber_loop(stop_event):
-    """Redis 订阅线程：收到唤醒即置进程内 Event，订阅断了就重连等
-    下一轮兜底扫，绝不炸主循环。"""
+    """Redis 订阅线程：收到唤醒即置进程内 Event；订阅断了也先置
+    一次 Event 再重连——断连本身就是认领触发信号。
+
+    为什么不断连也唤醒（2026-11-02 生产实证）：Redis 客户端
+    socket_timeout=1 秒时 listen 每轮都抛 TimeoutError，订阅线程
+    每约 31 秒断开重连，期间新单的即时认领通道事实上失效，主循环
+    只剩 60 秒兜底扫；实测认领节奏启动突发后停 4–7 分钟一轮、
+    13 单 pending 无人认领。断连时先唤醒主循环跑一轮认领，再等
+    30 秒重连：最坏也只是断连期间每 30 秒多跑一轮认领查询
+    （空队时仅一次查库），不改 60 秒兜底扫、不改重连间隔。
+    订阅正常时行为逐字不变。"""
     while not stop_event.is_set():
         try:
             from backend.database import get_redis
@@ -8426,6 +8435,10 @@ def _wake_subscriber_loop(stop_event):
         except Exception:
             logger.warning("转存工人：唤醒订阅断开，30 秒后重连",
                            exc_info=True)
+            # 断连即唤醒：本轮订阅已死，靠它触发的认领不能再等
+            # 下一轮订阅或 60 秒兜底扫；主循环醒来跑一轮认领后
+            # 若队空即回等待，额外开销仅一次认领查询。
+            _WAKE_EVENT.set()
             stop_event.wait(30)
 
 
