@@ -223,3 +223,15 @@ def test_405_and_429_counters_independent():
     pg.after_error(cookie, 429)
     reason, remaining = pg.cooldown_state(scope)
     assert remaining <= 7200 + 10  # base~cap 区间，绝不是 24h
+
+
+def test_mount_wrap_ignores_foreign_retry_after():
+    """QA R-1：别的异常带 retry_after 属性也不能被当成冷却"""
+    from backend.emby_server import mounts
+
+    class _SdkRetry(Exception):
+        retry_after = 7
+
+    wrapped = mounts.Pan115Mount._wrap(object.__new__(mounts.Pan115Mount), _SdkRetry("x"))
+    assert not isinstance(wrapped, mounts.MountCooldownError)
+    assert isinstance(wrapped, mounts.MountError)

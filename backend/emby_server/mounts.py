@@ -1365,9 +1365,11 @@ class Pan115Mount(MountProvider):
             return MountAuthError(str(exc))
         if isinstance(exc, transfer115.Pan115CooldownError):
             return MountCooldownError(str(exc), getattr(exc, "retry_after", None))
-        if type(exc).__name__ == "Pan115CooldownError" or hasattr(exc, "retry_after"):
-            # pan115_guard.Pan115CooldownError（guard 模块自己的类）：
-            # 不 import guard（避免循环依赖），按类型名/属性识别。
+        # pan115_guard.Pan115CooldownError（guard 模块自己的类）：按类型白名单识别，
+        # 不按 retry_after 属性猜——别的 SDK 异常带同名属性时不能被当成冷却（QA R-1）。
+        # guard 只依赖 env_util，局部 import 无循环。
+        from backend.emby_server import pan115_guard
+        if isinstance(exc, pan115_guard.Pan115CooldownError):
             return MountCooldownError(str(exc), getattr(exc, "retry_after", None))
         return MountError(str(exc))
 
