@@ -190,6 +190,23 @@ def test_threshold_reached_auto_disables_cms_source(db, store):
     assert _enabled(db, src.id) is False
 
 
+def test_rate_limited_does_not_count_toward_breaker(db, store):
+    # PA-078：429 是源站对共享 IP 的短暂限流，不是源坏了的证据，
+    # 与 403（upstream_forbidden）同口径：一律不记失败、不触发熔断。
+    # 结构化错误本身不变（仍向调用方报 429 upstream_quota_exhausted）。
+    src = _make_source(db, "被限流源")
+    for _ in range(3):
+        with pytest.raises(up.UpstreamPlaybackError) as exc:
+            up.resolve_upstream_stream(
+                db, src.id, "202", http_get=_detail_get(DETAIL),
+                http_probe=_probe(429))
+        assert exc.value.code == "upstream_quota_exhausted"
+    record = store.get_source(str(src.id))
+    assert record is None or record.consecutive_unavailable_failures == 0
+    assert record is None or record.availability_state != uh.STATE_UNAVAILABLE
+    assert _enabled(db, src.id) is True
+
+
 def test_breaker_threshold_env_override(db, store, monkeypatch):
     monkeypatch.setenv("APPLECMS_CIRCUIT_BREAKER_THRESHOLD", "2")
     assert up.cms_circuit_breaker_threshold() == 2
