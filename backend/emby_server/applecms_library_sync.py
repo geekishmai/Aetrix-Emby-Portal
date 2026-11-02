@@ -22,6 +22,14 @@
   先于总库同步（guid 先到先锚：地区库先认领本桶条目，总库只
   收剩下的其他/未知地区）。剧集库不走桶校验：其地区细拆按
   白名单口径承接（见下「库是配置层」条）。
+- 多源元数据合并填充（2026-11-02 站主亲点）：list 负载现成带的
+  海报/地区/分类名/备注/评分/演员/简介，建行时落、重见时跨源
+  **只填空缺**合并到同一行（后到源绝不覆盖已有非空值）。电影行
+  与剧集的剧行同走这一套（剧行只吃 list 字段，其 detail 仍只取
+  集列表；集行不填充）。这是「先有着看」的暂定资料：填过的行
+  标 ``metadata_source="applecms"``，TMDB 仍是权威——补身份命中
+  后 TMDB 的海报/文字可盖过源站填充（tmdb.py 对该标记的填空
+  豁免）。身份字段（tmdb_id/imdb_id）仍归 enrich 链，本工人绝不碰。
 - 身份不豁免：行建成托管行后 ``enrich_status`` 保持 ``pending``，
   现有 enrich 工人对 ``upstream_source_id`` 非空的行自动走「只走
   TMDB」补身份分支；对不上身份的行按现行货架规矩不上架，本模块
@@ -617,7 +625,7 @@ def _process_entry(db: Session, library, source, entry: dict,
         if harvest and _fill_row_from_harvest(db, row, harvest):
             db.flush()
     else:
-        changed = _refresh_row(row, record)
+        changed = _refresh_row(db, row, record)
         if harvest and _fill_row_from_harvest(db, row, harvest):
             changed = True
         if changed:
@@ -707,8 +715,10 @@ def _process_series_entry(db: Session, library, source, entry: dict,
         row = _find_series_row(db, library, source, vod_id, record, key)
         if row is not None and row is not _OTHER_LIBRARY:
             run_cache[key] = row
+            # 剧行与电影行同口径：list 自带资料建行即填空（集行不填）。
+            _fill_row_from_record(db, row, record)
     else:
-        if _refresh_row(row, record):
+        if _refresh_row(db, row, record):
             stats["updated"] += 1
         else:
             stats["existing"] += 1
@@ -830,6 +840,7 @@ def _create_row(db: Session, library, source, vod_id: str,
     )
     db.add(row)
     db.flush()
+    _fill_row_from_record(db, row, record)
     return row
 
 
@@ -851,10 +862,82 @@ def _fill_row_poster(row: em.MediaItem, entry) -> bool:
     return True
 
 
-def _refresh_row(row: em.MediaItem, record) -> bool:
-    """重见时刷新可变字段（名字/年份）；有变化返回 True。
+#: 源站填充的出处标记（metadata_source 列的暂定值）：与 tmdb /
+#: douban / nfo 等「已刮到权威数据」的标记区分——带此标记说明行上
+#: 文字/图片只是 CMS 源站自带资料，TMDB 命中后可盖过（见 tmdb.py
+#: apply / apply_details 对该值的填空豁免）。
+CMS_METADATA_SOURCE = "applecms"
 
-    只填新值非空且不同的字段，绝不清空已有值；身份字段
+
+def _fill_people(db: Session, row: em.MediaItem, record) -> bool:
+    """演员填空：行上还没有任何人物行时，按记录的演员名单落行。
+
+    与 enrich 侧 ``_apply_cast`` / ``_apply_douban_cast`` 同口径：
+    人物行「先写者赢」——已有行（哪怕是另一源写的）就不合并、
+    不重写，TMDB 命中后按名字补头像/id。导演不落行：现有人物
+    模型只有演员一种类型（EA 的 People 恒 Type=Actor、TMDB 侧
+    也只落 cast），把导演写成演员是错数据；导演只采集进 record，
+    待人物模型支持导演类型后另行落。
+    """
+    if not record.actors:
+        return False
+    exists = (db.query(em.EmbyPerson.id)
+              .filter(em.EmbyPerson.item_id == row.id)
+              .first())
+    if exists:
+        return False
+    for idx, name in enumerate(record.actors):
+        db.add(em.EmbyPerson(
+            item_id=row.id, name=str(name)[:200], role="", image="",
+            sort_order=idx, person_tmdb_id=""))
+    return True
+
+
+def _fill_row_from_record(db: Session, row: em.MediaItem,
+                          record) -> bool:
+    """源站自带元数据合行填空：只填行上为空的字段，绝不覆盖。
+
+    落点（沿用现有列，不新建列）：海报→primary_image_url、
+    简介→overview、评分→community_rating、地区→countries
+    （vod_area 原文，如「中国大陆」；TMDB 对上后 origin_country
+    会按 tmdb.py 的豁免盖过，分流口径需同时认两套词表）、
+    分类名→genres、备注→tagline、演员→emby_people。
+    任一字段被填且行上还没有出处标记时，标
+    ``metadata_source="applecms"``（暂定填充）；已有真实标记
+    （tmdb/douban/nfo 等）绝不动。身份字段不碰。
+    """
+    changed = False
+    if record.poster_url and not (row.primary_image_url or "").strip():
+        row.primary_image_url = record.poster_url[:1024]
+        changed = True
+    if record.blurb and not (row.overview or "").strip():
+        row.overview = record.blurb
+        changed = True
+    if record.score is not None and row.community_rating is None:
+        row.community_rating = record.score
+        changed = True
+    if record.area and not (row.countries or "").strip():
+        row.countries = record.area[:500]
+        changed = True
+    if record.category_name and not (row.genres or "").strip():
+        row.genres = record.category_name
+        changed = True
+    if record.remarks and not (row.tagline or "").strip():
+        row.tagline = record.remarks[:300]
+        changed = True
+    if _fill_people(db, row, record):
+        changed = True
+    if changed and not (row.metadata_source or "").strip():
+        row.metadata_source = CMS_METADATA_SOURCE
+    return changed
+
+
+def _refresh_row(db: Session, row: em.MediaItem, record) -> bool:
+    """重见时刷新可变字段（名字/年份）＋跨源填空合并；有变化返回 True。
+
+    名字/年份沿用旧口径（新值非空且不同才改，绝不清空）；其余
+    源站字段走 :func:`_fill_row_from_record` 只填空缺——同一部片
+    在多个源出现时，各源带来的资料互补合并到同一行。身份字段
     （tmdb_id 等）归 enrich 链管，本工人不碰。
     """
     changed = False
@@ -865,6 +948,8 @@ def _refresh_row(row: em.MediaItem, record) -> bool:
     if (record.production_year is not None
             and row.production_year != record.production_year):
         row.production_year = record.production_year
+        changed = True
+    if _fill_row_from_record(db, row, record):
         changed = True
     return changed
 
