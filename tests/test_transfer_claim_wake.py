@@ -162,7 +162,7 @@ def test_daemon_claims_late_job_while_subscription_broken(
                 status = row.status
             finally:
                 check.close()
-            if status != "pending":
+            if status == "done":
                 break
             time.sleep(0.1)
         assert status == "done"
