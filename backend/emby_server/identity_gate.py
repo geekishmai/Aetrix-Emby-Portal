@@ -179,6 +179,15 @@ def _external_bound_sql(col) -> object:
     return or_(*conds)
 
 
+def external_bound_sql(col) -> object:
+    """external_ids 任一在用来源键非空的 SQL 判据（公开入口）。
+
+    实现就是 :func:`_external_bound_sql`；enrich 队列谓词复用它，
+    不许在队列模块里另写一份 LIKE 模式（横切能力只许一套）。
+    """
+    return _external_bound_sql(col)
+
+
 def _own_bound(item) -> object:
     """行自身已绑定：tmdb_id / imdb_id 任一在 strip 后非空，或
     external_ids 任一在用来源键非空（2026-11-02 扩围）。

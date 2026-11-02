@@ -4932,8 +4932,13 @@ def _enrich_apply_two_stage(db, item: Any, fetched: dict,
 
     had_tmdb = _bound_value(getattr(item, "tmdb_id", None))
 
+    # bound 必须与 enrich_queues.queue_of 同判据（PA-081）：tmdb/imdb
+    # 两列之外，external_ids 任一在用来源键也算绑定（identity_gate
+    # 单一实现，不在此另抄键名单）。否则仅外部身份的行在刮削队列里
+    # 被当成未绑定、回落现行写库，apply_fill 全程跑不到。
+    from backend.emby_server import identity_gate as _ig
     bound = _bound_value(getattr(item, "tmdb_id", None)) or _bound_value(
-        getattr(item, "imdb_id", None))
+        getattr(item, "imdb_id", None)) or _ig.has_external_identity(item)
     do_identify = ts.identify_enabled() if identify is None else bool(identify)
     do_fill = ts.fill_enabled() if fill is None else bool(fill)
     if not do_identify and not do_fill:
@@ -5039,27 +5044,10 @@ def _enrich_apply_two_stage(db, item: Any, fetched: dict,
             fetched["_parent_tmdb_newly_acquired"] = item.id
         _maybe_queue_probe(db, item)
         return
-    if not _bound_value(getattr(item, "tmdb_id", None)) \
-            and not _bound_value(getattr(item, "imdb_id", None)):
-        # 身份只落在 external_ids（豆瓣等来源定的身份，2026-11-02）：
-        # 没有 tmdb/imdb 列，刮削队列的认领谓词（只认两列）永远不会
-        # 捞它——回 pending 只会在识别队列里按 unfilled_retry 无限
-        # 空转。识别即终态：按 done 收尾（与补资料段收尾同字段集），
-        # 资料补缺留待后续巡检/重排，不假装等得到认领。
-        item.enrich_status = "done"
-        item.enrich_attempts = 0
-        item.enrich_last_error = None
-        item.enrich_next_retry_at = None
-        item.enrich_claimed_at = None
-        item.enrich_claim_token = None
-        item.enrich_priority = 0
-        if not getattr(item, "last_scraped_at", None):
-            item.last_scraped_at = datetime.now()
-        _maybe_queue_probe(db, item)
-        logger.info(
-            "external_ids 身份条目识别终态 done"
-            "（无 tmdb/imdb 列，不回识别队列空转）id=%s", item.id)
-        return
+    # PA-081：上面那支“仅外部身份识别即终态 done”已删除。队列谓词
+    # 已与身份判据同源，外部身份行属刮削队列——识别段定下绑定后与
+    # tmdb/imdb 行同口径回 pending（见下），下一轮由刮削队列认领并
+    # 真正跑 apply_fill；直接 done 会让简介/海报/类型永远补不上。
     # 识别段开、补资料段关：身份已落库，本条回 pending 等刮削队列认领。
     item.enrich_status = "pending"
     item.enrich_next_retry_at = datetime.now() + timedelta(

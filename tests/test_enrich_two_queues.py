@@ -2,7 +2,8 @@
 
 钉死：
 ① 队列是虚拟的（抢单谓词），不是新状态值：未绑定进识别队列，
-   已绑定进刮削队列；NULL 与空串都算未绑定；
+   已绑定进刮削队列；NULL 与空串都算未绑定；已绑定含 external_ids
+   任一在用来源键（与 identity_gate.is_bound_row 同判据，PA-081）；
 ② 两队列抢单互斥：识别抢单只捞未绑定，刮削抢单只捞已绑定；
 ③ AI 政策：权重上限 0.2、纯 AI 提名拒绝落库、强弱阈值 0.9/0.65，
    两开关默认关；
@@ -68,6 +69,25 @@ def test_queue_of_bound_and_unbound():
     assert eq.queue_of(SimpleNamespace(tmdb_id="60300", imdb_id=None)) == "fill"
     assert eq.queue_of(SimpleNamespace(tmdb_id=None, imdb_id="tt0903747")) == "fill"
     assert eq.queue_of(SimpleNamespace()) == "identify"  # 缺字段按未绑定
+    # PA-081：仅外部身份也算已绑定（与 identity_gate 同判据）。
+    assert eq.queue_of(SimpleNamespace(
+        tmdb_id=None, imdb_id=None,
+        external_ids='{"douban": "36742042"}')) == "fill"
+    assert eq.queue_of(SimpleNamespace(
+        tmdb_id=None, imdb_id=None,
+        external_ids='{"bangumi": "123"}')) == "fill"
+    assert eq.queue_of(SimpleNamespace(
+        tmdb_id=None, imdb_id=None,
+        external_ids='{"tmdb": "60300"}')) == "fill"
+    assert eq.queue_of(SimpleNamespace(
+        tmdb_id=None, imdb_id=None,
+        external_ids='{"other_key": "1"}')) == "identify"  # 名单外键不算
+    assert eq.queue_of(SimpleNamespace(
+        tmdb_id=None, imdb_id=None,
+        external_ids='{"douban": ""}')) == "identify"  # 空值不算
+    assert eq.queue_of(SimpleNamespace(
+        tmdb_id=None, imdb_id=None,
+        external_ids='{"douban": "  "}')) == "identify"  # 空白不算
 
 
 def test_queue_filter_unknown_raises():
@@ -87,6 +107,10 @@ def test_claim_batches_split_by_binding(db):
     unbound_b = _make_item(db, name="未绑定B")
     bound_a = _make_item(db, name="已绑定A", tmdb_id="60300")
     bound_b = _make_item(db, name="已绑定B", imdb_id="tt0903747")
+    bound_c = _make_item(db, name="已绑定C",
+                         external_ids='{"douban": "36742042"}')
+    bound_d = _make_item(db, name="已绑定D",
+                         external_ids='{"bangumi": "123"}')
     db.commit()
 
     identify_claimed = enrich_worker._claim_batch(db, 10, queue="identify")
@@ -95,7 +119,7 @@ def test_claim_batches_split_by_binding(db):
 
     fill_claimed = enrich_worker._claim_batch(db, 10, queue="fill")
     fill_ids = {row.id for row in fill_claimed}
-    assert fill_ids == {bound_a.id, bound_b.id}
+    assert fill_ids == {bound_a.id, bound_b.id, bound_c.id, bound_d.id}
 
 
 def test_claim_batch_no_queue_unchanged(db):
