@@ -56,7 +56,8 @@ class AdminLog(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    admin_user_id = Column(Integer, ForeignKey('admin_users.id'))
+    # 存的是管理员的 web_users.id（admin_users 已废弃，见 admin_core._audit）
+    admin_user_id = Column(Integer, ForeignKey('web_users.id'))
     action = Column(String(100), nullable=False)  # 操作类型
     target_type = Column(String(50))  # 操作目标类型
     target_id = Column(Integer)  # 操作目标ID
@@ -65,7 +66,7 @@ class AdminLog(Base):
     user_agent = Column(String(500))
     created_at = Column(DateTime, default=datetime.now)
 
-    admin_user = relationship("AdminUser")
+    admin_user = relationship("WebUser", foreign_keys=[admin_user_id])
 
 
 class SystemConfig(Base):
