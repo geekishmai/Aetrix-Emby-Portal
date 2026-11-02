@@ -325,6 +325,8 @@ _QUERY_JUNK_RE = re.compile(r"""(?ix)
     | \b(1080[ip]|720p|480p|2160p|4k|8k|10bit)\b
     | \b(s\d{1,2}e\d{1,3}|e\d{1,3}|ep\d{1,3}|d[12]|disc\s?\d|cd[12])\b
     | (原盘|中字|简繁\w{0,3}|繁中|简中|粤语|国语|双语|高码率|重制版|蓝光|特效|花絮|熟肉|生肉)
+    | \b(2d3d|ttg|ddp)\b
+    | (?<=[\s\-_\[\(（【])(?:ma|hd|hk|tw|us|gb)(?=[\s\-_\)\)）】]|$)
 """)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ffー]+")
 # 归一化：小写、去全部空白与标点（保留中日韩文字与字母数字）
@@ -346,6 +348,11 @@ _YEAR_RE = re.compile(r"(19\d{2}|20\d{2})")
 # 目录名尾部的年份：` (2009)` / `(2023-)` / ` - 2019` / ` 2019 年` 等
 _YEAR_TAIL_RE = re.compile(
     r"[\(\（\[【]?\s*(?:19|20)\d{2}\s*(?:[-–—~]\s*\d{0,4})?\s*[\)）\]】]?\s*(?:年|Season\s*\d{1,2}?)?\s*$",
+    re.IGNORECASE,
+)
+_REGION_TAIL_RE = re.compile(
+    r"\s+[\[\(（【]?\s*(?:hktv|hk|tw|us|gb|kr|jp|cn|2d3d|3d|avc|hevc|ma|ttg|adweb|"
+    r"1080p|2160p|4k|uhd|remux|web[\s\-]?dl|blu[\s\-]?ray)\s*[\]\)）】]?\s*$",
     re.IGNORECASE,
 )
 
@@ -613,6 +620,27 @@ def _search_candidates(name, year=None):
     cjk = " ".join(_CJK_RE.findall(cleaned))
     if cjk and cjk not in [x[0] for x in cands]:
         cands.append((cjk, False))
+    # v3：区域/介质尾词剥离（发行组/介质标签常挂在名字尾部，如
+    # 词表先剥 2d3d/avc/ttg，剩余「HK/HD/MA」仍会卡置信门）。尾部逐词
+    # 剥离的变体放候选末段，命中仍须过 _hit_score Tier 裁剪。
+    tail = re.sub(_REGION_TAIL_RE, " ", cleaned).strip(" -_.()（）")
+    while True:
+        t2 = re.sub(_REGION_TAIL_RE, " ", tail).strip(" -_.()（）")
+        t2 = re.sub(r"\s+", " ", t2).strip()
+        if t2 == tail:
+            break
+        tail = t2
+    if tail and tail != cleaned and tail not in [x[0] for x in cands]:
+        cands.append((tail, True))
+    # 仅英文段：双语标题（中文 + 英文名）在 TMDB 是独立索引项，中英混查
+    # 常零结果；英文名往往是 TMDB 的 original/aka 标题。仅中文段上面
+    # 已有（cjk 候选），这里只补拉丁段——按「连续拉丁段」取，避免把
+    # 首字母孤词（如译名残留的 “A”）与正主英文段拼成假查询。
+    for latin in re.findall(r"[A-Za-z][A-Za-z'&.\-]*(?: [A-Za-z][A-Za-z'&.\-]*)*", cleaned):
+        latin = latin.strip()
+        if (len(latin) >= 4 and latin != cleaned
+                and latin not in [x[0] for x in cands]):
+            cands.append((latin, True))
     if year:
         # 年份可能是标题的一部分（如 Wonder Woman 1984，实为 2020 年电影）：
         # 补一个带年份的候选，否则永远精确命中不了它

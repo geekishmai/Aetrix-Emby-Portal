@@ -59,7 +59,6 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 PACK_NAME = "naming-cleanup"
-PACK_VERSION = "v2"
 
 # 默认词表：与 scanner._tidy_name 原内联正则的交替项逐字一致、顺序
 # 一致（原正则 ``\\b(... )\\b``）。改这里即改包内容，content_hash
@@ -81,6 +80,12 @@ DEFAULT_STRIP_TERMS = (
     r"web[\s\-]?dl", "webrip", "web", "remux", r"blu[\s\-]?ray", "bluray",
     "bdrip", "brrip", "hdtv", "dvdrip", "diy", "repack", "proper",
     "multi", "internal", "chs&eng", "chs", "cht", "eng", "gb", "big5",
+    # v3（2026-11-02 实证：《哆啦A梦：伴我同行》.iso 标题
+    # 「… HK 2D3D AVC HD MA TTG」残余四词）：介质/视图变体与发行组标签。
+    # 挑选标准与 v2 相同——只加已实证撞过词的；`ma`、`hk` 等易撞真词
+    # （电影《Ma》、HK 常见于正式标题）不进全局词表，由搜索候选的
+    # 「区域/介质尾词剥离」变体层处理（scanner._search_candidates）。
+    "avc", "2d3d", "ttg",
 )
 
 # v2 新增词条（冻存 v1 的依据）：v1 = 现行词表去掉下面这 7 条。
@@ -92,13 +97,21 @@ _V2_ADDED_TERMS = (
     r"eac3\s+\d\s+\d", r"ac3\s+\d\s+\d", r"aac\s+\d\s+\d",
 )
 
+# v3 新增词条（v3 = 现行词表去掉这 3 条即 v2）。
+_V3_ADDED_TERMS = ("avc", "2d3d", "ttg")
+
+PACK_VERSION = "v3"
+
 #: 版本 → 词表冻存。新增版本时在此加一版、PACK_VERSION 指过去，
 #: 旧版词表永不改——改旧版词表等于改写历史，回滚就无据可查。
 PACK_VERSION_TERMS = {
-    "v1": tuple(t for t in DEFAULT_STRIP_TERMS if t not in _V2_ADDED_TERMS),
-    "v2": DEFAULT_STRIP_TERMS,
+    "v1": tuple(t for t in DEFAULT_STRIP_TERMS if t not in _V2_ADDED_TERMS
+                and t not in _V3_ADDED_TERMS),
+    "v2": tuple(t for t in DEFAULT_STRIP_TERMS if t not in _V3_ADDED_TERMS),
+    "v3": DEFAULT_STRIP_TERMS,
 }
-PACK_VERSION_ORDER = ("v1", "v2")
+PACK_VERSION_ORDER = ("v1", "v2", "v3")
+PACK_VERSION = "v3"
 
 # 保护词占位符：私有区字符（U+E000 起）不是 \\w 词字符，任何
 # \\b 界定的词条都不可能在占位符里命中，也不会跨占位符拼出词条。

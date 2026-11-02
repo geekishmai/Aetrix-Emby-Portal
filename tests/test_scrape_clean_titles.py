@@ -179,11 +179,17 @@ class TestNoPosterQueryTitle:
 
 
 class TestRulePackV2:
-    """v2 词表：ADWeb 与声道多词条进包，旧词行为不变。"""
+    """v2 词表：ADWeb 与声道多词条进包，旧词行为不变。
+    v3 起为现行版（见 TestRulePackV3，tests/test_naming_cleanup_v3.py），
+    这里只锁定 v2 行为在 v3 下不回退。"""
 
     def test_pack_version_is_v2(self):
-        assert rp.PACK_VERSION == "v2"
-        assert rp.default_pack().version == "v2"
+        assert rp.PACK_VERSION == "v3"
+        assert rp.default_pack().version == "v3"
+        # v2 行为在现行版下保持：adweb/声道词仍被剥
+        pack = rp.RulePack()
+        assert pack.strip("Film ADWeb 1080p").strip() == "Film"
+        assert pack.strip("Film DDP 2 0").strip() == "Film"
 
     def test_pack_strips_adweb_and_channel_terms(self):
         pack = rp.RulePack()
