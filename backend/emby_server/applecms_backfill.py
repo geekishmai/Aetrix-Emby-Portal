@@ -21,7 +21,10 @@
   凑数放松：剩几部补不上是可接受结果，错挂一部是事故。
 - **补前验活**：候选 detail 必须有全直链组（沿用旧口径）；首
   选线路首集地址做一次轻量存活探测（复用取流侧探活口径），
-  探不通的候选拒绝。停用源与未启用源不搜（行自带映射的源只
+  探不通的候选拒绝；仅 Range 探活被 403 时回落一次普通 GET
+  复验、拉到清单才算活（ppqrrs 类 CDN 单一 Range 口径误杀，
+  2026-11-02 生产实证，见 ``probe_first_episode``）。停用源与
+  未启用源不搜（行自带映射的源只
   许作只读参照资料，不作候选）。
 - **质量门同口径**：候选过既有质量门——短剧/微短剧/竖屏/竖版
   分类跳过；解说/预告/花絮/资讯分类不收；片名或备注带 CAM/TC/
@@ -836,14 +839,31 @@ def enabled_applecms_sources(db, library=None) -> List:
 # ---------------------------------------------------------------------------
 
 
+#: 补前探活 403 回落复验（普通 GET）的超时（秒）：只在 Range 探
+#: 活被 403 拒绝时走、一次为限；补源是离线批处理，慢死不许久等。
+_PROBE_GET_FALLBACK_TIMEOUT_SEC = 5.0
+
+
 def probe_first_episode(detail: dict, headers: dict, *,
-                        http_probe: Optional[Callable] = None) -> bool:
+                        http_probe: Optional[Callable] = None,
+                        http_get_text: Optional[Callable] = None) -> bool:
     """首选直链组首集地址存活探测：取流侧探活口径，200/206 算活。
 
     探测层默认复用 ``upstream_playback._default_http_range_probe``
     （Range 读 1 字节、有界跟随重定向并逐跳复验出站地址——上游
     以 302 发流是常见形态，不跟随会把可播内容误判死，2026-10-31
     生产实证）。探不通返回 False，调用方拒绝该候选。
+
+    403 回落复验（2026-11-02 生产实证）：ppqrrs 类 CDN 对 Range
+    请求回 403，普通 GET 却能拉到真清单（《爆笑虫子在中国》5 个
+    高置信候选全被单一 Range 口径误杀），而播放器拉清单本就不用
+    Range。故仅当 Range 探活最终状态为 403 时，回落一次无 Range
+    的普通 GET（默认复用取流侧 ``_default_http_get_text_followed``：
+    有界跟随、逐跳复验出站地址、只读一小段），200 且内容是清单
+    （#EXTM3U 开头）才算活；GET 也失败或非清单仍判死。其余失败
+    形态（404／超时／断连／5xx）不回落、维持原判死口径；403 本
+    身更不许一律放行——服务器侧对这类 CDN 偶发 GET 403，只能
+    给一次复验机会，不能假设 GET 必成功。
     """
     groups = acf.parse_play_groups(
         (detail or {}).get("vod_play_from"), (detail or {}).get("vod_play_url"))
@@ -862,7 +882,22 @@ def probe_first_episode(detail: dict, headers: dict, *,
             address, dict(headers or {}), 10.0)
     except Exception:  # noqa: BLE001 - 探测失败即不活，不外溢
         return False
-    return status in (200, 206)
+    if status in (200, 206):
+        return True
+    if status != 403:
+        return False
+    from backend.emby_server.upstream_playback import _is_playlist_text
+    if http_get_text is None:
+        from backend.emby_server.upstream_playback import (
+            _default_http_get_text_followed)
+        http_get_text = _default_http_get_text_followed
+    try:
+        get_status, text = http_get_text(
+            address, dict(headers or {}),
+            _PROBE_GET_FALLBACK_TIMEOUT_SEC)
+    except Exception:  # noqa: BLE001 - 复验失败即不活，不外溢
+        return False
+    return get_status == 200 and _is_playlist_text(text)
 
 
 # ---------------------------------------------------------------------------
@@ -918,6 +953,7 @@ def _fetch_ref_detail(db, row_id: int, have: set, http_get) -> Optional[dict]:
 
 def run_backfill(db, library, rows, *, expected_area_bucket=None,
                  apply: bool = False, http_get=None, http_probe=None,
+                 http_get_text=None,
                  tmdb_details: Optional[Callable] = None,
                  max_new_sources_per_row: int =
                  DEFAULT_MAX_NEW_SOURCES_PER_ROW,
@@ -1080,7 +1116,8 @@ def run_backfill(db, library, rows, *, expected_area_bucket=None,
                                else "low_confidence")
                 continue
             if not probe_first_episode(detail, headers,
-                                       http_probe=http_probe):
+                                       http_probe=http_probe,
+                                       http_get_text=http_get_text):
                 stats["probe_failed"] += 1
                 reasons.append("probe_failed")
                 for cand_audit in attempt["candidates"]:

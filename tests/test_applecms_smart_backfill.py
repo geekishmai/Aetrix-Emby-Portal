@@ -385,3 +385,133 @@ def test_run_backfill_rejects_short_drama_by_ancestor(db):
                 for attempt in a["attempts"]
                 for c in attempt["candidates"]]
     assert "quality:short_drama" in rejected
+
+
+# ---------------------------------------------------------------------------
+# 补前探活 403 回落 GET 复验（2026-11-02：ppqrrs 类 CDN 对 Range 回
+# 403、普通 GET 可拉真清单，单一 Range 口径误杀《爆笑虫子在中国》
+# 5 个高置信候选；仅 403 回落一次 GET，拉到清单才算活）
+# ---------------------------------------------------------------------------
+
+
+def _probe_detail():
+    return _detail(777, "虫子", 3)
+
+
+def _range(status):
+    return lambda url, headers, timeout: (status, None)
+
+
+def test_probe_range_ok_no_get_fallback():
+    calls = []
+
+    def get_text(url, headers, timeout):
+        calls.append(url)
+        return 200, "#EXTM3U\n#EXT-X-VERSION:3\n"
+
+    assert bf.probe_first_episode(
+        _probe_detail(), {}, http_probe=_range(206),
+        http_get_text=get_text)
+    assert calls == []  # Range 已判活，不许再发 GET
+
+
+def test_probe_range_403_get_playlist_saves_candidate():
+    seen = {}
+
+    def get_text(url, headers, timeout):
+        seen["url"] = url
+        seen["timeout"] = timeout
+        return 200, "#EXTM3U\n#EXTINF:9.0,\nseg.ts\n"
+
+    assert bf.probe_first_episode(
+        _probe_detail(), {"User-Agent": "UA"}, http_probe=_range(403),
+        http_get_text=get_text)
+    assert seen["url"].endswith("/777/e1.m3u8")
+    assert seen["timeout"] == bf._PROBE_GET_FALLBACK_TIMEOUT_SEC
+
+
+def test_probe_range_403_get_also_403_still_dead():
+    get_text = lambda url, headers, timeout: (403, None)  # noqa: E731
+    assert not bf.probe_first_episode(
+        _probe_detail(), {}, http_probe=_range(403),
+        http_get_text=get_text)
+
+
+def test_probe_range_403_get_error_still_dead():
+    def get_text(url, headers, timeout):
+        raise RuntimeError("boom")
+
+    assert not bf.probe_first_episode(
+        _probe_detail(), {}, http_probe=_range(403),
+        http_get_text=get_text)
+
+
+def test_probe_range_403_get_not_playlist_still_dead():
+    get_text = lambda url, headers, timeout: (  # noqa: E731
+        200, "<html>denied</html>")
+    assert not bf.probe_first_episode(
+        _probe_detail(), {}, http_probe=_range(403),
+        http_get_text=get_text)
+
+
+def test_probe_range_404_no_get_fallback():
+    calls = []
+
+    def get_text(url, headers, timeout):
+        calls.append(url)
+        return 200, "#EXTM3U\n"
+
+    assert not bf.probe_first_episode(
+        _probe_detail(), {}, http_probe=_range(404),
+        http_get_text=get_text)
+    assert calls == []  # 非 403 不回落，维持判死
+
+
+def test_probe_range_unreachable_no_get_fallback():
+    calls = []
+
+    def get_text(url, headers, timeout):
+        calls.append(url)
+        return 200, "#EXTM3U\n"
+
+    assert not bf.probe_first_episode(
+        _probe_detail(), {}, http_probe=_range(None),
+        http_get_text=get_text)
+    assert calls == []
+
+
+def test_run_backfill_probe_403_get_fallback_fills(db):
+    for sid, host, enabled in ((7, "s7.example", True),
+                               (8, "s8.example", False)):
+        db.add(em.UpstreamSource(
+            id=sid, name=f"源{sid}", source_type="applecms",
+            base_url=f"http://{host}", enabled=enabled,
+            user_agent="Mozilla/5.0 (test)"))
+    lib = em.Library(
+        guid="lib-cms-tv", name="在线国产剧", collection_type="tvshows",
+        is_enabled=True, kind="applecms", upstream_source_ids="7",
+        cms_type_map="{}")
+    db.add(lib)
+    db.commit()
+    source8 = db.get(em.UpstreamSource, 8)
+    row_a = _seed_row_with_only8(db, lib, source8, "901", "对局", 3)
+    rows = bf.find_unplayable_series(db, [lib.id], [7])
+    assert {r.id for r in rows} == {row_a.id}
+
+    http = FakeHttpGet()
+    probe403 = lambda url, headers, timeout: (403, None)  # noqa: E731
+    get_dead = lambda url, headers, timeout: (403, None)  # noqa: E731
+    get_live = lambda url, headers, timeout: (  # noqa: E731
+        200, "#EXTM3U\n#EXTINF:9.0,\nseg.ts\n")
+
+    dead = bf.run_backfill(db, lib, rows, expected_area_bucket="cn",
+                           apply=False, http_get=http,
+                           http_probe=probe403, http_get_text=get_dead)
+    assert dead["stats"]["filled"] == 0
+    assert dead["stats"]["probe_failed"] == 1
+
+    saved = bf.run_backfill(db, lib, rows, expected_area_bucket="cn",
+                            apply=False, http_get=http,
+                            http_probe=probe403, http_get_text=get_live)
+    assert saved["stats"]["filled"] == 1
+    assert saved["stats"]["probe_failed"] == 0
