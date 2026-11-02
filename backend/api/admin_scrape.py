@@ -1406,6 +1406,9 @@ class TmdbBindRequest(BaseModel):
     verify: bool = Field(default=True, description="绑定前先向 TMDB 校验该 ID 确实存在")
     mode: str = Field(default="missing",
                       description="补全模式：missing=仅补缺失（默认），all=全量刷新")
+    rename: bool = Field(default=False,
+                         description="同时把片名改成 TMDB 标题（按刮削语言，清洗后）；"
+                                     "默认不改，保护管理员手改过的名字")
 
 
 # IMDb ID 形如 tt1234567（tt + 纯数字）；纯数字才是 TMDB ID
@@ -1645,6 +1648,16 @@ def bind_tmdb_id(
                 if not (item.poster_path or item.primary_image_url):
                     if tmdb_client.apply_images(item, data):
                         notes.append("补齐海报")
+            if req.rename:
+                # 文件名解析出的片名（「漫长的季节 The Long Season S01」）换成
+                # TMDB 标题；只在管理员明确要求时做，清洗后为空则保留原名
+                from backend.emby_server.tmdb import clean_title as _ct
+                from backend.emby_server.pinyin_sort import make_sort_name
+                _n = _ct(data.get("name") if kind == "series" else data.get("title"))
+                if _n and _n != item.name:
+                    notes.append(f"片名：{item.name} → {_n}")
+                    item.name = _n
+                    item.sort_name = make_sort_name(_n)
     item.enrich_status = "done"
     item.enrich_attempts = 0
     item.enrich_next_retry_at = None

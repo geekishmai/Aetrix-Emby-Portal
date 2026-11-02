@@ -391,6 +391,20 @@ def year_from_name_suffix(name):
 #    标题只用于展示与匹配、不生成文件名，砍掉会把正确标题改错。
 #    冒号已在 ① 处理（切完的主标题里不可能再有冒号）。
 _TITLE_SPLIT_RE = re.compile(r"[:：]")
+# 保留副标题模式（TITLE_KEEP_SUBTITLE=1）下仍要切掉的季/部后缀：
+# 「黑鸟：第一季」「Show: Season 2」——这类是季信息，不是片名的一部分
+_TITLE_SEASON_SUFFIX_RE = re.compile(
+    r"^\s*(第\s*[一二三四五六七八九十百零〇两\d]+\s*[季部]|season\s*\d+|s\d{1,2})\s*$",
+    re.IGNORECASE)
+
+
+def _keep_subtitle() -> bool:
+    """TITLE_KEEP_SUBTITLE=1：标题保留冒号副标题（「复仇者联盟：终局之战」）。
+
+    默认关（切掉副标题，既有口径）。中文片库系列片多，切掉副标题会让
+    「哈利·波特」「复仇者联盟」整套同名，按需开启。
+    """
+    return (os.getenv("TITLE_KEEP_SUBTITLE") or "").strip() in ("1", "true", "yes")
 _TITLE_CTRL_RE = re.compile(r'[\x00-\x1f\x7f\\"<>|]')
 _TITLE_INVISIBLE_RE = re.compile(
     "[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
@@ -406,7 +420,19 @@ def clean_title(name) -> str:
     s = strip_year_suffix(name)
     if not s:
         return ""
-    if _TITLE_SPLIT_RE.search(s):
+    if _keep_subtitle() and _TITLE_SPLIT_RE.search(s):
+        head, tail = _TITLE_SPLIT_RE.split(s, 1)
+        head = head.rstrip(" ·—–-").strip()
+        tail = tail.strip()
+        if head and (not tail or _TITLE_SEASON_SUFFIX_RE.match(tail)):
+            s = head
+        elif head:
+            # 中文主标题用全角冒号，其余保留半角冒号+空格（「Mission: Impossible」）
+            sep = "：" if re.search(r"[\u4e00-\u9fff]", head) else ": "
+            s = head + sep + tail
+        else:
+            s = tail
+    elif _TITLE_SPLIT_RE.search(s):
         head = _TITLE_SPLIT_RE.split(s, 1)[0]
         # 切掉副标题后，主标题尾部悬空的分隔符（"标题 ·：副标题"）一并修剪
         s = head.rstrip(" ·—–-").strip()
@@ -1235,6 +1261,26 @@ def _is_placeholder_episode_title(name):
     # 「剧名 第 N 集 S01E01」类（含版本 tag 如 PTerWEB）
     if re.match(r"^.+ 第\s*\d+\s*集( .+)? S\d{1,2}E\d{1,3}$", n):
         return True
+    return False
+
+
+def _is_scanner_episode_name(name, season_no, ep_no):
+    """扫描器按文件名生成的单集名（「剧名 S01E12」「剧名 第 12 集」）判定。
+
+    比 _is_placeholder_episode_title 多一个条件：结尾的 SxxEyy / 第 N 集必须与
+    这一集自己的季号、集号一致。扫描器 _episode_display_name 恰好这样拼名，
+    真实标题几乎不可能以与本集编号完全一致的 SxxEyy 结尾，所以不会误伤。
+    季号或集号未知时不判（宁可漏判）。
+    """
+    n = (name or "").strip()
+    if not n or season_no is None or ep_no is None:
+        return False
+    m = re.match(r"^.+ S(\d{1,2})E(\d{1,3})$", n)
+    if m:
+        return int(m.group(1)) == int(season_no) and int(m.group(2)) == int(ep_no)
+    m = re.match(r"^.+ 第\s*(\d+)\s*[集话話]$", n)
+    if m:
+        return int(m.group(1)) == int(ep_no)
     return False
 
 
@@ -2312,7 +2358,9 @@ class TmdbClient:
             or bool(re.match(r"^第\s*\d+\s*集$", tmdb_name))
         )
         current = (getattr(episode_item, "name", "") or "").strip()
-        is_generic = _is_placeholder_episode_title(current)
+        is_generic = _is_placeholder_episode_title(current) or _is_scanner_episode_name(
+            current, getattr(episode_item, "season_number", None),
+            getattr(episode_item, "episode_number", None))
 
         if enabled["title"] and not is_placeholder and is_generic:
             # 当前是"第X集"占位，TMDB 有真实标题 → 覆盖。先过统一标题清洗

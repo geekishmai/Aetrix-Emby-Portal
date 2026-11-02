@@ -72,3 +72,38 @@ def test_overview_only_fills_empty():
     r = TmdbClient.apply_episode(item, _ep_data("", overview="第三集简介"))
     assert item.overview == "第三集简介"
     assert item.name == "好团圆 第 3 集 S01E03"  # 标题占位但 TMDB 无真标题→保留
+
+
+from backend.emby_server.tmdb import _is_scanner_episode_name  # noqa: E402
+
+
+@pytest.mark.parametrize("name,season,ep,expected", [
+    ("漫长的季节 The Long Season S01E12", 1, 12, True),
+    ("五十公里桃花坞 S01E04", 1, 4, True),
+    ("听说你喜欢我 第 1 集", 1, 1, True),
+    ("某剧 第3话", 1, 3, True),
+    ("五十公里桃花坞 S01E04", 1, 5, False),   # 编号对不上：不是本集的扫描器名
+    ("五十公里桃花坞 S01E04", 2, 4, False),
+    ("向前为救姜兰芝四处求人", 1, 4, False),  # 真实标题
+    ("漫长的季节 The Long Season S01E12", None, 12, False),  # 季号未知不判
+    ("", 1, 1, False),
+])
+def test_scanner_episode_name_detector(name, season, ep, expected):
+    assert _is_scanner_episode_name(name, season, ep) is expected
+
+
+def test_apply_episode_replaces_scanner_name():
+    """扫描器名「剧名 S01E12」+ TMDB 真标题 → 换成 TMDB 标题"""
+    item = SimpleNamespace(name="漫长的季节 The Long Season S01E12", overview="",
+                           sort_name="", duration_ticks=0,
+                           season_number=1, episode_number=12)
+    res = TmdbClient.apply_episode(item, _ep_data("与光同尘", "简介"))
+    assert item.name == "与光同尘"
+    assert res["updated"] is True
+
+
+def test_apply_episode_keeps_real_title_with_mismatched_suffix():
+    item = SimpleNamespace(name="真标题 S01E04", overview="", sort_name="",
+                           duration_ticks=0, season_number=1, episode_number=5)
+    TmdbClient.apply_episode(item, _ep_data("TMDB 标题"))
+    assert item.name == "真标题 S01E04"

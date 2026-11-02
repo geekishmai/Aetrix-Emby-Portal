@@ -143,3 +143,19 @@ class TestMultiSourceCleanTitle:
         changed = ms_engine.apply_to_item(item, result, fill_missing_only=True)
         assert item.name == ""
         assert "name" not in changed
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("黑鸟：第一季", "黑鸟"),
+    ("Some Show: Season 2", "Some Show"),
+    ("复仇者联盟：终局之战", "复仇者联盟：终局之战"),
+    ("哆啦A梦：伴我同行", "哆啦A梦：伴我同行"),
+    ("马拉多纳：美好的梦想 (2021)", "马拉多纳：美好的梦想"),
+    ("Mission: Impossible", "Mission: Impossible"),
+    ("：副标题开头", "副标题开头"),
+    ("正常标题", "正常标题"),
+])
+def test_keep_subtitle_mode(monkeypatch, raw, expected):
+    """TITLE_KEEP_SUBTITLE=1：只切季后缀，保留真正的副标题"""
+    monkeypatch.setenv("TITLE_KEEP_SUBTITLE", "1")
+    assert clean_title(raw) == expected
