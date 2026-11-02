@@ -212,11 +212,22 @@ class SourceHealthRecord:
 
 @dataclass
 class LineHealthRecord:
-    """线路可用性记录（字段名对齐 upstream_playback_variants 实测字段）。"""
+    """线路可用性记录（字段名对齐 upstream_playback_variants 实测字段）。
+
+    后五个字段是播放路径留痕扩域（2026-11-02 播放优化 B 件）：真实
+    点播的逐次成败/延迟由 upstream_playback 的取流收口写入，供
+    PlaybackInfo 线路择优排序消费；探活工人不写这五个字段，旧记录
+    （JSON 里没这些键）一律按默认值读，不影响既有状态机口径。
+    """
 
     line_key: str
     availability_status: str = LINE_AVAILABLE
     last_checked_at: Optional[float] = None
+    consecutive_failures: int = 0
+    last_failure_kind: Optional[str] = None
+    last_success_at: Optional[float] = None
+    last_failure_at: Optional[float] = None
+    last_latency_ms: Optional[float] = None
 
 
 def is_health_stale(record: Optional[SourceHealthRecord], *, now: Optional[float] = None) -> bool:
@@ -544,10 +555,19 @@ class RedisHealthStore:
             return None
         if not isinstance(data, dict):
             return None
+        try:
+            failures = int(data.get("consecutive_failures") or 0)
+        except (ValueError, TypeError):
+            return None
         return LineHealthRecord(
             line_key=key,
             availability_status=data.get("availability_status", LINE_AVAILABLE),
             last_checked_at=data.get("last_checked_at"),
+            consecutive_failures=failures,
+            last_failure_kind=data.get("last_failure_kind"),
+            last_success_at=data.get("last_success_at"),
+            last_failure_at=data.get("last_failure_at"),
+            last_latency_ms=data.get("last_latency_ms"),
         )
 
     def set_line(self, record: LineHealthRecord) -> None:
@@ -557,6 +577,11 @@ class RedisHealthStore:
                 json.dumps({
                     "availability_status": record.availability_status,
                     "last_checked_at": record.last_checked_at,
+                    "consecutive_failures": record.consecutive_failures,
+                    "last_failure_kind": record.last_failure_kind,
+                    "last_success_at": record.last_success_at,
+                    "last_failure_at": record.last_failure_at,
+                    "last_latency_ms": record.last_latency_ms,
                 }))
         except Exception:
             logger.warning("线路健康状态写 Redis 失败，本轮结论未持久化", exc_info=True)
