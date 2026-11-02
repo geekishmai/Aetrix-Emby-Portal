@@ -42,6 +42,7 @@ from backend.emby_server.mounts import (
     MountEntry,
     MountError,
     MountCooldownError,
+    MountTimeoutError,
     MountFile,
     require_capability,
     MountProvider,
@@ -89,6 +90,10 @@ def _wrap_sidecar_error(exc: ProviderRuntimeError, prefix: str) -> MountError:
     """
     if exc.kind == "throttled":
         return MountCooldownError(f"{prefix}：{exc}", retry_after=exc.retry_after)
+    # QA AD-1：宿主截止已过 → 独立超时类型（不是冷却，不触发冷却文案与
+    # Z-2 的冷却门）；retry_after 由 AD-3 的序列化透传。
+    if exc.kind == "deadline_exceeded":
+        return MountTimeoutError(f"{prefix}：{exc}", retry_after=exc.retry_after)
     return MountError(f"{prefix}：{exc}")
 
 

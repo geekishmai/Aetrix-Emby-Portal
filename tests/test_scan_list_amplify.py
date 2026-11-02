@@ -44,7 +44,7 @@ class _FakeClient:
         self.pages = pages
         self.calls: list[str] = []
 
-    def list_dir(self, cid, limit=200):
+    def list_dir(self, cid, limit=200, deadline=None):
         self.calls.append(cid)
         return list(self.pages.get(cid, []))
 

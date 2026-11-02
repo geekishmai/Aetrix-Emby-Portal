@@ -839,7 +839,8 @@ class Pan115Client:
 
     # ---- 目录 ----
 
-    def list_dir(self, cid: str = "0", limit: int = 1000) -> list[dict]:
+    def list_dir(self, cid: str = "0", limit: int = 1000,
+                 deadline: Optional[float] = None) -> list[dict]:
         """列目录（用于目标路径浏览）
 
         P1 修复（审查）：此前写死 limit=200/offset=0，超 200 个文件的目录
@@ -855,12 +856,23 @@ class Pan115Client:
         总数，115-sdk-go types.go:87）。现在每页读 count 并**校验已取条数**：
         未取满继续翻页；数据提前耗尽仍不足则**抛错**（绝不静默少条目——
         少条目会被扫描器当成已删除，触发错误清理）。
+
+        QA AC-3 P1（2026-11-03）：默认页从 200 提到 **1000**（115 /files
+        单页上限，OpenList/AList 驱动源码默认同为 1000）。1020 项的华语
+        电影根目录从 6 页降到 2 页——首扫 list 次数直接砍掉 2/3。
+
+        deadline（修法②）：整次列目录的绝对截止时刻，翻页每页都检查——
+        一页拿完已过截止就抛 ``Pan115DeadlineExceeded``，不再发下一页。
         """
         limit = max(1, min(int(limit or 1000), 1000))
         out: list[dict] = []
         offset = 0
         expected_total: Optional[int] = None
         while True:
+            if deadline is not None and time.time() > deadline:
+                from backend.emby_server import pan115_guard
+                raise pan115_guard.Pan115DeadlineExceeded(
+                    "sidecar 丢弃超时请求，未发下一页")
             body = self._call(
                 "GET", f"{PAN115_WEBAPI_BASE}/files",
                 params={
@@ -922,7 +934,8 @@ class Pan115Client:
 
     # ---- 下载 ----
 
-    def download_url(self, pickcode: str, *, app_first: bool = False) -> str:
+    def download_url(self, pickcode: str, *, app_first: bool = False,
+                     deadline: Optional[float] = None) -> str:
         """取单个文件下载地址（供外部下载器 / 直链使用）。
 
         两条通道（2026-10-31 生产探针实证）：
@@ -939,20 +952,21 @@ class Pan115Client:
         """
         if app_first:
             try:
-                return self._download_url_app(pickcode)
+                return self._download_url_app(pickcode, deadline=deadline)
             except Pan115AuthError:
                 raise
             except Pan115Error:
-                return self._download_url_web(pickcode)
+                return self._download_url_web(pickcode, deadline=deadline)
         try:
-            return self._download_url_web(pickcode)
+            return self._download_url_web(pickcode, deadline=deadline)
         except Pan115ChannelLimitError:
-            return self._download_url_app(pickcode)
+            return self._download_url_app(pickcode, deadline=deadline)
 
-    def _download_url_web(self, pickcode: str) -> str:
+    def _download_url_web(self, pickcode: str, deadline: Optional[float] = None) -> str:
         """网页端取链（webapi /files/download，大文件有大小限制）。"""
         body = self._call(
             "GET", f"{PAN115_WEBAPI_BASE}/files/download", params={"pickcode": pickcode},
+            deadline=deadline,
         )
         _raise_for_state(body)
         url = body.get("file_url") or body.get("url")
@@ -960,7 +974,7 @@ class Pan115Client:
             raise Pan115Error("115 未返回下载地址")
         return str(url)
 
-    def _download_url_app(self, pickcode: str) -> str:
+    def _download_url_app(self, pickcode: str, deadline: Optional[float] = None) -> str:
         """app 端取链（proapi /app/chrome/downurl，RSA 加密通道）。
 
         请求体 ``{"data": rsa_encrypt(JSON)}``，JSON 含 pickcode 与
@@ -979,6 +993,7 @@ class Pan115Client:
             "POST", f"{PAN115_PROAPI_BASE}/app/chrome/downurl",
             data={"data": pan115_cipher.rsa_encrypt(
                 json.dumps(payload).encode("utf-8"))},
+            deadline=deadline,
         )
         _raise_for_state(body)
         data = body.get("data")
@@ -1842,12 +1857,19 @@ class Pan115Client:
     # ---- 内部 ----
 
     def _call(self, method: str, url: str, *, params: Optional[dict] = None,
-              data: Optional[dict] = None) -> dict:
+              data: Optional[dict] = None,
+              deadline: Optional[float] = None) -> dict:
+        """deadline：绝对截止时刻（time.time() 口径，首扫修法②）。
+
+        来自 sidecar 的请求对象；None = 无截止（宿主直调不受影响）。
+        排队上限取 min(自身上限, deadline 剩余)；拿到令牌后、发 HTTP 前
+        再复查一次——guard 排队可能吃掉全部剩余时间，此时放弃。
+        """
         from backend.emby_server import pan115_guard
 
         kind = _call_kind(url)
         try:
-            pan115_guard.before_call(self.cookie, kind)
+            pan115_guard.before_call(self.cookie, kind, deadline=deadline)
         except pan115_guard.Pan115CooldownError:
             raise   # 冷却中不发请求，也不计调用次数；类型透传（Z-1）：
                     # 上层凭 isinstance 分流「限速冷却」与「凭据失效」，
@@ -1855,6 +1877,11 @@ class Pan115Client:
                     # pan115_guard.Pan115CooldownError 与本模块
                     # Pan115CooldownError 是两个类（guard 无反向依赖），
                     # 用属性判定兼容两者。
+        if deadline is not None and time.time() > deadline:
+            # guard 排队已耗尽宿主截止时刻：不发 115 请求（修法②）。
+            # AD-1：独立超时类型，不是冷却。
+            raise pan115_guard.Pan115DeadlineExceeded(
+                "sidecar 丢弃超时请求，未发 115")
         try:
             body = _http_json(method, url, params=params, data=data, cookie=self.cookie,
                               ua=self.ua)
