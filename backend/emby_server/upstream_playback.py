@@ -140,6 +140,128 @@ UPSTREAM_PROBE_MAX_REDIRECTS = 3
 #: 探活层视为重定向、需要跟随的状态码集合。
 _PROBE_REDIRECT_STATUSES = frozenset((301, 302, 303, 307, 308))
 
+#: CMS 线路画质缓存 TTL（秒，运维常量）：画质是 vod 的固有属性、
+#: 极少变化，7 天足够覆盖两次点播之间的展示需求；过期后下一次
+#: 点播取流时自然回填，不设主动刷新。
+CMS_QUALITY_CACHE_TTL_SEC = 7 * 24 * 3600
+
+#: m3u8 主清单抓取超时（秒，运维常量）：只为画质缓存服务，必须
+#: 短——超时/失败直接放弃缓存，绝不拖住 302 下发。
+M3U8_FETCH_TIMEOUT_SEC = 3.0
+
+#: m3u8 主清单读取上限（字节）：主清单是小文本，256KB 绰绰有余，
+#: 防异常大响应吃内存。
+_M3U8_MAX_BYTES = 256 * 1024
+
+
+def cms_quality_cache_key(mapping_id) -> str:
+    """CMS 线路画质缓存键：按映射 id 一条线路一份。"""
+    return f"cmsq:{int(mapping_id)}"
+
+
+def read_cms_quality(mapping_id) -> Optional[dict]:
+    """读 CMS 线路画质缓存（取流路径回填，展示路径消费）。
+
+    内容形态：``{"width": int, "height": int, "bandwidth": int,
+    "video_range": str|None, "label": str|None}``（字段可缺）。
+    无缓存/缓存坏了返回 None——展示侧回落默认形态，不报错。
+    """
+    if mapping_id is None:
+        return None
+    try:
+        from backend.database import CacheManager
+        raw = CacheManager.get(cms_quality_cache_key(mapping_id))
+    except Exception:  # noqa: BLE001 — 缓存只是补强，故障不外溢
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def store_cms_quality(mapping_id, quality: dict) -> None:
+    """写 CMS 线路画质缓存（与已有内容合并，新非空值优先）。
+
+    全程 fail-safe：缓存写失败不许影响取流主路径（调用方在 302
+    下发前调用，异常一律吞掉）。
+    """
+    if mapping_id is None or not quality:
+        return
+    try:
+        from backend.database import CacheManager
+        merged = dict(read_cms_quality(mapping_id) or {})
+        for key, value in quality.items():
+            if value not in (None, "", 0):
+                merged[key] = value
+        if not merged:
+            return
+        CacheManager.set(cms_quality_cache_key(mapping_id),
+                         json.dumps(merged, ensure_ascii=False),
+                         ttl=CMS_QUALITY_CACHE_TTL_SEC)
+    except Exception:  # noqa: BLE001 — 同 read_cms_quality 口径
+        pass
+
+
+def _default_http_get_text(url: str, headers: dict, timeout: float):
+    """默认文本 GET 层：返回 (status, text|None)，只读一小段。"""
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with upstream_http.safe_urlopen(req, timeout=timeout) as resp:
+            body = resp.read(_M3U8_MAX_BYTES)
+            return resp.status, body.decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+    except Exception:
+        return None, None
+
+
+def _capture_cms_quality(source, mapping_id, detail, address, *,
+                         http_get_text=None) -> None:
+    """取流成功顺手回填 CMS 线路画质（备注标记 + m3u8 主清单）。
+
+    两路信号：detail 的 vod_remarks 里带明确画质标记（4K/1080P
+    等）时拼标签存 ``label``；播放地址是 m3u8 时现抓主清单解析
+    分辨率/带宽/范围信号（真实数值，优先于备注标签）。全程
+    fail-safe：任何失败只留空，绝不阻塞、绝不改写 302 结果。
+    """
+    if mapping_id is None:
+        return
+    try:
+        from backend.emby_server import quality_label as ql
+        payload: dict = {}
+        if isinstance(detail, dict):
+            label = ql.label_from_text(detail.get("vod_remarks"))
+            if label:
+                payload["label"] = label
+        path = (address or "").split("?", 1)[0].lower()
+        if path.endswith(".m3u8"):
+            get_text = _default_http_get_text if http_get_text is None \
+                else http_get_text
+            try:
+                status, text = get_text(
+                    address, _source_headers(source), M3U8_FETCH_TIMEOUT_SEC)
+            except Exception:  # noqa: BLE001 — 抓清单失败留空
+                status, text = None, None
+            if status == 200 and text:
+                master = ql.parse_m3u8_master(text)
+                if master:
+                    payload.update({
+                        "width": master.get("width") or 0,
+                        "height": master.get("height") or 0,
+                        "bandwidth": master.get("bandwidth") or 0,
+                        "video_range": master.get("video_range"),
+                    })
+                    master_label = ql.label_for_master(master)
+                    if master_label:
+                        payload["label"] = master_label
+        if payload:
+            store_cms_quality(mapping_id, payload)
+    except Exception:  # noqa: BLE001 — 画质回填绝不影响取流
+        pass
+
 
 class UpstreamPlaybackError(Exception):
     """上游播放结构化错误：HTTP 状态 + 机器码 + 人话 + 源 id。
@@ -476,6 +598,8 @@ def _resolve_applecms_stream(source, vod_id: str, *,
                              episode_index: int = 1,
                              http_get: Optional[Callable] = None,
                              http_probe: Optional[Callable] = None,
+                             http_get_text: Optional[Callable] = None,
+                             quality_mapping_id=None,
                              parse_resolver: Optional[Callable] = None) -> str:
     """苹果 CMS 播放分支：现取现解析、先探后 302，绝不落库。
 
@@ -549,9 +673,13 @@ def _resolve_applecms_stream(source, vod_id: str, *,
         # 统一分类（404 判死 / 401 凭据 / 429 额度 / 5xx 不可用）；
         # Emby/Jellyfin 分支不经这里，403 仍判 upstream_forbidden。
         logger.info("cms_probe_soft_pass source_id=%s", source.id)
+        _capture_cms_quality(source, quality_mapping_id, detail, address,
+                             http_get_text=http_get_text)
         return address
     _classify_probe_status(probe_status, source.id, retry_after)
     logger.info("上游播放解析成功 source_id=%s", source.id)
+    _capture_cms_quality(source, quality_mapping_id, detail, address,
+                         http_get_text=http_get_text)
     return address
 
 
@@ -562,6 +690,8 @@ def resolve_upstream_stream(db: Session, source_id: int,
                             http_post: Optional[Callable] = None,
                             episode_index: int = 1,
                             http_get: Optional[Callable] = None,
+                            http_get_text: Optional[Callable] = None,
+                            quality_mapping_id=None,
                             parse_resolver: Optional[Callable] = None) -> str:
     """上游播放解析：查源 → 取凭据 → 拼地址 → Range 探活 → 返回 302 地址。
 
@@ -592,6 +722,8 @@ def resolve_upstream_stream(db: Session, source_id: int,
         return _resolve_applecms_stream(
             source, item_id, episode_index=episode_index,
             http_get=http_get, http_probe=http_probe,
+            http_get_text=http_get_text,
+            quality_mapping_id=quality_mapping_id,
             parse_resolver=parse_resolver)
     try:
         token = _auth_token_for_source(source, http_post=http_post)
@@ -665,6 +797,23 @@ def get_displayable_mapping(db, local_item_id):
     if source is None or not source.enabled:
         return None
     return mapping, source
+
+
+def get_displayable_mappings(db, local_item_id):
+    """列表展示口径的全部映射读取：返回 ``[(mapping, source), ...]``。
+
+    播放源按映射逐条下发（站主 2026-11-02 亲定：每条上游线路一个
+    MediaSource、点选哪条定向解析哪条）需要的全量读口。有效性口径
+    与 get_displayable_mapping 逐字一致（映射层 O-10 校验先行，
+    再逐条验源存在且启用），偏好序即列表展示序（最佳在前）。
+    """
+    out = []
+    for mapping in uim.get_all_mappings(db, local_item_id):
+        source = us.get_source(db, mapping.source_id)
+        if source is None or not source.enabled:
+            continue
+        out.append((mapping, source))
+    return out
 
 
 def _default_http_get_json(url: str, headers: dict, timeout: float):
@@ -750,8 +899,10 @@ def fetch_upstream_media_params(source, upstream_item_id: str, *,
 
 
 def resolve_mapped_upstream_stream(db: Session, local_item_id: int, *,
+                                   mapping_id=None,
                                    http_probe=None, http_post=None,
-                                   http_get=None, parse_resolver=None) -> str:
+                                   http_get=None, http_get_text=None,
+                                   parse_resolver=None) -> str:
     """按本地条目 id 解析上游取流地址（详情页上游线路取流口专用）。
 
     现查映射 + 复验：开关关 → 404 upstream_line_disabled；无映射 →
@@ -761,16 +912,34 @@ def resolve_mapped_upstream_stream(db: Session, local_item_id: int, *,
     resolve_upstream_stream 抛 409 upstream_source_disabled）；
     凭据失效等其余结构化错误原样上抛——明示失败，
     绝不静默回落到任何其它线路。
+
+    ``mapping_id`` 定向口径（站主 2026-11-02 亲定，FMBY 形态）：
+    播放器点选了具体某条线路（MediaSourceId 带映射 id）时，只解
+    析那一条映射——映射不存在、已不属于本条目、或按读契约已不可
+    见（源停用/条目已死），一律 404 upstream_mapping_not_found
+    硬报错，**绝不偷偷换到最佳映射**。不带 mapping_id 的旧形态
+    （MediaSourceId 只到 ``:upstream``）保持原最佳映射口径。
     """
     if not detail_line_enabled(db):
         raise UpstreamPlaybackError(
             404, "upstream_line_disabled", "上游线路未开启")
-    mapping = uim.get_best_mapping(db, local_item_id)
-    if mapping is None:
-        raise UpstreamPlaybackError(
-            404, "upstream_mapping_not_found", "该条目暂无上游线路")
+    if mapping_id is not None:
+        mapping = None
+        for row in uim.get_all_mappings(db, local_item_id):
+            if row.id == mapping_id:
+                mapping = row
+                break
+        if mapping is None:
+            raise UpstreamPlaybackError(
+                404, "upstream_mapping_not_found", "所选线路已不可用")
+    else:
+        mapping = uim.get_best_mapping(db, local_item_id)
+        if mapping is None:
+            raise UpstreamPlaybackError(
+                404, "upstream_mapping_not_found", "该条目暂无上游线路")
     return resolve_upstream_stream(
         db, mapping.source_id, mapping.upstream_item_id,
         episode_index=mapping.episode_index or 1,
         http_probe=http_probe, http_post=http_post, http_get=http_get,
+        http_get_text=http_get_text, quality_mapping_id=mapping.id,
         parse_resolver=parse_resolver)
