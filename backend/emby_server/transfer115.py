@@ -845,13 +845,21 @@ class Pan115Client:
         P1 修复（审查）：此前写死 limit=200/offset=0，超 200 个文件的目录
         被静默截断。现自动翻页取全量（单页 limit 可配，上限 1000）。
 
-        QA AC-3 P1（2026-11-03）：默认页从 200 提到 **1000**（115 /files
-        单页上限，OpenList/AList 驱动源码默认同为 1000）。1020 项的华语
-        电影根目录从 6 页降到 2 页——首扫 list 次数直接砍掉 2/3。
+        QA AC-3 P1（2026-11-03）：默认页从 200 提到 **1000**。依据（源码级）：
+        115 Cookie 通道 /files 单页上限 1000，OpenList `drivers/115/meta.go`
+        与 AList v3.63.0 `drivers/115/meta.go` 的默认 `page_size` 同为 1000
+        （见 docs/pan115-rate-evidence.md §1.4/1.5）。1020 项的华语电影根
+        目录从 6 页降到 2 页——首扫 list 次数直接砍掉 2/3。
+
+        QA AE-3 P1（翻页静默截断）：115 /files 响应带 ``count``（目录条目
+        总数，115-sdk-go types.go:87）。现在每页读 count 并**校验已取条数**：
+        未取满继续翻页；数据提前耗尽仍不足则**抛错**（绝不静默少条目——
+        少条目会被扫描器当成已删除，触发错误清理）。
         """
         limit = max(1, min(int(limit or 1000), 1000))
         out: list[dict] = []
         offset = 0
+        expected_total: Optional[int] = None
         while True:
             body = self._call(
                 "GET", f"{PAN115_WEBAPI_BASE}/files",
@@ -861,6 +869,14 @@ class Pan115Client:
                 },
             )
             _raise_for_state(body)
+            # QA AE-3：count 是目录条目总数（含目录）。只认第一页给出的值，
+            # 后续页不再更新（并发增删时以首个快照为准，避免自激翻页）。
+            if expected_total is None:
+                try:
+                    _cnt = body.get("count")
+                    expected_total = int(_cnt) if _cnt is not None else None
+                except (TypeError, ValueError):
+                    expected_total = None
             data = body.get("data") or []
             if not isinstance(data, list):
                 break
@@ -883,12 +899,25 @@ class Pan115Client:
                 }
                 for entry in data
             )
+            offset += len(data)
+            if expected_total is not None:
+                # 按 count 校验：未取满继续翻；取满即停；数据耗尽仍不足 → 抛错
+                if len(out) >= expected_total:
+                    break
+                if not data:
+                    raise Pan115Error(
+                        f"115 列目录不完整：count={expected_total} 实取={len(out)}"
+                        f"（cid={cid} offset={offset}，拒绝静默少条目）")
+                continue
+            # 无 count（旧响应/异常载荷）：维持原口径（短页即止）
             if len(data) < limit:
                 break
-            offset += len(data)
             # 安全阀：单目录 10 万条封顶，防异常 API 无限翻页
             if offset >= 100000:
                 break
+        if expected_total is not None and len(out) < expected_total:
+            raise Pan115Error(
+                f"115 列目录不完整：count={expected_total} 实取={len(out)}（cid={cid}）")
         return out
 
     # ---- 下载 ----

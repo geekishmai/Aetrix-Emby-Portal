@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 import signal
 import sys
 import threading
@@ -91,6 +92,9 @@ class _SessionState:
     root_cid: str
     client: object = None
     cid_cache: dict = field(default_factory=dict)
+    # QA AE-3②：cid 缓存加 TTL（与 dir_cache 同为 30s）——目录被移动/重命名后
+    # 旧 cid 会 404/空列；过期 + 失败即清，避免长期用死 cid。
+    cid_cache_at: dict = field(default_factory=dict)
     pick_cache: dict = field(default_factory=dict)
     # 目录列举缓存：cid -> (expire_monotonic, items)。首扫 partial 根因之一：
     # 每个 list_page 都 _raw_list 全目录，且每个条目的 _cid_of/_locate 都重列
@@ -169,17 +173,30 @@ class P115SidecarHandler:
                 state.dir_cache.pop(k, None)
         return items
 
+    _CID_TTL_SEC = 30.0
+
+    def _drop_cid_prefix(self, state: _SessionState, rel: str) -> None:
+        """清掉某路径及其子路径的 cid 缓存（目录移动/重命名/不存在时）。"""
+        rel = "/" + (rel or "").lstrip("/")
+        rel = rel.rstrip("/") or "/"
+        for key in [k for k in state.cid_cache
+                    if k == rel or k.startswith(rel.rstrip("/") + "/")]:
+            state.cid_cache.pop(key, None)
+            state.cid_cache_at.pop(key, None)
+
     def _cid_of(self, state: _SessionState, rel: str) -> str:
         rel = "/" + (rel or "").lstrip("/")
         rel = rel.rstrip("/") or "/"
-        if rel in state.cid_cache and state.cid_cache[rel]:
+        now = time.monotonic()
+        if rel in state.cid_cache and state.cid_cache[rel] \
+                and state.cid_cache_at.get(rel, 0.0) > now:
             return state.cid_cache[rel]
         cid = state.root_cid
         prefix = ""
         for part in [p for p in rel.split("/") if p]:
             prefix = f"{prefix}/{part}"
             cached = state.cid_cache.get(prefix)
-            if cached:
+            if cached and state.cid_cache_at.get(prefix, 0.0) > now:
                 cid = cached
                 continue
             child = next(
@@ -188,10 +205,14 @@ class P115SidecarHandler:
                 None,
             )
             if child is None:
+                # AE-3②：路径不存在 → 清该前缀（可能目录被移动/改名）
+                self._drop_cid_prefix(state, prefix)
                 raise ProviderRuntimeError("not_found", f"115 上找不到目录：{rel}")
             cid = str(child.get("cid") or "")
             state.cid_cache[prefix] = cid
+            state.cid_cache_at[prefix] = now + self._CID_TTL_SEC
         state.cid_cache[rel] = cid
+        state.cid_cache_at[rel] = now + self._CID_TTL_SEC
         return cid
 
     def _locate(self, state: _SessionState, rel: str) -> dict:
@@ -235,6 +256,10 @@ class P115SidecarHandler:
         size = DEFAULT_PAGE_SIZE if page_size is None else int(page_size)
         size = max(1, min(size, MAX_PAGE_SIZE))
         items = self._raw_list(state, cid)
+        if not items and rel != "/":
+            # AE-3②：解析出的 cid 列不出任何条目——可能是目录已移动/重命名的
+            # 死 cid；清缓存让下次调用重新解析（空目录只是多一次解析，无副作用）。
+            self._drop_cid_prefix(state, rel)
         page = items[offset:offset + size]
         entries = [self._entry(item, rel) for item in page]
         nxt = offset + size

@@ -257,3 +257,100 @@ def test_claim_predicates_wired_to_claimable_statuses():
     assert "_CLAIMABLE_STATUSES" in src2, "原子 UPDATE 谓词"
     # 不再有只认 pending 的旧谓词
     assert 'enrich_status == "pending", due' not in src
+
+
+# ---------------- AE-3①：count 校验（不静默少条目） ----------------
+
+def test_list_dir_count_complete(monkeypatch):
+    """count=3、两页返回 3 条 → 正常返回 3 条。"""
+    from backend.emby_server import transfer115 as t115
+    from backend.emby_server import pan115_guard as pg
+    client = t115.Pan115Client.__new__(t115.Pan115Client)
+    client.cookie = "ck-c1"
+    client.ua = ""
+    pages = [
+        {"state": 1, "count": 3, "data": [{"fid": "1", "n": "a"}, {"fid": "2", "n": "b"}]},
+        {"state": 1, "count": 3, "data": [{"fid": "3", "n": "c"}]},
+    ]
+    calls = {"n": 0}
+    def fake_http(method, url, **kw):
+        body = pages[min(calls["n"], 1)]
+        calls["n"] += 1
+        return body
+    monkeypatch.setattr(t115, "_http_json", fake_http)
+    monkeypatch.setattr(pg, "before_call", lambda *a, **kw: None)
+    out = client.list_dir("cid", limit=2)
+    assert [e["name"] for e in out] == ["a", "b", "c"]
+
+
+def test_list_dir_count_mismatch_raises(monkeypatch):
+    """count=5 但数据提前耗尽 → 抛错（绝不静默少条目）。"""
+    from backend.emby_server import transfer115 as t115
+    from backend.emby_server import pan115_guard as pg
+    client = t115.Pan115Client.__new__(t115.Pan115Client)
+    client.cookie = "ck-c2"
+    client.ua = ""
+    pages = [
+        {"state": 1, "count": 5, "data": [{"fid": "1", "n": "a"}]},
+        {"state": 1, "count": 5, "data": []},
+    ]
+    calls = {"n": 0}
+    def fake_http(method, url, **kw):
+        body = pages[min(calls["n"], 1)]
+        calls["n"] += 1
+        return body
+    monkeypatch.setattr(t115, "_http_json", fake_http)
+    monkeypatch.setattr(pg, "before_call", lambda *a, **kw: None)
+    with pytest.raises(t115.Pan115Error) as ei:
+        client.list_dir("cid", limit=2)
+    assert "不完整" in str(ei.value)
+
+
+# ---------------- AE-3②：cid 缓存 TTL / 失效 ----------------
+
+def test_cid_cache_ttl_expires(monkeypatch):
+    """cid 缓存 30s 过期：过期后重新解析（列父目录）。"""
+    pages = {
+        "0": [{"name": "媒体库", "is_dir": True, "cid": "10"}],
+        "10": [{"name": "华语电影", "is_dir": True, "cid": "20"}],
+    }
+    h = _handler_with(pages)
+    st = h._states["s1"]
+    client = st.client
+    assert h._cid_of(st, "/媒体库/华语电影") == "20"
+    n1 = len(client.calls)
+    # 缓存命中：不新增调用
+    assert h._cid_of(st, "/媒体库/华语电影") == "20"
+    assert len(client.calls) == n1
+    # 把 TTL 拨到过去 → 重新解析（会再列父目录；dir_cache 30s 仍命中，
+    # 因此这里断言的是 cid 缓存本身失效：清掉 dir_cache 才看得到调用）
+    st.cid_cache_at["/媒体库/华语电影"] = 0.0
+    st.dir_cache.clear()
+    assert h._cid_of(st, "/媒体库/华语电影") == "20"
+    assert len(client.calls) > n1
+
+
+def test_cid_prefix_dropped_on_not_found():
+    """路径不存在 → 清该前缀 cid 缓存。"""
+    pages = {"0": [{"name": "媒体库", "is_dir": True, "cid": "10"}],
+             "10": []}
+    h = _handler_with(pages)
+    st = h._states["s1"]
+    from backend.emby_server.provider_runtime import ProviderRuntimeError
+    with pytest.raises(ProviderRuntimeError):
+        h._cid_of(st, "/媒体库/不存在")
+    assert "/媒体库/不存在" not in st.cid_cache
+    # 父级缓存保留（仍有效）
+    assert st.cid_cache.get("/媒体库") == "10"
+
+
+def test_retrying_with_null_next_retry_is_claimable_expected(db):
+    """AE-3③：retrying 且 next_retry_at=NULL = 立即到期，可被领取（期望行为）。
+
+    停泊行必须显式写 next_retry_at 才会被推迟；NULL 与 pending 同口径
+    （无退避等待），不是漏洞。
+    """
+    from backend.emby_server import enrich_worker
+    it = _mk(db, enrich_status="retrying", enrich_next_retry_at=None)
+    claimed = enrich_worker._claim_batch(db, 10)
+    assert [c.id for c in claimed] == [it.id]
