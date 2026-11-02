@@ -126,7 +126,9 @@ def run_backfill_movies(db, library, rows, *, expected_area_bucket=None,
     ``apply=False`` 为干跑：搜索、拉 detail、打分、验活全做，只
     不写映射。``apply=True`` 时逐（行×源）经 ``record_mapping``
     写一条电影映射（集号 None）并单独提交，单条失败回滚不污染
-    其它行。映射开关关着时 apply 直接整批拒绝。
+    其它行。映射开关关着时 apply 直接整批拒绝。电影 apply 时
+    若同三元组已有集号非空旧映射，先把集号归零再记 gained
+    （PA-083），写后复查来源集合仍不含该源则记 write_failed。
     """
     from backend.emby_server import applecms_series as acser
     from backend.emby_server import upstream_item_mappings as uim
@@ -292,6 +294,18 @@ def run_backfill_movies(db, library, rows, *, expected_area_bucket=None,
                         episode_index=None)
                     if mapping is None:
                         raise RuntimeError("mapping_disabled")
+                    # PA-083：record_mapping 的 upsert 口径是“None 不
+                    # 覆盖已有集号”（剧集调用方依赖它保集号），电影
+                    # 行却必须集号为空才算来源。同一电影行若已有同
+                    # 三元组集号非空旧映射，不显式归零就会报 gained
+                    # 假补、行仍不可播、下轮重补。因此只在电影 apply
+                    # 路径上把返回行的集号显式置 None 再落库，不改
+                    # record_mapping 的全局口径。
+                    if mapping.episode_index is not None:
+                        mapping.episode_index = None
+                        db.flush()
+                    if source.id not in movie_mapping_sources(db, row.id):
+                        raise RuntimeError("write_failed")
                     db.commit()
                 except Exception:  # noqa: BLE001 - 单条失败不污染其它行
                     db.rollback()

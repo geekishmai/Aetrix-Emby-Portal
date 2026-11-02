@@ -233,6 +233,39 @@ def test_run_backfill_movies_probe_failed(db):
     assert bfm.movie_mapping_sources(db, row.id) == {8}
 
 
+def test_run_backfill_movies_resets_stale_episode_index(db):
+    """PA-083：同三元组已有集号非空旧映射时，电影补源必须把它归零。
+
+    前置与审计复现同款：电影行已有源 7 vod 501 的集号 3 映射，
+    电影来源集合里仍只有停用源 8，故该行是目标行。apply 后
+    该映射集号必须为空、来源集合含源 7，否则审计报 gained
+    却是假补、下轮还会把它当目标重补。
+    """
+    lib = _seed_sources_and_lib(db)
+    row = _seed_movie(db, lib, "a" * 32, "决战之夜", "901")
+    uim.record_mapping(
+        db, local_item_id=row.id, source_id=7, upstream_item_id="501",
+        confidence=0.9, evidence="seed", episode_index=3)
+    db.commit()
+    assert bfm.movie_mapping_sources(db, row.id) == {8}
+    http = FakeHttpGet()
+    rows = bfm.find_unplayable_movies(db, [lib.id], [7])
+    assert {r.id for r in rows} == {row.id}
+
+    done = bfm.run_backfill_movies(db, lib, rows, apply=True,
+                                   http_get=http, http_probe=_probe_ok)
+    assert done["stats"]["filled"] == 1
+    assert done["stats"]["mappings_added"] == 1
+    assert bfm.movie_mapping_sources(db, row.id) == {7, 8}
+    mapping = (db.query(em.UpstreamItemMapping)
+               .filter(em.UpstreamItemMapping.local_item_id == row.id,
+                       em.UpstreamItemMapping.source_id == 7).one())
+    assert mapping.upstream_item_id == "501"
+    assert mapping.episode_index is None
+    gained = [a for a in done["audit"] if a["gained"]]
+    assert gained[0]["gained"][0]["source_id"] == 7
+
+
 def test_run_backfill_movies_quality_gate(db):
     lib = _seed_sources_and_lib(db)
     row = _seed_movie(db, lib, "f" * 32, "雾夜", "905")
