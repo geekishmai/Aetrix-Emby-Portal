@@ -45,6 +45,7 @@ quark_vip_required，开关 quark_bind_vip_check_enabled
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import threading
 import time
@@ -1177,6 +1178,38 @@ def list_bindings(db: Session, user_id: int) -> list[dict]:
     return [serialize_binding(r) for r in rows]
 
 
+class Signed115Url(str):
+    """115 现签地址（str 子类）：本体是地址字符串，另带本次签名实际
+    用的 UA（``sign_ua``）与文件大小（``size``，取不到为 None）。
+
+    出流逐跳留痕要用「签名 UA」：请求 UA / 签名 UA / 播放器拉流 UA
+    是三件事（口径见下面 resolve_* 的 ua 说明），签名 UA 只有
+    resolver 在构造 Pan115Client 时知道，地址只剩裸字符串就再也
+    追不回来。用 str 子类透传，全部既有调用方（拼接、302、相等
+    比较）行为不变；桩或旧调用方给裸 str 时 getattr 取不到属性，
+    留痕侧自然降级为只有请求 UA 指纹。
+    """
+
+    def __new__(cls, url, *, sign_ua: str = "", size=None):
+        obj = super().__new__(cls, url or "")
+        obj.sign_ua = sign_ua or ""
+        obj.size = size
+        return obj
+
+
+def _effective_sign_ua(client, requested_ua: str) -> str:
+    """本次签名实际生效的 UA。
+
+    Pan115Client 的口径：传入 UA 非空用传入值、否则服务器级
+    ``PAN115_UA``，且实例把生效值放在 ``client.ua`` 上——以它为准；
+    客户端没暴露该属性时（测试桩等）按同一规则镜像推导。
+    """
+    client_ua = (getattr(client, "ua", "") or "").strip()
+    if client_ua:
+        return client_ua
+    return (requested_ua or "").strip() or transfer115.PAN115_UA
+
+
 def resolve_user115_direct_url(db: Session, user_id: int,
                                item: em.MediaItem, ua: str = "") -> str:
     """绑定用户播 115 型条目：按该绑定自己的凭据现签直链（P1 播放口）。
@@ -1191,6 +1224,12 @@ def resolve_user115_direct_url(db: Session, user_id: int,
       409 + 三档文案告知用户，不静默回落共享中继）；
     - 一过性失败 → 不改状态，抛 transient（调用方按 409 通用句处理）。
     返回 115 下载地址（调用方 302 给播放器自拉，字节不过服务器）。
+
+    签名 UA 口径（2026-11-02 核查钉死）：只用调用方传入的播放器
+    UA（为空时 Pan115Client 回服务器级 PAN115_UA），**不查**
+    pan115 账号配置档的 UA——那是共享挂载/转存侧的设备身份，
+    不是这个绑定用户的；挂载侧在凭据覆盖时同理回默认 UA
+    （mounts.Pan115Mount._ua）。返回 Signed115Url，带实际签名 UA。
     """
     from backend.emby_server import mounts as mount_lib
 
@@ -1251,7 +1290,9 @@ def resolve_user115_direct_url(db: Session, user_id: int,
         if isinstance(exc, mount_lib.MountError):
             raise BindingError("not_found", f"115 上找不到文件：{rel}") from exc
         raise BindingError("transient", f"115 直链解析失败：{exc}") from exc
-    return url
+    return Signed115Url(
+        url, sign_ua=_effective_sign_ua(client115, ua),
+        size=entry.get("size") or None)
 
 
 def resolve_user115_copy_url(db: Session, user_id: int,
@@ -1305,7 +1346,7 @@ def resolve_user115_copy_url(db: Session, user_id: int,
             db.commit()
             raise BindingError(kind, message) from exc
         raise BindingError("transient", f"115 直链解析失败：{exc}") from exc
-    return url
+    return Signed115Url(url, sign_ua=_effective_sign_ua(client115, ua))
 
 
 def resolve_user_quark_copy_url(db: Session, user_id: int,
@@ -1427,6 +1468,48 @@ def _pan115_probe_http(url, ua: str = ""):
         return resp.status_code
 
 
+class AliveProbeResult(str):
+    """存活探测结论（str 子类）：本体是 "alive" / "dead" / "unknown"，
+    另带探测最终 HTTP 状态码 ``status``（探测异常/空地址时 None）。
+
+    出流逐跳留痕要状态码（只知道 dead 不知道是 404 还是 410，
+    下次取证还是瞎），用 str 子类透传：全部既有 == 比较与分支
+    判断行为不变；桩返回裸 str 时 getattr 取不到 status，留痕
+    侧自然降级。
+    """
+
+    def __new__(cls, verdict: str, status=None):
+        obj = super().__new__(cls, verdict)
+        obj.status = status
+        return obj
+
+
+def check_115_download_alive_detailed(url: str, ua: str = ""):
+    """115 现签地址存活探测的带状态码版本：返回 (verdict, status)。
+
+    定性规则（全站只许这一处，不许再写第二套）：
+    - 200/206 → alive；404/410 → dead；
+    - 其余状态码/探测异常/空地址 → unknown（定性不清不拦播放），
+      status 为最终状态码，异常与空地址时为 None。
+    永不抛异常。日志与 check_115_download_alive 旧行为逐字一致。
+    """
+    if not (url or "").strip():
+        return "unknown", None
+    try:
+        status = _pan115_probe_http(url, ua)
+    except Exception:  # noqa: BLE001 — 探测失败不阻断播放
+        logger.info("115 现签地址探测异常，按 unknown 放行：ua=%s",
+                    (ua or "")[:60])
+        return "unknown", None
+    if status in (200, 206):
+        return "alive", status
+    if status in (404, 410):
+        return "dead", status
+    logger.info("115 现签地址探测定性不清：status=%s ua=%s",
+                status, (ua or "")[:60])
+    return "unknown", status
+
+
 def check_115_download_alive(url: str, ua: str = "") -> str:
     """115 现签下载地址的轻量存在性校验（serve_115_copy 302 前用）。
 
@@ -1435,24 +1518,46 @@ def check_115_download_alive(url: str, ua: str = "") -> str:
     - 404/410 → dead（文件已死，302 过去播放器也只会撞 404）；
     - 其余（403/5xx/超时/异常）→ unknown：定性不清时不拦播放，
       调用方沿用旧行为 302，绝不因探测抖动多造一次播放失败。
-    永不抛异常。
+    永不抛异常。返回值是 AliveProbeResult（str 子类，带 .status）。
 
     ``ua`` 必须传签名地址时用的播放器 UA（理由见 _pan115_probe_http）；
     不传则探测恒 403 → 恒 unknown，本校验形同虚设。
     """
-    if not (url or "").strip():
-        return "unknown"
-    try:
-        status = _pan115_probe_http(url, ua)
-    except Exception:  # noqa: BLE001 — 探测失败不阻断播放
-        logger.info("115 现签地址探测异常，按 unknown 放行：ua=%s",
-                    (ua or "")[:60])
-        return "unknown"
-    if status in (200, 206):
-        return "alive"
-    if status in (404, 410):
-        return "dead"
-    logger.info("115 现签地址探测定性不清：status=%s ua=%s",
-                status, (ua or "")[:60])
-    return "unknown"
+    verdict, status = check_115_download_alive_detailed(url, ua)
+    return AliveProbeResult(verdict, status)
+
+
+def ua_fingerprint(ua: str) -> str:
+    """UA 的日志指纹：SHA-256 前 12 位十六进制，空 UA 返回空串。
+
+    留痕只记指纹、绝不记 UA 原文：UA 不是凭据，但含设备与版本
+    信息，且留痕的目的只是比对「请求 UA 与签名 UA 是不是同一个」，
+    指纹足够定案。
+    """
+    text = (ua or "").strip()
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def log_115_alive_probe(*, item_id, user_id, size, verdict, status,
+                        req_ua, sign_ua, path) -> None:
+    """115 出流逐跳留痕：探测这一跳落一条结构化日志（与 log_byos 同口径）。
+
+    背景（2026-11-02 取证 §6）：起播台账此前只记到「取链成功 +
+    302」，链发出之后服务端零证据，逐跳日志还被部署重启销毁过。
+    本行把探测结果钉进应用日志：条目、用户、文件大小、探测结论
+    与状态码、出流路径（path）、请求 UA 指纹与签名 UA 指纹——
+    下次再出「链发出了但播不了」，先看两个指纹是否一致、探测
+    状态码是多少，再决定往哪查。UA 只记指纹，任何凭据绝不入内。
+    日志失败不影响播放（log_byos 自带兜底）。
+    """
+    from backend.emby_server import transfer_variant as _tv
+
+    _tv.log_byos(
+        "byos115_alive_probe",
+        item=item_id, user=user_id, size=size, verdict=verdict,
+        status=status, path=path,
+        req_ua_fp=ua_fingerprint(req_ua) or None,
+        sign_ua_fp=ua_fingerprint(sign_ua) or None)
 
