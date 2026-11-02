@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""苹果 CMS 集行结构（新媒体库类型一期·集行单，只预留结构）。
+"""苹果 CMS 集行结构（新媒体库类型·集行单）。
 
-一期只灌电影、剧集库不开：``applecms_library_sync.sync_library``
-对 tvshows 库仍返回 ``blocked=unsupported_collection``。本模块把
-二期灌剧集要用的行形约定先钉死并桩测通过，放行时同步工人直接
-接线，不许到时另起一套形状（设计稿集行方案）：
+行形约定由集行预留单先钉死，集行同步单已接线：
+``applecms_library_sync.sync_library`` 对 tvshows 库走剧集路径，
+逐条目拉 detail 后调 :func:`ensure_series_tree` 建树（设计稿
+集行方案）：
 
 - 剧行：``item_type="series"``，guid=``hosted_guid(源, vod_id)``，
   与电影行同一托管口径（upstream_source_id=主来源、
@@ -86,25 +86,35 @@ def _get_or_create(db: Session, guid: str, factory) -> tuple:
 
 
 def ensure_series_tree(db: Session, library, source, record,
-                       detail: dict) -> Dict[str, int]:
+                       detail: dict, *,
+                       existing_series=None) -> Dict[str, int]:
     """建/复用一部剧的托管树：剧行＋合成季行＋集行＋集映射。
 
     ``record`` 是 ``applecms_sync.cms_entry_to_record`` 的产出
     （name / production_year 已清洗）。幂等：重跑只补缺失的集，
     已有行原样复用。调用方负责 commit 与映射开关前置门。
+
+    ``existing_series``：同步工人按去重键（标题+年份）命中其它
+    源已建的剧行时传入——树只许一棵，其余源只往已有集行上补
+    本源映射（一行多映射，与电影去重同口径）。集行复用先按
+    （剧行， 集序号）找，再按 guid 兜底：哪源先建的行就是正行，
+    后来者不许按自己的 guid 再建一行同序号的集。
     """
     stats = {"series_created": 0, "season_created": 0,
              "episodes_added": 0, "episodes_existing": 0, "mapped": 0}
     vod_id = str(detail.get("vod_id") or "").strip()
-    series_row, created = _get_or_create(
-        db, uimp.hosted_guid(source.id, vod_id),
-        lambda: em.MediaItem(
-            guid=uimp.hosted_guid(source.id, vod_id),
-            library_id=library.id, item_type="series",
-            name=record.name, sort_name=make_sort_name(record.name),
-            production_year=record.production_year,
-            upstream_source_id=source.id, probe_status="done",
-            enrich_priority=CMS_ENRICH_PRIORITY))
+    if existing_series is not None:
+        series_row, created = existing_series, False
+    else:
+        series_row, created = _get_or_create(
+            db, uimp.hosted_guid(source.id, vod_id),
+            lambda: em.MediaItem(
+                guid=uimp.hosted_guid(source.id, vod_id),
+                library_id=library.id, item_type="series",
+                name=record.name, sort_name=make_sort_name(record.name),
+                production_year=record.production_year,
+                upstream_source_id=source.id, probe_status="done",
+                enrich_priority=CMS_ENRICH_PRIORITY))
     if created:
         stats["series_created"] = 1
     season_row = (
@@ -132,17 +142,34 @@ def ensure_series_tree(db: Session, library, source, record,
             stats["season_created"] = 1
     for entry in plan_episodes(detail):
         index = int(entry["index"])
+        title = str(entry["title"])
         guid = episode_row_guid(source.id, vod_id, index)
-        episode_row, created = _get_or_create(
-            db, guid,
-            lambda index=index, title=str(entry["title"]): em.MediaItem(
-                guid=guid, library_id=library.id, item_type="episode",
-                name=title, sort_name=make_sort_name(title),
-                parent_id=season_row.id, series_id=series_row.id,
-                season_number=SYNTHETIC_SEASON_NUMBER,
-                episode_number=index,
-                upstream_source_id=source.id, probe_status="done",
-                enrich_priority=CMS_ENRICH_PRIORITY))
+        episode_row = (
+            db.query(em.MediaItem)
+            .filter(em.MediaItem.item_type == "episode",
+                    em.MediaItem.series_id == series_row.id,
+                    em.MediaItem.episode_number == index,
+                    em.MediaItem.merged_into_id.is_(None))
+            .order_by(em.MediaItem.id)
+            .first())
+        if episode_row is None:
+            episode_row, created = _get_or_create(
+                db, guid,
+                lambda index=index, title=title: em.MediaItem(
+                    guid=guid, library_id=library.id, item_type="episode",
+                    name=title, sort_name=make_sort_name(title),
+                    parent_id=season_row.id, series_id=series_row.id,
+                    season_number=SYNTHETIC_SEASON_NUMBER,
+                    episode_number=index,
+                    upstream_source_id=source.id, probe_status="done",
+                    enrich_priority=CMS_ENRICH_PRIORITY))
+        else:
+            created = False
+            if episode_row.name != title:
+                # 源侧改集名时跟上（与作品行 _refresh_row 同口径：
+                # 只填新值、不清空）；序号与归属永不因重跑改动。
+                episode_row.name = title
+                episode_row.sort_name = make_sort_name(title)
         if created:
             stats["episodes_added"] += 1
         else:
