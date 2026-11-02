@@ -9,8 +9,19 @@
 口径（全部 2026-11-02 定案）：
 - 播放地址绝不落库（点播时由 mapped 取流口现取 302），年份/海报
   等元数据不靠 CMS 的残缺字段，由 TMDB 补全链补。电影库只拉
-  provide ``ac=list`` 分页、同步期不拉 detail；剧集库例外逐条
-  拉 detail，但只取集数与集名（见下剧集库条）。
+  provide ``ac=list`` 分页、同步期原则上不拉 detail；剧集库例外
+  逐条拉 detail，但只取集数与集名（见下剧集库条）。
+- 电影库地区分流（``cms_area_bucket`` 非空时，抓详情分流
+  2026-11-02）：条目过分类白名单后判桶——list 带 ``vod_area``
+  用 list 的；没有才查 ``applecms_detail_cache``，未命中才真打
+  一次 detail（同一（源, vod）在多库/多轮间只打一次），并顺带
+  把 detail 的源站资料按只填空 harvest 到行上。桶与本库不符计
+  ``skipped_area`` 不建行；detail 失败/条目消失计
+  ``detail_errors`` 本轮跳过、下轮重试，绝不猜桶。归一化唯一
+  实现在 ``applecms_library.area_bucket``。一轮调度里配桶库
+  先于总库同步（guid 先到先锚：地区库先认领本桶条目，总库只
+  收剩下的其他/未知地区）。剧集库不走桶校验：其地区细拆按
+  白名单口径承接（见下「库是配置层」条）。
 - 身份不豁免：行建成托管行后 ``enrich_status`` 保持 ``pending``，
   现有 enrich 工人对 ``upstream_source_id`` 非空的行自动走「只走
   TMDB」补身份分支；对不上身份的行按现行货架规矩不上架，本模块
@@ -57,9 +68,11 @@ h=24 窗口保证增量不漏）。分页间隔复用配对工人的
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -119,12 +132,12 @@ def _zero_stats(library_id: int) -> Dict[str, object]:
         "added": 0, "updated": 0, "existing": 0, "mapped": 0,
         "pages": 0, "skipped_category": 0, "skipped_series_shape": 0,
         "skipped_invalid": 0, "skipped_other_library": 0,
+        "skipped_area": 0, "detail_errors": 0, "detail_fetches": 0,
         "dedupe_hits": 0, "errors": [], "seen_by_source": {},
         # 剧集路径计数（电影库恒 0）：集行增/存量、无直链组跳过、
-        # detail 已消失跳过、detail 请求失败（不回滚整源）。
+        # detail 已消失跳过（detail 请求失败共用上面的 detail_errors）。
         "episodes_added": 0, "episodes_existing": 0,
         "skipped_no_direct_group": 0, "skipped_detail_missing": 0,
-        "detail_errors": 0,
         # 源站海报只填空计数（vod_pic，2026-11-02 图片兼容根因二）。
         "posters_filled": 0,
     }
@@ -199,6 +212,241 @@ def _is_series_shaped(entry: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# detail 缓存与 harvest（地区分流专用；总库不走这里）
+# ---------------------------------------------------------------------------
+
+#: 源站填充的出处标记（metadata_source 列的暂定值）：与 tmdb /
+#: douban / nfo 等「已刮到权威数据」的标记区分——带此标记说明行
+#: 上文字/图片只是 CMS 源站自带资料，TMDB 命中后可盖过（见
+#: tmdb.py 对该值的填空豁免）。与多源合并填充单同一口径。
+CMS_METADATA_SOURCE = "applecms"
+
+
+def _detail_score(value) -> Optional[float]:
+    """vod_score 转 float 或 None（与多源填充同一口径）。
+
+    CMS 的 ``0`` / ``0.0`` 是「暂无评分」占位，落成 0.0 分会把
+    没评分的片显示成 0 分，故 <=0 一律按缺失处理；非法值不猜。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return score if 0 < score <= 10 else None
+
+
+def _detail_people(value) -> tuple:
+    """vod_actor / vod_director 人名串 → 去重保序元组（上限 10）。"""
+    if not value:
+        return ()
+    parts = re.split(r"[,，、/;；]", str(value))
+    out: List[str] = []
+    for part in parts:
+        name = part.strip()
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= 10:
+            break
+    return tuple(out)
+
+
+def _detail_blurb(detail: dict) -> str:
+    """简略简介：优先 ``vod_blurb``，缺时退 ``vod_content``。
+
+    去 HTML 标签/实体、折叠空白后截断（与多源填充同一口径）。
+    """
+    raw = str(detail.get("vod_blurb") or "").strip()
+    if not raw:
+        raw = str(detail.get("vod_content") or "").strip()
+    if not raw:
+        return ""
+    text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+    return re.sub(r"\s+", " ", text).strip()[:2000]
+
+
+def detail_harvest(detail: dict) -> Dict[str, object]:
+    """detail vod dict → 提取字段 dict（缓存与填充共用的形态）。
+
+    键名与 ``UpstreamCatalogRecord`` 透传组一致（多源填充单的
+    ``cms_entry_to_record`` 同名同义）；**只提取元数据，绝不带
+    播放地址**（vod_play_url/vod_play_from 不进缓存、不落库）。
+    """
+    return {
+        "poster_url": str(detail.get("vod_pic") or "").strip(),
+        "area": str(detail.get("vod_area") or "").strip(),
+        "category_name": str(detail.get("type_name") or "").strip(),
+        "remarks": str(detail.get("vod_remarks") or "").strip(),
+        "score": _detail_score(detail.get("vod_score")),
+        "actors": list(_detail_people(detail.get("vod_actor"))),
+        "directors": list(_detail_people(detail.get("vod_director"))),
+        "blurb": _detail_blurb(detail),
+    }
+
+
+def _detail_cache_get(db: Session, source_id: int,
+                      vod_id: str) -> Optional[dict]:
+    row = (
+        db.query(em.AppleCMSDetailCache)
+        .filter(em.AppleCMSDetailCache.source_id == source_id,
+                em.AppleCMSDetailCache.upstream_item_id == vod_id)
+        .first())
+    if row is None:
+        return None
+    try:
+        harvest = json.loads(row.harvest or "")
+    except (ValueError, TypeError):
+        harvest = None
+    if not isinstance(harvest, dict):
+        return None
+    harvest.setdefault("area", row.area or "")
+    return harvest
+
+
+def _detail_cache_put(db: Session, source_id: int, vod_id: str,
+                      harvest: dict) -> None:
+    payload = json.dumps(harvest, ensure_ascii=False)
+    try:
+        with db.begin_nested():
+            existing = (
+                db.query(em.AppleCMSDetailCache)
+                .filter(em.AppleCMSDetailCache.source_id == source_id,
+                        em.AppleCMSDetailCache.upstream_item_id == vod_id)
+                .first())
+            if existing is not None:
+                existing.area = str(harvest.get("area") or "")[:200]
+                existing.harvest = payload
+                existing.fetched_at = datetime.now()
+            else:
+                db.add(em.AppleCMSDetailCache(
+                    source_id=source_id, upstream_item_id=vod_id,
+                    area=str(harvest.get("area") or "")[:200],
+                    harvest=payload))
+    except Exception:
+        # 缓存写失败只是下轮多打一次 detail，不许拖垮整源同步。
+        logger.warning(
+            "applecms detail 缓存写入失败 source_id=%s vod_id=%s",
+            source_id, vod_id, exc_info=True)
+
+
+def get_or_fetch_detail_harvest(db: Session, source, vod_id: str, *,
+                                http_get=None, headers=None):
+    """（源, vod）的 detail 提取结果，三元组 ``(harvest, kind, fetched)``。
+
+    - 命中缓存 → ``(harvest, None, False)``，不发请求；
+    - 未命中真打一次 detail 成功 → 写缓存后 ``(harvest, None, True)``；
+    - 失败（网络/上游错误）或条目已消失 → ``(None, kind, True)``，
+      **不写缓存**，调用方按「本轮跳过、下轮重试」处理。
+
+    工人与存量迁移例程共用本函数——「同一（源, vod）只打一次
+    detail」只有这一处实现，不许各写一份。
+    """
+    cached = _detail_cache_get(db, int(source.id), vod_id)
+    if cached is not None:
+        return cached, None, False
+    try:
+        detail = acf.fetch_detail(
+            source.base_url, vod_id, http_get=http_get,
+            headers=headers if headers is not None
+            else _source_headers(source))
+    except acf.AppleCMSError as exc:
+        return None, exc.kind, True
+    if not isinstance(detail, dict):
+        return None, "missing", True
+    harvest = detail_harvest(detail)
+    _detail_cache_put(db, int(source.id), vod_id, harvest)
+    return harvest, None, True
+
+
+def _fill_people(db: Session, row: em.MediaItem, actors) -> bool:
+    """演员填空：行上还没有任何人物行时，按名单落行。
+
+    与 enrich 侧 ``_apply_cast`` 同口径：人物行「先写者赢」——
+    已有行（哪怕是另一源写的）就不合并、不重写，TMDB 命中后
+    按名字补头像/id。导演只进缓存不落行：现有人物模型只有演员
+    一种类型，把导演写成演员是错数据。
+    """
+    if not actors:
+        return False
+    exists = (db.query(em.EmbyPerson.id)
+              .filter(em.EmbyPerson.item_id == row.id)
+              .first())
+    if exists:
+        return False
+    for idx, name in enumerate(actors):
+        db.add(em.EmbyPerson(
+            item_id=row.id, name=str(name)[:200], role="", image="",
+            sort_order=idx, person_tmdb_id=""))
+    return True
+
+
+def _fill_row_from_harvest(db: Session, row: em.MediaItem,
+                           harvest: dict) -> bool:
+    """harvest 合行填空：只填行上为空的字段，绝不覆盖。
+
+    落点与多源合并填充单逐项一致（沿用现有列，不新建列）：海报
+    →primary_image_url、简介→overview、评分→community_rating、
+    地区→countries、分类名→genres、备注→tagline、演员→
+    emby_people。任一字段被填且行上还没有出处标记时，标
+    ``metadata_source="applecms"``（暂定填充，TMDB 可盖过）；
+    身份字段（tmdb_id 等）绝不碰。
+    """
+    changed = False
+    poster = str(harvest.get("poster_url") or "").strip()
+    if poster and not (row.primary_image_url or "").strip():
+        row.primary_image_url = poster[:1024]
+        changed = True
+    blurb = str(harvest.get("blurb") or "").strip()
+    if blurb and not (row.overview or "").strip():
+        row.overview = blurb
+        changed = True
+    score = harvest.get("score")
+    if score is not None and row.community_rating is None:
+        row.community_rating = score
+        changed = True
+    area = str(harvest.get("area") or "").strip()
+    if area and not (row.countries or "").strip():
+        row.countries = area[:500]
+        changed = True
+    category = str(harvest.get("category_name") or "").strip()
+    if category and not (row.genres or "").strip():
+        row.genres = category
+        changed = True
+    remarks = str(harvest.get("remarks") or "").strip()
+    if remarks and not (row.tagline or "").strip():
+        row.tagline = remarks[:300]
+        changed = True
+    if _fill_people(db, row, harvest.get("actors") or ()):
+        changed = True
+    if changed and not (row.metadata_source or "").strip():
+        row.metadata_source = CMS_METADATA_SOURCE
+    return changed
+
+
+def _entry_bucket(db: Session, source, entry: dict, vod_id: str,
+                  stats: dict, *, http_get, headers):
+    """判一条条目属哪个地区桶，返回 ``(桶键, harvest|None)``。
+
+    list 自带 ``vod_area`` 时直接判桶（harvest 为 None：list
+    字段的填充归多源填充口径，本函数只判桶）；没有才走
+    detail 缓存/抓取。detail 取不到时返回 ``(None, None)``
+    且已计 ``detail_errors``——绝不猜桶。
+    """
+    area_raw = entry.get("vod_area")
+    if isinstance(area_raw, str) and area_raw.strip():
+        return acl.area_bucket(area_raw), None
+    harvest, _kind, fetched = get_or_fetch_detail_harvest(
+        db, source, vod_id, http_get=http_get, headers=headers)
+    if fetched:
+        stats["detail_fetches"] += 1
+    if harvest is None:
+        stats["detail_errors"] += 1
+        return None, None
+    return acl.area_bucket(harvest.get("area")), harvest
+
+
+# ---------------------------------------------------------------------------
 # 单库同步
 # ---------------------------------------------------------------------------
 
@@ -232,11 +480,13 @@ def sync_library(db: Session, library, *, http_get=None, full: bool = False,
         return stats
     type_map = acl.parse_cms_type_map(
         getattr(library, "cms_type_map", "")) or {}
+    area_bucket_cfg = acl.parse_cms_area_bucket(library)
     started = time.monotonic()
     run_cache: Dict[str, em.MediaItem] = {}
     for source_id in source_ids:
         _sync_source(db, library, source_id, stats, run_cache,
-                     type_map=type_map, http_get=http_get, full=full,
+                     type_map=type_map, area_bucket_cfg=area_bucket_cfg,
+                     http_get=http_get, full=full,
                      max_pages=max_pages, sleep_fn=sleep_fn,
                      series_mode=series_mode)
     _write_progress(db, library, stats, started)
@@ -244,8 +494,8 @@ def sync_library(db: Session, library, *, http_get=None, full: bool = False,
 
 
 def _sync_source(db: Session, library, source_id: int, stats: dict,
-                 run_cache: dict, *, type_map: dict, http_get,
-                 full: bool, max_pages, sleep_fn,
+                 run_cache: dict, *, type_map: dict, area_bucket_cfg: str = "",
+                 http_get, full: bool, max_pages, sleep_fn,
                  series_mode: bool = False) -> None:
     source = us.get_source(db, source_id)
     if source is None:
@@ -280,6 +530,7 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
                 _process_entry(db, library, source, entry, stats,
                                run_cache, type_map=type_map, tops=tops,
                                seen=seen, series_mode=series_mode,
+                               area_bucket_cfg=area_bucket_cfg,
                                http_get=http_get, headers=headers,
                                do_sleep=do_sleep, delay=delay)
             try:
@@ -310,11 +561,12 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
 def _process_entry(db: Session, library, source, entry: dict,
                    stats: dict, run_cache: dict, *, type_map: dict,
                    tops: dict, seen: List[str],
-                   series_mode: bool = False, http_get=None,
-                   headers: Optional[dict] = None, do_sleep=None,
-                   delay: float = 0.0) -> None:
+                   series_mode: bool = False, area_bucket_cfg: str = "",
+                   http_get=None, headers: Optional[dict] = None,
+                   do_sleep=None, delay: float = 0.0) -> None:
     if series_mode:
-        # 剧集路径独立成段：电影路径逐字不动（回归口径）。
+        # 剧集路径独立成段：电影路径逐字不动（回归口径）。地区
+        # 细拆走白名单口径，本路径不接 cms_area_bucket 校验。
         _process_series_entry(
             db, library, source, entry, stats, run_cache,
             type_map=type_map, tops=tops, seen=seen, http_get=http_get,
@@ -333,6 +585,18 @@ def _process_entry(db: Session, library, source, entry: dict,
     if _is_series_shaped(entry):
         stats["skipped_series_shape"] += 1
         return
+    harvest = None
+    if area_bucket_cfg:
+        # 地区分流只对配了桶的库生效；没配桶的库（总库）本段
+        # 整体不执行，detail 请求数为零、行为与升级前一致。
+        bucket, harvest = _entry_bucket(
+            db, source, entry, vod_id, stats,
+            http_get=http_get, headers=headers)
+        if bucket is None:
+            return  # detail 取不到：detail_errors 已计，下轮重试
+        if bucket != area_bucket_cfg:
+            stats["skipped_area"] += 1
+            return
     record = acs.cms_entry_to_record(entry, source_id=str(source.id))
     if record is None:
         stats["skipped_invalid"] += 1
@@ -350,8 +614,13 @@ def _process_entry(db: Session, library, source, entry: dict,
         row = _create_row(db, library, source, vod_id, record)
         run_cache[key] = row
         stats["added"] += 1
+        if harvest and _fill_row_from_harvest(db, row, harvest):
+            db.flush()
     else:
-        if _refresh_row(row, record):
+        changed = _refresh_row(row, record)
+        if harvest and _fill_row_from_harvest(db, row, harvest):
+            changed = True
+        if changed:
             stats["updated"] += 1
         else:
             stats["existing"] += 1
@@ -608,12 +877,14 @@ def _write_progress(db: Session, library, stats: dict,
         "skipped_series_shape": stats["skipped_series_shape"],
         "skipped_invalid": stats["skipped_invalid"],
         "skipped_other_library": stats["skipped_other_library"],
+        "skipped_area": stats["skipped_area"],
+        "detail_errors": stats["detail_errors"],
+        "detail_fetches": stats["detail_fetches"],
         "dedupe_hits": stats["dedupe_hits"],
         "episodes_added": stats["episodes_added"],
         "episodes_existing": stats["episodes_existing"],
         "skipped_no_direct_group": stats["skipped_no_direct_group"],
         "skipped_detail_missing": stats["skipped_detail_missing"],
-        "detail_errors": stats["detail_errors"],
         "posters_filled": stats["posters_filled"],
         "errors": list(stats["errors"]),
         "sources": list(stats["seen_by_source"].keys()),
@@ -657,6 +928,11 @@ def run_library_sync_round(*, session_factory=None, http_get=None,
             .filter(em.Library.kind == acl.KIND_APPLECMS,
                     em.Library.is_enabled.is_(True))
             .all())
+        # 地区库先跑：guid 是跨库唯一锚（一对（源, vod）只许住
+        # 一个库），地区库先认领本桶条目，总库随后只收剩下的
+        # 其他/未知地区；同类内按 id 稳定排序。
+        libraries.sort(key=lambda lib: (
+            0 if acl.parse_cms_area_bucket(lib) else 1, lib.id or 0))
     finally:
         db.close()
     for library in libraries:

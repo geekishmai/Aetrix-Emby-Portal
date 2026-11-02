@@ -1922,6 +1922,9 @@ class LibraryCreate(BaseModel):
     upstream_source_ids: list[int] = []
     # kind=applecms 时的分类映射：源分类名 → "in"/"out"；省略/空 = 全收
     cms_type_map: dict[str, str] | None = None
+    # kind=applecms 时的地区分流桶：huayu/oumei/rihan（见
+    # applecms_library.AREA_BUCKET_LABELS）；省略/空 = 不分地区
+    cms_area_bucket: str | None = None
 
 
 class LibraryUpdate(BaseModel):
@@ -1952,6 +1955,9 @@ class LibraryUpdate(BaseModel):
     upstream_source_ids: list[int] | None = None
     # kind=applecms 的分类映射：显式传 null = 清空（回全收），省略 = 不修改
     cms_type_map: dict[str, str] | None = None
+    # kind=applecms 的地区分流桶：显式传 null/空 = 清空（回不分
+    # 地区），省略 = 不修改；非法桶值 400
+    cms_area_bucket: str | None = None
 
 
 def _validate_library_sources(db: Session, paths: list[str], mount_ids: list[int]) -> None:
@@ -2192,6 +2198,7 @@ def list_libraries(staff: models.WebUser = Depends(require_staff), db: Session =
             "kind": _cms_lib.library_kind(lib),
             "upstream_source_ids": _cms_lib.parse_upstream_source_ids(lib),
             "cms_type_map": _cms_lib.parse_cms_type_map(lib) or None,
+            "cms_area_bucket": _cms_lib.parse_cms_area_bucket(lib) or None,
             "cover_url": f"/api/admin/emby/libraries/{lib.id}/cover" if lib.cover_path else None,
             # 封面配置：样式回显 + “新片入库后自动更新”开关（老库没这列时按关闭处理）
             "cover_template": lib.cover_template,
@@ -2274,9 +2281,15 @@ def create_library(req: LibraryCreate, staff: models.WebUser = Depends(require_s
     is_cms = kind == cms_lib.KIND_APPLECMS
     cms_source_field = ""
     cms_map_field = None
+    cms_bucket_field = None
     if is_cms:
         cms_source_field = _cms_source_ids_field(db, req.upstream_source_ids)
         cms_map_field = cms_lib.format_cms_type_map(req.cms_type_map)
+        try:
+            cms_bucket_field = cms_lib.format_cms_area_bucket(
+                req.cms_area_bucket)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     # 简化形式优先：界面传的是「裸路径 + 存储后端」，mount:// 前缀在后端拼回去
     # （CMS 库没有本地来源，这一段整体不适用）
@@ -2316,6 +2329,7 @@ def create_library(req: LibraryCreate, staff: models.WebUser = Depends(require_s
         kind=kind,
         upstream_source_ids=cms_source_field,
         cms_type_map=cms_map_field,
+        cms_area_bucket=cms_bucket_field,
     )
     db.add(lib)
     db.flush()  # 落 id，供新表行引用
@@ -2447,10 +2461,17 @@ def update_library(lib_id: int, req: LibraryUpdate, staff: models.WebUser = Depe
                 db, req.upstream_source_ids)
         if "cms_type_map" in req.model_fields_set:
             lib.cms_type_map = cms_lib.format_cms_type_map(req.cms_type_map)
+        if "cms_area_bucket" in req.model_fields_set:
+            try:
+                lib.cms_area_bucket = cms_lib.format_cms_area_bucket(
+                    req.cms_area_bucket)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
     elif (req.upstream_source_ids is not None
-          or "cms_type_map" in req.model_fields_set):
+          or "cms_type_map" in req.model_fields_set
+          or "cms_area_bucket" in req.model_fields_set):
         raise HTTPException(status_code=400,
-                            detail="只有苹果 CMS 库能配置 CMS 来源与分类映射")
+                            detail="只有苹果 CMS 库能配置 CMS 来源、分类映射与地区分流")
     if req.name is not None:
         lib.name = req.name
     if req.collection_type is not None:

@@ -1062,6 +1062,8 @@ export const createLibrary = (data: {
   upstream_source_ids?: number[]
   /** kind=applecms 时的分类映射：源分类名 → in/out；不传 = 全收 */
   cms_type_map?: Record<string, string> | null
+  /** kind=applecms 时的地区分流桶：huayu/oumei/rihan；不传/空 = 不分地区 */
+  cms_area_bucket?: string | null
 }) => post<{ success: boolean; id: number; guid: string }>(`${E}/libraries`, data)
 
 export const updateLibrary = (
@@ -1097,6 +1099,8 @@ export const updateLibrary = (
     upstream_source_ids?: number[]
     /** kind=applecms 的分类映射：传 null = 清空（回全收），省略则不修改 */
     cms_type_map?: Record<string, string> | null
+    /** kind=applecms 的地区分流桶：传 null = 清空（回不分地区），省略则不修改 */
+    cms_area_bucket?: string | null
   }
 ) => put<{ success: boolean; rescan_required?: boolean }>(`${E}/libraries/${id}`, data)
 
