@@ -125,6 +125,8 @@ def _zero_stats(library_id: int) -> Dict[str, object]:
         "episodes_added": 0, "episodes_existing": 0,
         "skipped_no_direct_group": 0, "skipped_detail_missing": 0,
         "detail_errors": 0,
+        # 源站海报只填空计数（vod_pic，2026-11-02 图片兼容根因二）。
+        "posters_filled": 0,
     }
 
 
@@ -355,6 +357,8 @@ def _process_entry(db: Session, library, source, entry: dict,
             stats["existing"] += 1
         if row.upstream_source_id != source.id:
             stats["dedupe_hits"] += 1
+    if _fill_row_poster(row, entry):
+        stats["posters_filled"] += 1
     uim.record_mapping(
         db, local_item_id=row.id, source_id=source.id,
         upstream_item_id=vod_id,
@@ -443,6 +447,12 @@ def _process_series_entry(db: Session, library, source, entry: dict,
             stats["dedupe_hits"] += 1
         tree = acser.ensure_series_tree(db, library, source, record,
                                         detail, existing_series=row)
+    # 剧行海报只填空：detail 的 vod_pic 优先（非凡等源 list 不带图、
+    # detail 才带），detail 没有再看 list 条目；集行不单独填，
+    # 取图链自会回退剧图。
+    if row is not None and row is not _OTHER_LIBRARY:
+        if _fill_row_poster(row, detail) or _fill_row_poster(row, entry):
+            stats["posters_filled"] += 1
     stats["episodes_added"] += tree["episodes_added"]
     stats["episodes_existing"] += tree["episodes_existing"]
     stats["mapped"] += tree["mapped"]
@@ -550,6 +560,24 @@ def _create_row(db: Session, library, source, vod_id: str,
     return row
 
 
+def _fill_row_poster(row: em.MediaItem, entry) -> bool:
+    """源站海报只填空：行无任何图（poster_path 与 primary_image_url
+    皆空）且源条目带合法 ``vod_pic`` 时才写 primary_image_url。
+
+    TMDB / 本地图永远优先：已有任何一份图就不动（与全站「只填空」
+    口径一致，enrich 侧同理只填空，两边谁先到谁生效、互不覆盖）。
+    写的是远程 URL——取图端点会按需本地化/代理（media_routes），
+    本工人写库时不发图片请求。填了返回 True。
+    """
+    if getattr(row, "poster_path", None) or getattr(row, "primary_image_url", None):
+        return False
+    pic = acs.cms_entry_poster(entry)
+    if not pic:
+        return False
+    row.primary_image_url = pic
+    return True
+
+
 def _refresh_row(row: em.MediaItem, record) -> bool:
     """重见时刷新可变字段（名字/年份）；有变化返回 True。
 
@@ -582,6 +610,7 @@ def _write_progress(db: Session, library, stats: dict,
         "skipped_no_direct_group": stats["skipped_no_direct_group"],
         "skipped_detail_missing": stats["skipped_detail_missing"],
         "detail_errors": stats["detail_errors"],
+        "posters_filled": stats["posters_filled"],
         "errors": list(stats["errors"]),
         "sources": list(stats["seen_by_source"].keys()),
     }
