@@ -1171,6 +1171,7 @@ def _auto_migrate():
     _widen_code_column(existing_tables, inspector)
     _widen_bitrate_column(existing_tables, inspector)
     _fix_station_message_from_user_fk(existing_tables, inspector)
+    _fix_admin_log_admin_user_fk(existing_tables, inspector)
     _widen_stream_title_columns(existing_tables, inspector)
     _backfill_orm_columns(existing_tables)
     # v2.49.0：本次刚补上 video_resolution 列的老库，用文件名解析回填已有条目
@@ -2161,6 +2162,73 @@ def _fix_station_message_from_user_fk(existing_tables: set, inspector) -> None:
             "FOREIGN KEY (from_user_id) REFERENCES web_users(id)"
         ))
     logger.info("  🔧 已迁移: station_messages.from_user_id 外键 → web_users(id)（修管理后台发消息静默失败）")
+
+
+def _fix_admin_log_admin_user_fk(existing_tables: set, inspector) -> None:
+    """操作日志外键纠偏：admin_logs.admin_user_id 原先指向已废弃的 admin_users(id)，
+    实际写入的一直是管理员的 web_users.id（见 admin_core._audit）。admin_users
+    从来没人写，PG 强校验外键时所有带审计的后台写操作都 500 并整体回滚
+    （例：保存播放器黑名单）。与 station_messages 同款修法。
+
+    幂等：admin_user_id 上已存在指向 web_users 的 FK 时直接返回；SQLite 跳过。
+    """
+    from sqlalchemy import text
+
+    if "admin_logs" not in existing_tables:
+        return
+    dialect = engine.dialect.name
+    if dialect not in ("postgresql", "mysql"):
+        return
+
+    with engine.begin() as conn:
+        if dialect == "postgresql":
+            already = conn.execute(text(
+                "SELECT 1 FROM pg_constraint "
+                "WHERE conrelid='admin_logs'::regclass AND contype='f' "
+                "AND confrelid='web_users'::regclass "
+                "AND 'admin_user_id' = ANY (SELECT attname FROM pg_attribute "
+                "WHERE attrelid=conrelid AND attnum = ANY (conkey))"
+            )).fetchone()
+            if already:
+                return
+            old = conn.execute(text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid='admin_logs'::regclass AND contype='f' "
+                "AND confrelid != 'web_users'::regclass "
+                "AND 'admin_user_id' = ANY (SELECT attname FROM pg_attribute "
+                "WHERE attrelid=conrelid AND attnum = ANY (conkey))"
+            )).fetchall()
+            for (conname,) in old:
+                safe = conname.replace('"', '""')
+                conn.execute(text(f'ALTER TABLE admin_logs DROP CONSTRAINT "{safe}"'))
+        else:  # mysql
+            already = conn.execute(text(
+                "SELECT 1 FROM information_schema.KEY_COLUMN_USAGE "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'admin_logs' "
+                "AND COLUMN_NAME = 'admin_user_id' AND REFERENCED_TABLE_NAME = 'web_users' "
+                "LIMIT 1"
+            )).fetchone()
+            if already:
+                return
+            old = conn.execute(text(
+                "SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'admin_logs' "
+                "AND COLUMN_NAME = 'admin_user_id' AND REFERENCED_TABLE_NAME IS NOT NULL "
+                "AND REFERENCED_TABLE_NAME != 'web_users'"
+            )).fetchall()
+            for (conname,) in old:
+                conn.execute(text(f"ALTER TABLE admin_logs DROP FOREIGN KEY `{conname}`"))
+        # 孤儿值置空（旧约束下非空孤儿值本就写不进来；不清则 ADD CONSTRAINT 会卡启动）
+        conn.execute(text(
+            "UPDATE admin_logs SET admin_user_id = NULL "
+            "WHERE admin_user_id IS NOT NULL "
+            "AND admin_user_id NOT IN (SELECT id FROM web_users)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE admin_logs ADD CONSTRAINT admin_logs_admin_user_id_fkey "
+            "FOREIGN KEY (admin_user_id) REFERENCES web_users(id)"
+        ))
+    logger.info("  🔧 已迁移: admin_logs.admin_user_id 外键 → web_users(id)（修 PG 上带审计的后台写操作 500）")
 
 
 def _widen_code_column(existing_tables: set, inspector) -> None:
