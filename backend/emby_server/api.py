@@ -5872,12 +5872,17 @@ async def playback_info(
             "剧级点播落集 series=%s -> episode=%s user=%s",
             item.guid, _series_episode.guid, user.id)
         item = _series_episode
-    # 播放交付编排器预计算（换代线 step 5）：计划缺失/过期时顺手
-    # 算一份落库（探针全 fail-open），点播热路径只读计划；本处
-    # 失败只记日志，绝不影响本次 PlaybackInfo。
+    # 播放交付编排器预计算（换代线 step 5，起播优化件二）：
+    # 原先这里同步跑 ensure_plan，计划缺失/过期时现算 build
+    # （探针串行 3–5.7 秒，2026-11-02 起播分析实测），而本次
+    # PlaybackInfo 根本不消费其返回值——纯粹是搭在关键路径上
+    # 的预热写操作。改成后台线程建计划（spawn_ensure_plan，
+    # 线程内自开会话、同键在途去重），本次请求不再等 build；
+    # 计划的消费方（video_stream 只读、转存完成刷新）逐字不变。
+    # 启动失败只记日志，绝不影响本次 PlaybackInfo。
     try:
         from backend.emby_server import delivery_plan as _dp
-        await run_db(_dp.ensure_plan, db, user, item)
+        _dp.spawn_ensure_plan(user.id, item.id)
     except Exception:  # noqa: BLE001 — 预计算失败不影响本次播放
         logger.warning("交付计划预计算失败 item=%s",
                        getattr(item, "id", "?"), exc_info=True)
