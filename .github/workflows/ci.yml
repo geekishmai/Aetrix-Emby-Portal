@@ -419,18 +419,31 @@ jobs:
         # 分钟，job 级 40 → 55 分钟兜底。拆分仍暂不做（顺序依赖同前），
         # 本步加 --durations=30 只出报告、攒二期拆分数据；15 分钟预警线
         # 保留，含义改为「二期拆分立项信号」，不再是提上限信号。
+        # 容量二期（2026-11-02 立项，证据见 reports/ci-speedup-20261102.md）：
+        # 近 10 个冒烟 job 实测——排队仅 4~64 秒可忽略，pytest 步占整 job
+        # 72~82%（837~1226 秒），其余约 55 步合计约 5 分钟；最慢 30 条合计
+        # 仅约 245 秒且分布散、无单点可摘，重文件多为真等待型（等超时/
+        # 定时器），只能靠并行重叠消化。故本步改走 pytest-xdist 并行：
+        # -n auto（runner 4 vCPU）+ --dist loadfile（同一文件不拆散、文件内
+        # 顺序与串行一致，跨文件顺序依赖的暴露面压到最小）。夹具兼容已做
+        # 小范围验证：含认领/聚合/janitor 三个共享连接竞态敏感文件在内的
+        # 11 文件子集，串行与 -n 4 --dist loadfile 均 1292 passed、零新增
+        # 失败；全量口径以本步真实 run 前后墙钟对比为准。若日后出现只在
+        # 并行下红、串行同 head 全绿的顺序依赖失败，先摘掉 -n/--dist 两
+        # 个参数回串行止损，再立项做分片，不要为凑绿改断言。
+        # 另删本步内与「安装 CI 附加依赖」步重复的一次 requirements-ci
+        # 安装（同一步骤上方已装过同一把锁）。
         timeout-minutes: 45
         run: |
-          pip install --require-hashes -r backend/requirements-ci.lock
           _t0=$(date +%s)
           set +e
-          python -m pytest tests/ -q --durations=30
+          python -m pytest tests/ -q --durations=30 -n auto --dist loadfile
           _rc=$?
           _t1=$(date +%s)
           _el=$((_t1 - _t0))
           echo "pytest 耗时 ${_el} 秒" >> "$GITHUB_STEP_SUMMARY"
           if [ "$_el" -ge 900 ]; then
-            echo "::warning::pytest 已耗时 ${_el} 秒，超过 15 分钟预警线（步骤上限 45 分钟），套件容量二期（拆分）需立项处理"
+            echo "::warning::pytest 已耗时 ${_el} 秒，超过 15 分钟预警线（步骤上限 45 分钟；已启用 xdist 并行），套件容量三期（分片/拆分）需立项处理"
           fi
           exit "$_rc"
 
