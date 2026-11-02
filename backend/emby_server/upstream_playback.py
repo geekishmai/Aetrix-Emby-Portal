@@ -371,6 +371,58 @@ def evict_cms_detail(source_id, vod_id) -> None:
         pass
 
 
+# ---------------------------------------------------------------- 探活分级
+# （件一）：同一主机连续 403 满 3 次即跳过探活——恒 403 主机（如区
+# 域拒绝型 CDN）每次点播省掉 1.5–3.8 秒探活等待；跳过时返回的
+# (403, None) 与实测 403 走同一条 resolve 软放行分支，播放决策
+# 不变，只省等待。计数键走 CacheManager、TTL 6 小时，到期后下
+# 一次恢复实测自愈；非 403 的确定性状态清键，超时／断连（None）
+# 不改计数。计数按探活入口 URL 的主机记（跟随链终跳主机不同时
+# 仍以入口主机为准——403 本就是软放行 verdict，跳过不改播放决
+# 策，只省等待）。
+_CMS_PROBE_403_KEY_PREFIX = "cmsprobe403:"
+_CMS_PROBE_403_THRESHOLD = 3
+_CMS_PROBE_403_TTL_SEC = 6 * 3600
+
+
+def _probe_403_host(url: str) -> str:
+    try:
+        return urllib.parse.urlparse(url or "").hostname or ""
+    except Exception:
+        return ""
+
+
+def _probe_403_count(host: str) -> int:
+    try:
+        # CacheManager 必须函数内导入（与本模块其余用法同口径）：
+        # 本模块没有顶层导入，裸名会 NameError——且曾被下面的
+        # except 静默吞掉，计数恒 0、跳过永不触发（CI 定因实证）。
+        from backend.database import CacheManager
+
+        raw = CacheManager.get(_CMS_PROBE_403_KEY_PREFIX + host.lower())
+        return int(raw) if raw is not None else 0
+    except Exception:  # noqa: BLE001 — 读不到按 0（照常实测），但留日志不许静默
+        logger.warning("cms probe 403 count read failed host=%s",
+                       host, exc_info=True)
+        return 0
+
+
+def _record_probe_403(host: str, is_403: bool) -> None:
+    try:
+        from backend.database import CacheManager
+
+        key = _CMS_PROBE_403_KEY_PREFIX + host.lower()
+        if is_403:
+            CacheManager.set(
+                key, str(_probe_403_count(host) + 1),
+                ttl=_CMS_PROBE_403_TTL_SEC)
+        else:
+            CacheManager.delete(key)
+    except Exception:  # noqa: BLE001 — 写失败不许影响探活主路径，但留日志不许静默
+        logger.warning("cms probe 403 count write failed host=%s",
+                       host, exc_info=True)
+
+
 def _get_text_single_hop(url: str, headers: dict, timeout: float):
     """文本 GET 单跳：返回 (status, text|None, location|None)。
 
@@ -407,11 +459,19 @@ def _default_http_get_text_followed(url: str, headers: dict,
     （safe_urlopen 发请求前还会再验一次，opener 本身仍不跟随）；
     验不过、没有 Location 或跳数超限，一律 (None, None) 按抓不到
     处理。返回最终跳的 (status, text)。
+
+    总预算（PA-080）：``timeout`` 是整条跟随链的总预算、不是每跳
+    预算——入口算 deadline，每跳取 min(timeout, 剩余)，预算耗尽
+    即停；旧口径每跳各传 3.0 秒、至多 4 跳最坏 12 秒。
     """
+    deadline = time.monotonic() + timeout
     current_url = url
     for hop in range(UPSTREAM_PROBE_MAX_REDIRECTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, None
         status, text, location = _get_text_single_hop(
-            current_url, headers, timeout)
+            current_url, headers, min(timeout, remaining))
         if status not in _PROBE_REDIRECT_STATUSES:
             return status, text
         if hop >= UPSTREAM_PROBE_MAX_REDIRECTS or not location:
@@ -451,13 +511,22 @@ def _capture_cms_quality(source, mapping_id, detail, address, *,
     仅缺失/不完整（缺 label 或宽高任一为空）时才抓取回填，
     与 CMS_QUALITY_CACHE_TTL_SEC 注释的「过期后下一次点播取流
     时自然回填」口径一致。
+
+    门禁放宽（PA-080）：media playlist 线只回填 duration_sec、403/
+    HTML 线 payload 为空，旧门禁（仅 label＋宽高）对这两类永不
+    闭合、每播重复抓取；现放宽为 label＋宽高齐全、或已有
+    duration_sec、或已有 no-master 标记（非清单/失败落点已判死）
+    任一即闭合；no-master 标记走 store_cms_quality 的 7 天 TTL，
+    到期后下一次点播自然重探。
     """
     if mapping_id is None:
         return
     try:
         existing = read_cms_quality(mapping_id) or {}
-        if (existing.get("label") and existing.get("width")
-                and existing.get("height")):
+        if ((existing.get("label") and existing.get("width")
+                and existing.get("height"))
+                or existing.get("duration_sec")
+                or existing.get("no_master")):
             return
         from backend.emby_server import quality_label as ql
         payload: dict = {}
@@ -500,6 +569,12 @@ def _capture_cms_quality(source, mapping_id, detail, address, *,
                     payload["duration_sec"] = duration
         if payload:
             store_cms_quality(mapping_id, payload)
+        else:
+            # PA-080：本次确实发起了抓取却无可用信号（非清单/失败
+            # 落点），写 no-master 标记使门禁闭合，TTL 内不再每播
+            # 重探；TTL 到期后自然重探。展示侧只读宽高／标签／
+            # 时长字段，标记键被忽略。
+            store_cms_quality(mapping_id, {"no_master": True})
     except Exception:  # noqa: BLE001 — 画质回填绝不影响取流
         pass
 
@@ -708,11 +783,21 @@ def _default_http_range_probe(url: str, headers: dict, timeout: float):
     """
     probe_headers = dict(headers)
     probe_headers["Range"] = "bytes=0-0"
+    entry_host = _probe_403_host(url)
+    if entry_host and _probe_403_count(entry_host) >= _CMS_PROBE_403_THRESHOLD:
+        # 件一：恒 403 主机跳过探活（见 helpers 注释），返回 verdict
+        # 与实测 403 一致，resolve 侧走既有软放行分支。
+        return 403, None
     current_url = url
     for hop in range(UPSTREAM_PROBE_MAX_REDIRECTS + 1):
         status, retry_after, location = _probe_single_hop(
             current_url, probe_headers, timeout)
         if status not in _PROBE_REDIRECT_STATUSES:
+            if entry_host and status is not None:
+                # 超时/断连（None）不改计数：只有确定性状态才记
+                # 403 或清键，None 落进 record 的 False 分支会把
+                # 已攒计数误删（与本节头口径相悖，CI 定因实证）。
+                _record_probe_403(entry_host, status == 403)
             return status, retry_after
         if hop >= UPSTREAM_PROBE_MAX_REDIRECTS or not location:
             return None, None

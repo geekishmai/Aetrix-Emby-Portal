@@ -11,7 +11,8 @@
 - 非 .m3u8 地址也做一次有界尝试：与探活层同款手工逐跳跟随
   （每跳先 verify_outbound_url 复验、safe_urlopen 本身仍不跟随），
   仅当最终响应内容以 #EXTM3U 开头时才按主清单解析；HTML/403/
-  跳私网一律留空，全程 fail-safe 不抛错。
+  跳私网写 no-master 标记（PA-080：门禁闭合、TTL 内不再重探），
+  全程 fail-safe 不抛错。
 - 抓到的是 media playlist（只有 EXTINF 分段、无主清单信号）时，
   分段时长求和存 duration_sec；展示侧 _synthetic_cms_base_source
   在本地行时长为空时用它填 RunTimeTicks。只回填时长，不探编码。
@@ -32,6 +33,7 @@ os.environ.setdefault("REDIS_ENABLED", "false")
 
 import email.message
 import io
+import time
 import urllib.error
 from types import SimpleNamespace
 
@@ -216,28 +218,58 @@ def test_share_redirect_to_master_backfills_quality(monkeypatch):
     assert "duration_sec" not in cached
 
 
+def test_share_master_closes_gate(monkeypatch):
+    """PA-080(d)：share→主清单线第二发不再发 HTTP，且首发值不退化。"""
+
+    def handler(url):
+        if url == SHARE_URL:
+            return 302, {"Location": INDEX_URL}, b""
+        if url == INDEX_URL:
+            return 200, {}, _MASTER_TEXT.encode()
+        raise AssertionError(f"unexpected url {url}")
+
+    transport = _install_transport(monkeypatch, handler)
+    _capture(978009, SHARE_URL)
+    cached = up.read_cms_quality(978009)
+    assert cached["width"] == 1920 and cached["label"] == "1080P"
+    _capture(978009, SHARE_URL)
+    assert transport.requested == [SHARE_URL, INDEX_URL]
+    assert up.read_cms_quality(978009) == cached
+
+
 def test_share_html_response_not_cached(monkeypatch):
-    """share 地址返回 HTML 页 → 不写缓存、不抛错。"""
+    """share 地址返回 HTML 页 → 写 no-master 标记、不抛错。"""
 
     def handler(url):
         assert url == SHARE_URL
         return 200, {}, b"<html><body>player page</body></html>"
 
-    _install_transport(monkeypatch, handler)
+    transport = _install_transport(monkeypatch, handler)
     _capture(978002, SHARE_URL)
-    assert up.read_cms_quality(978002) is None
+    # PA-080：落点非清单且 payload 为空，写 no-master 标记使门禁闭合
+    cached = up.read_cms_quality(978002)
+    assert cached and cached.get("no_master") is True
+    assert not cached.get("width") and not cached.get("label")
+    # 第二发门禁闭合：不再发任何 HTTP
+    _capture(978002, SHARE_URL)
+    assert transport.requested == [SHARE_URL]
 
 
 def test_share_403_response_not_cached(monkeypatch):
-    """share 抓取 403（区域拒绝型源）→ 不写缓存、不抛错。"""
+    """share 抓取 403（区域拒绝型源）→ 写 no-master 标记、不抛错。"""
 
     def handler(url):
         assert url == SHARE_URL
         return 403, {}, b"region has been denied"
 
-    _install_transport(monkeypatch, handler)
+    transport = _install_transport(monkeypatch, handler)
     _capture(978003, SHARE_URL)
-    assert up.read_cms_quality(978003) is None
+    # PA-080：失败且 payload 为空，写 no-master 标记使门禁闭合
+    cached = up.read_cms_quality(978003)
+    assert cached and cached.get("no_master") is True
+    # 第二发门禁闭合：不再发任何 HTTP
+    _capture(978003, SHARE_URL)
+    assert transport.requested == [SHARE_URL]
 
 
 def test_share_redirect_to_private_blocked(monkeypatch):
@@ -253,7 +285,11 @@ def test_share_redirect_to_private_blocked(monkeypatch):
     # 私网地址只被咨询校验、绝不真正请求
     assert transport.requested == [SHARE_URL]
     assert any("169.254.169.254" in u for u in transport.verified)
-    assert up.read_cms_quality(978004) is None
+    # PA-080：跟随失败且 payload 为空，写 no-master 标记；第二发闭合
+    cached = up.read_cms_quality(978004)
+    assert cached and cached.get("no_master") is True
+    _capture(978004, SHARE_URL)
+    assert transport.requested == [SHARE_URL]
 
 
 def test_share_redirect_loop_gives_up(monkeypatch):
@@ -266,7 +302,11 @@ def test_share_redirect_loop_gives_up(monkeypatch):
     transport = _install_transport(monkeypatch, handler)
     _capture(978005, SHARE_URL)
     assert len(transport.requested) == up.UPSTREAM_PROBE_MAX_REDIRECTS + 1
-    assert up.read_cms_quality(978005) is None
+    # PA-080：跳数耗尽且 payload 为空，写 no-master 标记；第二发闭合
+    cached = up.read_cms_quality(978005)
+    assert cached and cached.get("no_master") is True
+    _capture(978005, SHARE_URL)
+    assert len(transport.requested) == up.UPSTREAM_PROBE_MAX_REDIRECTS + 1
 
 
 # ---------------------------------------------------------------- media playlist 时长
@@ -307,6 +347,23 @@ def test_media_playlist_duration_via_share_redirect(monkeypatch):
     _capture(978007, SHARE_URL)
     cached = up.read_cms_quality(978007)
     assert cached["duration_sec"] == _MEDIA_DURATION
+
+
+def test_media_playlist_duration_closes_gate(monkeypatch):
+    """PA-080(a)：media playlist 线第二发 _capture 不再发 HTTP。"""
+
+    def handler(url):
+        if url == SHARE_URL:
+            return 302, {"Location": MEDIA_URL}, b""
+        if url == MEDIA_URL:
+            return 200, {}, _MEDIA_TEXT.encode()
+        raise AssertionError(f"unexpected url {url}")
+
+    transport = _install_transport(monkeypatch, handler)
+    _capture(978008, SHARE_URL)
+    assert up.read_cms_quality(978008)["duration_sec"] == _MEDIA_DURATION
+    _capture(978008, SHARE_URL)
+    assert transport.requested == [SHARE_URL, MEDIA_URL]
 
 
 def test_media_playlist_duration_parser_units():
@@ -375,3 +432,56 @@ def test_display_runtime_keeps_local_duration(mem_db):
     dto = emby_api._synthetic_cms_base_source(
         item, mapping, "http://base", "", None)
     assert dto["RunTimeTicks"] == 100 * TICKS
+
+
+# ---------------------------------------------------------------- 跟随总预算（PA-080）
+
+
+def test_follow_total_budget_stops_at_deadline(monkeypatch):
+    """PA-080(c)：预算耗尽即停——总耗时约 0.3 秒而非 4×0.3 秒。"""
+    calls = []
+
+    def single_hop(url, headers, timeout):
+        calls.append(timeout)
+        time.sleep(0.3)
+        return 302, None, "https://cdn.example.com/next"
+
+    monkeypatch.setattr(up, "_get_text_single_hop", single_hop)
+    # 跟随层逐跳的出站复验一并打桩：不桩会对 cdn.example.com 做
+    # 真实 DNS 复验，无解析的环境里结果由 DNS 决定、不确定。
+    monkeypatch.setattr(
+        upstream_http, "verify_outbound_url", lambda url: None)
+    start = time.monotonic()
+    status, text = up._default_http_get_text_followed(
+        "https://a.example.com/start", {}, 0.3)
+    elapsed = time.monotonic() - start
+    assert (status, text) == (None, None)
+    assert len(calls) == 1  # 旧口径会连发 4 跳（1.2 秒）
+    assert elapsed < 0.9
+
+
+def test_follow_budget_allows_multi_hop_within_budget(monkeypatch):
+    """预算内多跳仍走完：单跳超时单调递减、首跳 ≤ 预算。"""
+    calls = []
+    hops = [
+        (302, None, "https://b.example.com/2"),
+        (302, None, "https://b.example.com/3"),
+        (200, "#EXTM3U\n", None),
+    ]
+
+    def single_hop(url, headers, timeout):
+        calls.append(timeout)
+        time.sleep(0.05)
+        return hops[len(calls) - 1]
+
+    monkeypatch.setattr(up, "_get_text_single_hop", single_hop)
+    # 跟随层逐跳的出站复验必须打桩：不桩会对 b.example.com 做
+    # 真实 DNS 复验，CI 解析失败即 OutboundBlockedError 必红。
+    monkeypatch.setattr(
+        upstream_http, "verify_outbound_url", lambda url: None)
+    status, text = up._default_http_get_text_followed(
+        "https://b.example.com/1", {}, 3.0)
+    assert (status, text) == (200, "#EXTM3U\n")
+    assert len(calls) == 3
+    assert calls[0] > calls[1] > calls[2]  # 每跳取 min(预算, 剩余)
+    assert calls[0] <= 3.0
