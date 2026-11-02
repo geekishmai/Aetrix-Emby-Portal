@@ -112,21 +112,85 @@ _LOW_QUALITY_EN_RE = re.compile(
     r"(?<![A-Za-z])SD(?![A-Za-z])", re.IGNORECASE)
 
 
+def class_short_drama_ids(payload: dict) -> set:
+    """provide ``class`` 分类树 → 短剧类 type_id 集合。
+
+    与同步侧同门判定同一算法（PA-079 不另造第二套）：自身或任
+    一祖先分类名命中 SHORT_DRAMA_TOKENS 即是；源不给
+    ``type_pid`` 时只认自身名；树缺失/成环返回已确认部分，不
+    猜。缺树时返回空集，调用方只认自身名降级，绝不反向放行。
+    """
+    nodes = {}
+    for node in (payload or {}).get("class") or []:
+        if not isinstance(node, dict):
+            continue
+        try:
+            tid = int(node.get("type_id"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            pid = int(node.get("type_pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        nodes[tid] = (pid, str(node.get("type_name") or "").strip())
+    short = set()
+    for tid in nodes:
+        cur, seen = tid, set()
+        while cur in nodes and cur not in seen:
+            seen.add(cur)
+            parent, cur_name = nodes[cur]
+            if any(m in cur_name for m in SHORT_DRAMA_TOKENS):
+                short.add(tid)
+                break
+            if parent == 0 or parent not in nodes:
+                break
+            cur = parent
+    return short
+
+
+def _is_short_drama_entry(entry: dict, short_ids) -> bool:
+    """条目短剧判定（纯函数，与同步侧同门判定同口径）：分类 id
+    命中短剧类集合，或条目自身 type_name / vod_class / vod_remarks
+    任一带短剧标记。片名不作证据。"""
+    try:
+        tid = int(entry.get("type_id"))
+    except (TypeError, ValueError):
+        tid = None
+    if tid is not None and tid in (short_ids or set()):
+        return True
+    for field in ("type_name", "vod_class", "vod_remarks"):
+        text = str(entry.get(field) or "")
+        if any(m in text for m in SHORT_DRAMA_TOKENS):
+            return True
+    return False
+
+
 def quality_gate_reject(type_name: str = "", name: str = "",
-                        remarks: str = "") -> Optional[str]:
+                        remarks: str = "", *, vod_class: str = "",
+                        short_ids=None, type_id=None) -> Optional[str]:
     """质量门：命中返回拒绝原因，未命中返回 None。
 
     三层入参对应 CMS 条目的分类/类型名、片名、备注——list 层与
     detail 层都用同一函数查（detail 层字段更全，调用方两层都
-    查）。返回原因取值：``short_drama`` / ``non_content`` /
-    ``bad_version`` / ``low_quality``。
+    查）。短剧分支的分类证据（PA-079）：分类 id 命中调用方传
+    入的短剧类集合（search payload 的 class 树算出），或
+    type_name / vod_class / remarks 任一带短剧标记；片名不作短
+    剧证据（与同步侧同口径）。缺 class 树时 short_ids 为空，只
+    认自身名降级，不反向放行。返回原因取值：``short_drama`` /
+    ``non_content`` / ``bad_version`` / ``low_quality``。
     """
-    type_text = type_name or ""
-    for token in SHORT_DRAMA_TOKENS:
-        if token in type_text:
-            return "short_drama"
+    if type_id is not None:
+        try:
+            if int(type_id) in (short_ids or set()):
+                return "short_drama"
+        except (TypeError, ValueError):
+            pass
+    for text in (type_name or "", vod_class or "", remarks or ""):
+        for token in SHORT_DRAMA_TOKENS:
+            if token in text:
+                return "short_drama"
     for token in NON_CONTENT_TOKENS:
-        if token in type_text:
+        if token in (type_name or ""):
             return "non_content"
     text = f"{name or ''} {remarks or ''}"
     for token in BAD_VERSION_CN_TOKENS:
@@ -925,6 +989,9 @@ def run_backfill(db, library, rows, *, expected_area_bucket=None,
                 except acf.AppleCMSError as exc:
                     attempt["error"] = exc.kind
                     break
+                # PA-079：本页 class 树算短剧类集合，供 list/detail
+                # 两层门禁共用（同源同分类体系）；缺树为空集降级。
+                short_ids = class_short_drama_ids(payload)
                 scored = 0
                 for entry in (payload.get("list") or []):
                     if scored >= candidates_per_source:
@@ -934,7 +1001,10 @@ def run_backfill(db, library, rows, *, expected_area_bucket=None,
                     gate = quality_gate_reject(
                         str(entry.get("type_name") or ""),
                         str(entry.get("vod_name") or ""),
-                        str(entry.get("vod_remarks") or ""))
+                        str(entry.get("vod_remarks") or ""),
+                        vod_class=str(entry.get("vod_class") or ""),
+                        short_ids=short_ids,
+                        type_id=entry.get("type_id"))
                     if gate:
                         stats["quality_skipped"] += 1
                         attempt["candidates"].append({
@@ -961,7 +1031,10 @@ def run_backfill(db, library, rows, *, expected_area_bucket=None,
                     gate = quality_gate_reject(
                         str(detail.get("type_name") or ""),
                         str(detail.get("vod_name") or ""),
-                        str(detail.get("vod_remarks") or ""))
+                        str(detail.get("vod_remarks") or ""),
+                        vod_class=str(detail.get("vod_class") or ""),
+                        short_ids=short_ids,
+                        type_id=detail.get("type_id"))
                     if gate:
                         stats["quality_skipped"] += 1
                         attempt["candidates"].append(

@@ -104,6 +104,43 @@ def test_quality_gate_tokens():
     assert bf.quality_gate_reject("国产剧", "枪神传说") is None
 
 
+def test_quality_gate_short_drama_ancestor_and_class():
+    # PA-079：叶名中性、根为短剧类 → 祖先 id 命中即拒。
+    payload = {"class": [
+        {"type_id": 30, "type_pid": 0, "type_name": "短剧大全"},
+        {"type_id": 31, "type_pid": 30, "type_name": "现代言情"},
+        {"type_id": 40, "type_pid": 0, "type_name": "国产剧"}]}
+    short_ids = bf.class_short_drama_ids(payload)
+    assert short_ids == {30, 31}
+    # 叶名本身不带标记、只靠祖先 id 命中
+    assert bf.quality_gate_reject(
+        "现代言情", "某长剧名", "", short_ids=short_ids,
+        type_id=31) == "short_drama"
+    # vod_class / remarks 带标记即拒
+    assert bf.quality_gate_reject(
+        "现代言情", "某长剧名", "", vod_class="短剧") == "short_drama"
+    assert bf.quality_gate_reject(
+        "现代言情", "某长剧名", "短剧") == "short_drama"
+    # 普通国产剧不受影响
+    assert bf.quality_gate_reject(
+        "国产剧", "某剧", "", short_ids=short_ids,
+        type_id=40) is None
+    # 缺 class 树 → 空集，只认自身名降级，不反向放行
+    assert bf.class_short_drama_ids({}) == set()
+    assert bf.class_short_drama_ids({"class": [
+        {"type_id": 31, "type_name": "现代言情"}]}) == set()
+
+
+def test_is_short_drama_entry():
+    short_ids = {30, 31}
+    assert bf._is_short_drama_entry(
+        {"type_id": 31, "type_name": "现代言情"}, short_ids)
+    assert bf._is_short_drama_entry(
+        {"type_name": "现代言情", "vod_class": "短剧"}, short_ids)
+    assert not bf._is_short_drama_entry(
+        {"type_id": 40, "type_name": "国产剧"}, short_ids)
+
+
 def test_tier_high_medium_low():
     high = bf.score_candidate(_profile(), _cand())
     assert high.tier == "high" and high.total >= bf.TIER_HIGH_MIN
@@ -162,6 +199,7 @@ S7_DETAILS = {
 S8_DETAILS = {
     "901": _detail(901, "对局", 3),
     "902": _detail(902, "陷阱", 6),
+    "903": _detail(903, "现代言情剧", 60),
 }
 
 
@@ -263,3 +301,87 @@ def test_run_backfill_fills_only_confident_match(db):
     assert gained[0]["gained"][0]["source_id"] == 7
     assert gained[0]["gained"][0]["key_kind"] == "name"
     assert gained[0]["gained"][0]["tier"] == "high"
+
+
+# ---------------------------------------------------------------------------
+# PA-079：补源 list 层用 class 树拦藏在中性子类下的短剧
+# ---------------------------------------------------------------------------
+
+
+class FakeHttpGetWithClass:
+    """search payload 带 class 树的 provide 桩：叶「现代言情」
+    的根是「短剧大全」，list 层就必须拒掉，不许进 detail/打分。"""
+
+    CLASS_TREE = [
+        {"type_id": 30, "type_pid": 0, "type_name": "短剧大全"},
+        {"type_id": 31, "type_pid": 30, "type_name": "现代言情"},
+        {"type_id": 40, "type_pid": 0, "type_name": "国产剧"},
+    ]
+
+    def __call__(self, url, headers=None, timeout=None):
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc
+        query = urllib.parse.parse_qs(parsed.query)
+        ac = (query.get("ac") or [""])[0]
+        if ac == "search":
+            wd = (query.get("wd") or [""])[0]
+            entries = []
+            if host == "s7.example" and wd == "现代言情剧":
+                entries = [{"vod_id": 601, "vod_name": "现代言情剧",
+                            "vod_year": "2024", "type_id": 31,
+                            "type_name": "现代言情"}]
+            return 200, {"code": 1, "page": 1, "pagecount": 1,
+                         "class": [dict(node) for node in self.CLASS_TREE],
+                         "list": json.loads(json.dumps(
+                             entries, ensure_ascii=False))}
+        if ac == "detail":
+            vod_id = (query.get("ids") or [""])[0]
+            if host == "s7.example" and vod_id == "601":
+                detail = _detail(601, "现代言情剧", 60, year="2024")
+                detail["type_id"] = 31
+                detail["type_name"] = "现代言情"
+                return 200, {"code": 1, "page": 1, "pagecount": 1,
+                             "list": [json.loads(json.dumps(
+                                 detail, ensure_ascii=False))]}
+            table = S7_DETAILS if host == "s7.example" else S8_DETAILS
+            payload = table.get(vod_id)
+            if payload is None:
+                return 200, {"code": 1, "page": 1, "pagecount": 0,
+                             "list": []}
+            return 200, {"code": 1, "page": 1, "pagecount": 1,
+                         "list": [json.loads(json.dumps(
+                             payload, ensure_ascii=False))]}
+        raise AssertionError(f"未预期的请求: {url}")
+
+
+def test_run_backfill_rejects_short_drama_by_ancestor(db):
+    for sid, host, enabled in ((7, "s7.example", True),
+                               (8, "s8.example", False)):
+        db.add(em.UpstreamSource(
+            id=sid, name=f"源{sid}", source_type="applecms",
+            base_url=f"http://{host}", enabled=enabled,
+            user_agent="Mozilla/5.0 (test)"))
+    lib = em.Library(
+        guid="lib-cms-tv", name="在线国产剧", collection_type="tvshows",
+        is_enabled=True, kind="applecms", upstream_source_ids="7",
+        cms_type_map="{}")
+    db.add(lib)
+    db.commit()
+    source8 = db.get(em.UpstreamSource, 8)
+    row = _seed_row_with_only8(db, lib, source8, "903", "现代言情剧", 60)
+    assert bf.series_mapping_sources(db, row.id) == {8}
+
+    http = FakeHttpGetWithClass()
+    probe = lambda url, headers, timeout: (200, None)  # noqa: E731
+    rows = bf.find_unplayable_series(db, [lib.id], [7])
+    assert {r.id for r in rows} == {row.id}
+
+    dry = bf.run_backfill(db, lib, rows, expected_area_bucket="cn",
+                          apply=False, http_get=http, http_probe=probe)
+    assert dry["stats"]["filled"] == 0
+    assert dry["stats"]["quality_skipped"] >= 1
+    assert bf.series_mapping_sources(db, row.id) == {8}  # 一条映射没加
+    rejected = [c.get("rejected") for a in dry["audit"]
+                for attempt in a["attempts"]
+                for c in attempt["candidates"]]
+    assert "quality:short_drama" in rejected
