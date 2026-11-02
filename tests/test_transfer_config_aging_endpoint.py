@@ -80,14 +80,12 @@ def _clean_store_cache():
     store.invalidate()
 
 
-#: TransferConfigRequest 其余八键的现行默认值（整包 PUT 口径）。
+#: TransferConfigRequest 其余六键的现行默认值（整包 PUT 口径）。
 BASE_PAYLOAD = {
     "cross_provider_transfer_enabled": True,
     "transfer_cross_lane_concurrency": 2,
     "transfer_fast_lane_concurrency": 8,
     "transfer_per_owner_inflight": 2,
-    "pan115_rapid_upload_enabled": True,
-    "pan115_multipart_upload_enabled": True,
     "transfer_rebind_waiver_window_days": 7,
     "transfer_rebind_waiver_max_uses": 1,
 }

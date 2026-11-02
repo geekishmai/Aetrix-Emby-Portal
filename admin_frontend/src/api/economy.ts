@@ -420,8 +420,6 @@ export interface TransferConfig {
   cross_provider_transfer_enabled: boolean
   /** 跨 provider 搬字节在途并发上限（默认 2，范围 1~8） */
   transfer_cross_lane_concurrency: number
-  /** 探针道单轮认领上限：指纹已登记的跨单先只试秒传、不占搬字节在途（默认 4，范围 1~16） */
-  transfer_probe_lane_concurrency: number
   /** 剧集预热总开关（默认开；关 = 播完不再给后续集建预热） */
   transfer_series_preheat_enabled: boolean
   /** 剧集预热搬字节独立日帽：强信号时每人每天最多建几张搬字节预热单（默认 2，范围 1~16；与 prefetch 帽分开计） */
@@ -434,22 +432,10 @@ export interface TransferConfig {
   transfer_fast_lane_concurrency: number
   /** 单用户道内在飞上限（默认 2，范围 1~16） */
   transfer_per_owner_inflight: number
-  /** 115 秒传开关（默认开；关 = 转存到 115 不试秒传、只走全量上传） */
-  pan115_rapid_upload_enabled: boolean
-  /** 115 分片上传开关（默认开；关 = >5 GiB 且秒传未命中判 unsupported） */
-  pan115_multipart_upload_enabled: boolean
-  /** 115 云下载（形态 B）开关（默认关；开 = 秒传未命中时先让用户本人 115 拉我方签名取流地址，失败回落搬字节） */
-  transfer_cross_cloudpull_enabled: boolean
-  /** 云下载转存专用签名有效期（秒）（默认 43200，范围 1800~86400；与播放签名口径分开） */
-  transfer_cross_cloudpull_ttl_sec: number
-  /** 云下载任务轮询超时（秒）（默认 3600，范围 60~21600；到点未完成回落搬字节） */
-  transfer_cross_cloudpull_timeout_sec: number
   /** 换绑节流豁免计数窗口天数（默认 7，范围 1~365） */
   transfer_rebind_waiver_window_days: number
   /** 窗口内换绑豁免可用次数（默认 1，范围 1~20） */
   transfer_rebind_waiver_max_uses: number
-  /** 夸克转存/点播开关（默认开；关 = 只绑夸克的用户点播被门禁明示挡下、不回落共享） */
-  quark_play_enabled: boolean
   /** 类别级熔断规则（JSON 数组文本 [{provider, error_kind}]；error_kind="*" = 该 provider 全部类别；默认 "[]" = 不暂停） */
   transfer_paused_categories: string
   /** 指纹沉淀总开关（默认开；关 = 闲时不再提前算指纹，已沉淀的指纹不受影响） */

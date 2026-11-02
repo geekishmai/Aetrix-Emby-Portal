@@ -389,94 +389,6 @@ def cross_aging_sec(db=None):
 
 
 # ---------------------------------------------------------------------------
-# 探针道（2026-11-01 转存等待压缩 期一＋期二；
-# reports/transfer-wait-compression-design-20261101.md）
-#
-# 秒传试探原本没有独立调度身份：它只是跨单被认领后执行器的
-# 第一步，认领被 cross_cap 全局卡死、点播当场先办又明文排除
-# 跨单——指纹已登记的单本体秒级，却要在搬字节队列后面干等。
-# 本节给「可探针单」（条目有可信 sha1 或清单 sha1 的跨
-# Drive→115 单）两条待遇：
-# - 期一（纯调度）：claim_due_jobs 的 _pick_candidates 里可探针
-#   单优先占用跨槽、跨槽为它保留至少 1 槽（开关
-#   transfer_probe_priority_enabled，关 = 回现行排序逐字不变）；
-# - 期二（探针道）：独立认领 claim_probe_jobs（不占跨槽、
-#   _running_cross_count 排除 probe: 认领行）+ probe_only 执行
-#   （只试 initupload，未命中/失败以 probe_miss 释放回 pending，
-#   不烧 attempts、不写终态）+ 点播当场探针（inline 跨单排除
-#   仅对探针破例，预算 play_inline_probe_budget_sec 默认 15s）。
-# 全部纯 SystemConfig 键，不进 env.example（#1527 先例）；读取
-# 口径与跨道两键同款 fail-safe：读不到/非法回默认，绝不因配置
-# 读取把工人/点播打停。跨 provider 并发（cross_cap）不动——
-# 探针道不靠加搬运槽解决问题。
-# ---------------------------------------------------------------------------
-
-#: 探针道总开关 SystemConfig 键；默认开。关 = 探针清扫与点播
-#: 当场探针全停，单回现行队列（期一优先排序由其自己的开关管）。
-KEY_TRANSFER_PROBE_ENABLED = "transfer_probe_enabled"
-
-#: 期一优先排序开关 SystemConfig 键；默认开。关 = _pick_candidates
-#: 不做可探针分层，排序与现行逐字一致。
-KEY_TRANSFER_PROBE_PRIORITY_ENABLED = "transfer_probe_priority_enabled"
-
-#: 探针道单轮认领上限 SystemConfig 键；默认 4，钳 [1, 16]。
-#: 探针是秒级小请求（initupload 1–2 次 + sign_check 稀疏读），
-#: 不占跨槽、不搬字节；此数只约束工人每轮探针清扫的批量与
-#: 线程池宽度，防突发把 115 API 打满。
-KEY_TRANSFER_PROBE_LANE_CONCURRENCY = "transfer_probe_lane_concurrency"
-TRANSFER_PROBE_LANE_DEFAULT = 4
-
-#: 探针节流（秒）SystemConfig 键；默认 300，钳 [30, 3600]：
-#: 一单被探针试过后 last_probe_at 起此窗内不再重复探（防探针
-#: 风暴）；只约束探针道自身，普通认领不读 last_probe_at，
-#: 未命中单被搬字节道认领零延迟。
-KEY_TRANSFER_PROBE_RECHECK_SEC = "transfer_probe_recheck_sec"
-TRANSFER_PROBE_RECHECK_DEFAULT = 300
-
-#: 点播当场探针预算（秒）SystemConfig 键；默认 15，钳 [1, 60]：
-#: 与当场搬运的 20 秒预算分开计——探针是秒级动作，15 秒足够
-#: initupload + 目录核对；超时不取消（后台线程自会收尾），
-#: 请求侧照旧回 preparing。
-KEY_PLAY_INLINE_PROBE_BUDGET_SEC = "play_inline_probe_budget_sec"
-PLAY_INLINE_PROBE_BUDGET_DEFAULT = 15
-
-
-def probe_enabled(db=None):
-    """探针道总开关：SystemConfig 热读，默认开，读失败回默认开。"""
-    return _system_config_bool(db, KEY_TRANSFER_PROBE_ENABLED, True)
-
-
-def probe_priority_enabled(db=None):
-    """期一可探针优先排序开关：SystemConfig 热读，默认开。"""
-    return _system_config_bool(
-        db, KEY_TRANSFER_PROBE_PRIORITY_ENABLED, True)
-
-
-def probe_lane_concurrency(db=None):
-    """探针道单轮认领上限：SystemConfig > 默认 4，钳 [1, 16]。"""
-    configured = _system_config_int(db, KEY_TRANSFER_PROBE_LANE_CONCURRENCY)
-    if configured is not None:
-        return max(1, min(16, configured))
-    return TRANSFER_PROBE_LANE_DEFAULT
-
-
-def probe_recheck_sec(db=None):
-    """探针节流窗（秒）：SystemConfig > 默认 300，钳 [30, 3600]。"""
-    configured = _system_config_int(db, KEY_TRANSFER_PROBE_RECHECK_SEC)
-    if configured is not None:
-        return max(30, min(3600, configured))
-    return TRANSFER_PROBE_RECHECK_DEFAULT
-
-
-def play_inline_probe_budget_sec(db=None):
-    """点播当场探针预算（秒）：SystemConfig > 默认 15，钳 [1, 60]。"""
-    configured = _system_config_int(db, KEY_PLAY_INLINE_PROBE_BUDGET_SEC)
-    if configured is not None:
-        return max(1, min(60, configured))
-    return PLAY_INLINE_PROBE_BUDGET_DEFAULT
-
-
-# ---------------------------------------------------------------------------
 # 剧集预热（2026-11-01 转存等待压缩 期四；
 # reports/transfer-wait-compression-design-20261101.md §3）
 #
@@ -641,44 +553,6 @@ def job_category_paused(job, rules) -> bool:
                for rule in rules)
 
 
-#: 115 秒传（initupload）开关 SystemConfig 键；默认开（2026-10-30
-#: 用户亲点整套：记哈希＋秒传协议）。关 = Drive→115 跨单完全回
-#: 现行口径：不试秒传、只走 simple_upload 全量（哈希沉淀照常，
-#: 关开关不丢已沉淀的资格）。
-KEY_PAN115_RAPID_UPLOAD_ENABLED = "pan115_rapid_upload_enabled"
-
-
-def pan115_rapid_upload_enabled(db=None):
-    """115 秒传开关：SystemConfig 热读，默认开，读失败回默认开。"""
-    return _system_config_bool(db, KEY_PAN115_RAPID_UPLOAD_ENABLED, True)
-
-
-#: 115 分片上传（initupload + OSS 多段）开关 SystemConfig 键；
-#: 默认开（2026-10-30 根治单：>5 GiB 跨转存不再判 unsupported）。
-#: 关 = 大文件且秒传未命中维持旧口径判 unsupported；秒传本身不
-#: 受此开关影响（命中与大小无关）；关时也不为大文件白算哈希遍。
-KEY_PAN115_MULTIPART_UPLOAD_ENABLED = "pan115_multipart_upload_enabled"
-
-
-def pan115_multipart_upload_enabled(db=None):
-    """115 分片上传开关：SystemConfig 热读，默认开，读失败回默认开。"""
-    return _system_config_bool(db, KEY_PAN115_MULTIPART_UPLOAD_ENABLED, True)
-
-
-#: 夸克二期（转存 + 点播中继）开关 SystemConfig 键；默认开
-#: （站内既定规矩：没用户时开关默认开）。关 = 只绑夸克的用户
-#: 点播在门禁直接 failed 明示（quark_disabled，不回落共享）、
-#: 点播出流端再复核一遍关时 503 明示；在途夸克跨单仍走跨
-#: provider 总开关口径由工人处理，本键不半路杀单。纯
-#: SystemConfig 键，不进 env.example（#1527 先例）。
-KEY_QUARK_PLAY_ENABLED = "quark_play_enabled"
-
-
-def quark_play_enabled(db=None):
-    """夸克转存/点播开关：SystemConfig 热读，默认开，读失败回默认开。"""
-    return _system_config_bool(db, KEY_QUARK_PLAY_ENABLED, True)
-
-
 #: 换代线地基记账开关 SystemConfig 键（2026-11-01，蓝图 v2 附二
 #: 换代线 step 1 余项＋step 2）：开 = Drive→115 分片路的交付状态
 #: 落 transfer_deliveries（sidecar 的持久化镜像）＋搬运程内块
@@ -734,25 +608,9 @@ def manifest_takeover_active(db=None):
 # env.example（#1527 先例）。
 # ---------------------------------------------------------------------------
 
-#: 形态 B 总开关 SystemConfig 键；默认关（用户 2026-10-30 亲批
-#: 「新开关默认关」）：GB 级/302 跟随/冷态直抓未实测，先灰度。
-#: 关 = lane 完全不触发，跨单行为与现行一字不变。
-KEY_TRANSFER_CROSS_CLOUDPULL_ENABLED = "transfer_cross_cloudpull_enabled"
 
-#: 转存专用签名 TTL（秒）SystemConfig 键；默认 43200（12 小时）：
-#: 地址在 lane 执行时现铸、无需覆盖排队时间，但要覆盖 115 侧
-#: 调度延迟＋GB 级慢拉（悲观 2 MB/s 拉 50 GiB 约 7.3 小时）＋
-#: 115 自带重试（上限 3 次）；播放侧 verify 只查过期、无上限钳，
-#: 故与播放按时长口径（上限默认 21600）分开、互不影响。
-#: 钳 [1800, 86400]。
-KEY_TRANSFER_CROSS_CLOUDPULL_TTL_SEC = "transfer_cross_cloudpull_ttl_sec"
 CLOUDPULL_TTL_DEFAULT = 43200
 
-#: 云下载任务轮询超时（秒）SystemConfig 键；默认 3600：到点未
-#: 完成判 lane 失败回落搬字节，不许无限等占住执行道。
-#: 钳 [60, 21600]。
-KEY_TRANSFER_CROSS_CLOUDPULL_TIMEOUT_SEC = (
-    "transfer_cross_cloudpull_timeout_sec")
 CLOUDPULL_TIMEOUT_DEFAULT = 3600
 
 #: 云下载任务轮询间隔（秒）：探针实测节奏 10 秒；115 任务状态
@@ -763,29 +621,6 @@ CLOUDPULL_POLL_SEC = 10
 #: 测试可 patch 成假时钟（不许在函数内直调 time.sleep 绕开）。
 _CLOUDPULL_NOW = time.monotonic
 _CLOUDPULL_SLEEP = time.sleep
-
-
-def cross_cloudpull_enabled(db=None):
-    """形态 B 云下载开关：SystemConfig 热读，默认关，读失败回默认关。"""
-    return _system_config_bool(
-        db, KEY_TRANSFER_CROSS_CLOUDPULL_ENABLED, False)
-
-
-def cross_cloudpull_ttl_sec(db=None):
-    """转存专用签名 TTL（秒）：SystemConfig > 默认 43200，钳 [1800, 86400]。"""
-    configured = _system_config_int(db, KEY_TRANSFER_CROSS_CLOUDPULL_TTL_SEC)
-    if configured is not None:
-        return max(1800, min(86400, configured))
-    return CLOUDPULL_TTL_DEFAULT
-
-
-def cross_cloudpull_timeout_sec(db=None):
-    """云下载轮询超时（秒）：SystemConfig > 默认 3600，钳 [60, 21600]。"""
-    configured = _system_config_int(
-        db, KEY_TRANSFER_CROSS_CLOUDPULL_TIMEOUT_SEC)
-    if configured is not None:
-        return max(60, min(21600, configured))
-    return CLOUDPULL_TIMEOUT_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -836,27 +671,18 @@ def transfer_config_payload(db):
     return {
         "cross_provider_transfer_enabled": cross_provider_enabled(db),
         "transfer_cross_lane_concurrency": cross_lane_concurrency(db),
-        "transfer_probe_lane_concurrency": probe_lane_concurrency(db),
         "transfer_series_preheat_enabled": series_preheat_enabled(db),
         "transfer_series_preheat_daily_max": series_preheat_daily_max(db),
         "transfer_series_preheat_next_count": series_preheat_next_count(db),
         "transfer_cross_aging_sec": cross_aging_sec(db),
         "transfer_fast_lane_concurrency": lane_concurrency(db),
         "transfer_per_owner_inflight": per_owner_inflight(db),
-        "pan115_rapid_upload_enabled": pan115_rapid_upload_enabled(db),
-        "pan115_multipart_upload_enabled": (
-            pan115_multipart_upload_enabled(db)),
         "transfer_manifest_accounting_enabled": (
             manifest_accounting_enabled(db)),
         "transfer_manifest_takeover_enabled": (
             manifest_takeover_enabled(db)),
         "transfer_rebind_waiver_window_days": rebind_waiver_window_days(db),
         "transfer_rebind_waiver_max_uses": rebind_waiver_max_uses(db),
-        "transfer_cross_cloudpull_enabled": cross_cloudpull_enabled(db),
-        "transfer_cross_cloudpull_ttl_sec": cross_cloudpull_ttl_sec(db),
-        "transfer_cross_cloudpull_timeout_sec": (
-            cross_cloudpull_timeout_sec(db)),
-        "quark_play_enabled": quark_play_enabled(db),
         # 类别级熔断规则以 canonical JSON 文本回包（管理端文本框
         # 直接编辑同一形态，保存侧 strict 校验）。
         "transfer_paused_categories": json.dumps(
@@ -866,23 +692,16 @@ def transfer_config_payload(db):
 
 def write_transfer_config(db, *, cross_provider_transfer_enabled=None,
                           transfer_cross_lane_concurrency=None,
-                          transfer_probe_lane_concurrency=None,
                           transfer_series_preheat_enabled=None,
                           transfer_series_preheat_daily_max=None,
                           transfer_series_preheat_next_count=None,
                           transfer_cross_aging_sec=None,
                           transfer_fast_lane_concurrency=None,
                           transfer_per_owner_inflight=None,
-                          pan115_rapid_upload_enabled=None,
-                          pan115_multipart_upload_enabled=None,
                           transfer_manifest_accounting_enabled=None,
                           transfer_manifest_takeover_enabled=None,
                           transfer_rebind_waiver_window_days=None,
                           transfer_rebind_waiver_max_uses=None,
-                          transfer_cross_cloudpull_enabled=None,
-                          transfer_cross_cloudpull_ttl_sec=None,
-                          transfer_cross_cloudpull_timeout_sec=None,
-                          quark_play_enabled=None,
                           transfer_paused_categories=None):
     """管理端转存配置写入：走 config_service 的 transfer 家族校验。
 
@@ -893,12 +712,6 @@ def write_transfer_config(db, *, cross_provider_transfer_enabled=None,
     if cross_provider_transfer_enabled is not None:
         values[KEY_CROSS_PROVIDER_TRANSFER_ENABLED] = (
             "true" if cross_provider_transfer_enabled else "false")
-    if pan115_rapid_upload_enabled is not None:
-        values[KEY_PAN115_RAPID_UPLOAD_ENABLED] = (
-            "true" if pan115_rapid_upload_enabled else "false")
-    if pan115_multipart_upload_enabled is not None:
-        values[KEY_PAN115_MULTIPART_UPLOAD_ENABLED] = (
-            "true" if pan115_multipart_upload_enabled else "false")
     if transfer_manifest_accounting_enabled is not None:
         values[KEY_TRANSFER_MANIFEST_ACCOUNTING_ENABLED] = (
             "true" if transfer_manifest_accounting_enabled else "false")
@@ -908,9 +721,6 @@ def write_transfer_config(db, *, cross_provider_transfer_enabled=None,
     if transfer_cross_lane_concurrency is not None:
         values[KEY_TRANSFER_CROSS_LANE_CONCURRENCY] = str(
             transfer_cross_lane_concurrency)
-    if transfer_probe_lane_concurrency is not None:
-        values[KEY_TRANSFER_PROBE_LANE_CONCURRENCY] = str(
-            transfer_probe_lane_concurrency)
     if transfer_series_preheat_enabled is not None:
         values[KEY_TRANSFER_SERIES_PREHEAT_ENABLED] = (
             "true" if transfer_series_preheat_enabled else "false")
@@ -935,18 +745,6 @@ def write_transfer_config(db, *, cross_provider_transfer_enabled=None,
     if transfer_rebind_waiver_max_uses is not None:
         values[KEY_TRANSFER_REBIND_WAIVER_MAX_USES] = str(
             transfer_rebind_waiver_max_uses)
-    if transfer_cross_cloudpull_enabled is not None:
-        values[KEY_TRANSFER_CROSS_CLOUDPULL_ENABLED] = (
-            "true" if transfer_cross_cloudpull_enabled else "false")
-    if transfer_cross_cloudpull_ttl_sec is not None:
-        values[KEY_TRANSFER_CROSS_CLOUDPULL_TTL_SEC] = str(
-            transfer_cross_cloudpull_ttl_sec)
-    if transfer_cross_cloudpull_timeout_sec is not None:
-        values[KEY_TRANSFER_CROSS_CLOUDPULL_TIMEOUT_SEC] = str(
-            transfer_cross_cloudpull_timeout_sec)
-    if quark_play_enabled is not None:
-        values[KEY_QUARK_PLAY_ENABLED] = (
-            "true" if quark_play_enabled else "false")
     if transfer_paused_categories is not None:
         # 保存侧 strict 校验：结构非法抛 ValueError（端点转 400），
         # 整批不落库；落库形态为 canonical JSON 文本。
@@ -1190,7 +988,6 @@ def _usercopy_quota_probe_ttl() -> int:
     return ttl if ttl > 0 else 300
 
 
-
 _PROBE_CLIENT = None
 _PROBE_CLIENT_LOCK = threading.Lock()
 
@@ -1218,7 +1015,6 @@ def _shared_probe_client():
                                         max_keepalive_connections=4))
                 _PROBE_CLIENT = client
     return client
-
 
 
 def _probe_read_head(resp, limit):
@@ -1531,22 +1327,6 @@ def probe_user_copy_quota_decision(user_id, fid) -> str:
     return probe_user_copy_quota(user_id, fid)
 
 
-def ready_user115_variant(db, item_id, user_id):
-    """该用户该条目 ready 的 115 副本行（或 None）。额度回落只看本人 115。
-
-    115 用户绑定线已下线（2026-11-02 删除单）：恒回 None——存量
-    115 副本行代码层视为不存在，额度回落不再改道用户 115 副本。
-    """
-    return None
-    try:
-        return _newest_ready_for_scheme(db, item_id, "user", str(user_id),
-                                        "pan115:")
-    except Exception:  # noqa: BLE001
-        logger.warning("查 115 副本失败 item=%s user=%s", item_id, user_id,
-                       exc_info=True)
-        return None
-
-
 def is_transfer_dir_rel(rel: str) -> bool:
     """扫描排除判定：rel 首段 == 转存目录名即转存目录下的文件。
 
@@ -1741,13 +1521,6 @@ def has_active_drive_binding(db, user_id) -> bool:
     if user_id is None:
         return False
     return _active_binding(db, user_id, "drive") is not None
-
-
-def has_active_pan115_binding(db, user_id) -> bool:
-    """用户是否有生效中的 115 绑定（只认 provider=pan115 且 active）。"""
-    if user_id is None:
-        return False
-    return _active_binding(db, user_id, "pan115") is not None
 
 
 def _active_binding(db, user_id, provider):
@@ -1986,11 +1759,6 @@ FILE_ONLY_COPY_UNAVAILABLE_DETAIL = (
     "file-only 授权无法服务端 copy 该文件（令牌看不见源文件），"
     "搬字节转存已停用；请等只读授权（drive.readonly）恢复后"
     "重新绑定再播")
-#: 夸克点播开关关时的门禁明示文案（二期）：只绑夸克的用户被
-#: 挡在这里，不许 proceed 去播共享原件。
-QUARK_PLAY_DISABLED_DETAIL = (
-    "夸克转存/点播已被管理员关闭，不走共享播放："
-    "请改绑谷歌盘或 115，或联系管理员开启夸克点播")
 
 
 def create_cross_provider_job(db, item, user_id, source_provider,
@@ -2093,11 +1861,6 @@ def create_cross_provider_job(db, item, user_id, source_provider,
 # - preparing：转存进行中或节流中，播放端呈“转存准备中”（409）。
 # - failed：转存已死/失败，不走共享播放（409/503）。
 # - error：门禁内部异常，fail-closed 报 503，绝不静默回落。
-# - serve_115_copy：115 用户副本已就绪，调用方须用用户 Cookie +
-#   副本 pickcode 现签 302（绝不走共享 115 链），variant 行随 dict 回。
-# - serve_quark_copy：夸克用户副本已就绪（二期），调用方须用用户
-#   Cookie 现取直链后服务端中继出流（夸克 CDN 校验三件套，绝不
-#   302 裸发、绝不走共享链），variant 行随 dict 回。
 #
 # 绑定用户可以 proceed 共享原件的原因只有下面这些明示放行。
 # 其余 proceed（含 no_drive_file / no_item_id）一律改成 failed，
@@ -2180,29 +1943,6 @@ OPS_CANCELLED_KIND = "ops_cancelled"
 def is_ops_cancelled(job) -> bool:
     """任务行是否运维处置型取消（只认 error_kind，类别唯一口径）。"""
     return (getattr(job, "error_kind", "") or "") == OPS_CANCELLED_KIND
-
-#: 已退役的 unsupported 失败签名（2026-10-30 PR-A 存量自愈）。
-#: 失败文案是当时代码自己写的：#1539 分片上线前的存量行写的是
-#: 「多段上传需 initupload OSS 协议（未实现）」——那是「能力没造
-#: 好」型失败，能力补齐后可按签名复活；「这文件真搬不了」型
-#: （如大小未知/为零）不命中任何签名，维持终态不误活。
-_RETIRED_UNSUPPORTED_SIGNATURES = frozenset({"多段上传", "未实现"})
-
-
-def _revivable_unsupported(db, job):
-    """failed/unsupported 行是否可复活（门禁跨/同两分支共用一套）。
-
-    三条全中才复活：error_kind == "unsupported"、error_detail 命中
-    已退役签名、115 分片上传开关当前为开。命中后由调用方按
-    retriable 同款走 ``_retrigger_failed_job``（预算把关、force
-    建 playback 新单）；不命中维持 failed 终态。
-    """
-    if (getattr(job, "error_kind", "") or "") != "unsupported":
-        return False
-    detail = getattr(job, "error_detail", "") or ""
-    if not any(sig in detail for sig in _RETIRED_UNSUPPORTED_SIGNATURES):
-        return False
-    return pan115_multipart_upload_enabled(db)
 
 
 #: 点播可提升的在途 trigger：用户主动意图触发的两类。系统触发
@@ -3242,43 +2982,10 @@ def _rebuild_done_job(db, item, user_id, provider, job, *,
             "job_id": new_job.id}
 
 
-def rebuild_dead_user115_copy(db, item, user_id):
-    """115 死链检出后的重建（serve_115_copy 现签校验专用）。
-
-    与 _rebuild_done_job 同款预算口径：24h 同桶 < 2 行才 force 重建
-    一单（_gate_retrigger_budget_ok），预算耗尽不建新单、不刷任务
-    洪水。provider==pan115 走同 provider 任务，否则走跨 provider
-    任务（Drive 源→用户 115 盘）；只建用户盘任务，不碰共享原件。
-    返回 dict：preparing/job_rebuilt | preparing/throttled |
-    failed/<kind>，与 _rebuild_done_job 同款形状。
-    """
-    item_id = getattr(item, "id", None)
-    provider = _item_provider(db, item)
-    if item_id is None or provider is None:
-        return {"verdict": "failed", "reason": "unknown_provider"}
-    cross = provider != "pan115"
-    dest = f"pan115:user-{user_id}" if cross else None
-    if not _gate_retrigger_budget_ok(db, item_id, user_id, dest=dest):
-        return {"verdict": "preparing", "reason": "throttled"}
-    try:
-        if cross:
-            new_job = create_cross_provider_job(
-                db, item, user_id, provider, trigger="playback", force=True)
-        else:
-            new_job = create_user_job(
-                db, item, user_id, provider, trigger="playback", force=True)
-    except TransferError as exc:
-        if exc.kind == "throttled":
-            return {"verdict": "preparing", "reason": "throttled"}
-        return {"verdict": "failed", "reason": exc.kind}
-    return {"verdict": "preparing", "reason": "job_rebuilt",
-            "job_id": new_job.id}
-
-
 def rebuild_dead_drive_copy(db, item, user_id):
     """用户 Drive 副本已确认不可用后的重建（serve 路径专用）。
 
-    与 rebuild_dead_user115_copy 同款预算口径：24h 同桶 < 2 行才
+    与已删 115 重建同款预算口径：24h 同桶 < 2 行才
     force 重建一单（_gate_retrigger_budget_ok），预算耗尽不建新单、
     不刷任务洪水。provider==drive 走同 provider 任务；115 源→用户
     Drive 盘走跨 provider 任务（dest=userdrive:<uid>）；只建用户盘
@@ -3412,20 +3119,11 @@ def _ensure_user_copy_gate_impl(db, item, user, *, play_sign_consume=False):
             other = "pan115" if provider == "drive" else "drive"
             other_binding = _active_binding(db, user_id, other)
             if other_binding is None:
-                # 夸克二期（2026-11-01）：counterpart（drive/115
-                # 互绑）也没有时再看夸克绑定——counterpart 优先
-                # 的既有顺序逐字不变；只绑夸克的用户落夸克跨
-                # provider 流，不许 proceed 去播共享原件；连夸克
-                # 也没绑才维持原 no_matching_binding 放行。
-                quark_binding = _active_binding(db, user_id, "quark")
-                if quark_binding is None:
-                    return {"verdict": "proceed",
-                            "reason": "no_matching_binding"}
-                if not quark_play_enabled(db):
-                    return {"verdict": "failed",
-                            "reason": "quark_disabled",
-                            "detail": QUARK_PLAY_DISABLED_DETAIL}
-                other, other_binding = "quark", quark_binding
+                # counterpart（drive/115 互绑）也没有 → 无可用
+                # 绑定，维持 no_matching_binding 放行（夸克/
+                # 115 绑盘线已下线，见二期删除单）。
+                return {"verdict": "proceed",
+                        "reason": "no_matching_binding"}
             orig_fid = (getattr(item, "drive_file_id", "") or "").strip()
             if provider == "pan115" and not orig_fid:
                 return {"verdict": "failed", "reason": "no_source_fid"}
@@ -3436,13 +3134,11 @@ def _ensure_user_copy_gate_impl(db, item, user, *, play_sign_consume=False):
             if item_id is None:
                 return {"verdict": "failed", "reason": "no_item_id"}
             dest = {"pan115": f"pan115:user-{user_id}",
-                    "drive": f"userdrive:{user_id}",
-                    "quark": f"quark:user-{user_id}"}[other]
-            scheme = {"pan115": "pan115:", "drive": "userdrive:",
-                      "quark": "quark:"}[other]
+                    "drive": f"userdrive:{user_id}"}[other]
+            scheme = {"pan115": "pan115:", "drive": "userdrive:"}[other]
             ready = _newest_ready_for_scheme(db, item_id, "user",
                                              str(user_id), scheme)
-            if (ready is not None and other in ("pan115", "drive", "quark")
+            if (ready is not None and other in ("pan115", "drive")
                     and getattr(ready, "stale_count", 0) >= 1):
                 # 副本行已吃过一次 stale strike：DB 状态虽仍 ready，
                 # 但文件很可能已死（2026-10-29 115 死链实证；Drive
@@ -3450,23 +3146,11 @@ def _ensure_user_copy_gate_impl(db, item, user, *, play_sign_consume=False):
                 # 任务逻辑走重建/准备中。
                 ready = None
             if ready is not None:
-                if other == "pan115":
-                    return {"verdict": "serve_115_copy", "reason": "ready",
-                            "variant": ready}
-                if other == "quark":
-                    return {"verdict": "serve_quark_copy",
-                            "reason": "ready", "variant": ready}
                 return {"verdict": "proceed",
                         "reason": "has_ready_variant", "variant": ready}
             job = _latest_job_for_dest(db, item_id, "user",
                                        str(user_id), dest)
             preparing_detail = _cross_preparing_detail(provider, other)
-            if other == "quark":
-                # 落点目录写进用户可见文案（群里已有人问「视频
-                # 在网盘哪个目录」）：转存落用户夸克盘专属目录。
-                preparing_detail += (
-                    f"，转存完成后在你夸克网盘的"
-                    f"「{transfer_dir_name()}」目录里也能找到")
             if job is not None:
                 if job.status in ("pending", "running"):
                     _maybe_promote_inflight_job(db, job)
@@ -3492,14 +3176,6 @@ def _ensure_user_copy_gate_impl(db, item, user, *, play_sign_consume=False):
                                 "job_id": job.id,
                                 "detail": CROSS_PROVIDER_DISABLED_DETAIL}
                     if job.error_kind == "retriable":
-                        return _retrigger_failed_job(
-                            db, item, user_id, provider, job, cross=True,
-                            dest=dest)
-                    if _revivable_unsupported(db, job):
-                        # 已退役签名 + 分片开关开：能力补齐型失败，
-                        # 按 retriable 同款预算内重触发，不再永久
-                        # 撞终态（存量自愈，见 _RETIRED_UNSUPPORTED_
-                        # SIGNATURES）。
                         return _retrigger_failed_job(
                             db, item, user_id, provider, job, cross=True,
                             dest=dest)
@@ -3559,9 +3235,6 @@ def _ensure_user_copy_gate_impl(db, item, user, *, play_sign_consume=False):
             # 同上：吃过 strike 的副本行不直接放行，走下面任务逻辑重建。
             ready = None
         if ready is not None:
-            if provider == "pan115":
-                return {"verdict": "serve_115_copy", "reason": "ready",
-                        "variant": ready}
             return {"verdict": "proceed", "reason": "has_ready_variant",
                     "variant": ready}
         job = _latest_job(db, item_id, "user", str(user_id))
@@ -3580,11 +3253,6 @@ def _ensure_user_copy_gate_impl(db, item, user, *, play_sign_consume=False):
                     # 行（dest 同侧）一律不走这里、不受影响。
                     pass
                 elif job.error_kind == "retriable":
-                    return _retrigger_failed_job(
-                        db, item, user_id, provider, job)
-                elif _revivable_unsupported(db, job):
-                    # 与跨分支共用同一 helper 判复活（横切只许
-                    # 一套）：已退役签名 + 分片开关开才走重触发。
                     return _retrigger_failed_job(
                         db, item, user_id, provider, job)
                 elif job.error_kind in _TERMINAL_JOB_KINDS:
@@ -3759,26 +3427,16 @@ def maybe_prefetch_transfer(db, item, user) -> dict:
             other = "pan115" if provider == "drive" else "drive"
             other_binding = _active_binding(db, user_id, other)
             if other_binding is None:
-                # 夸克二期：与点播门禁同口径——counterpart 优先，
-                # 只绑夸克才落夸克；开关关时不预建夸克单。
-                quark_binding = _active_binding(db, user_id, "quark")
-                if quark_binding is None:
-                    return {"triggered": False,
-                            "reason": "no_matching_binding"}
-                if not quark_play_enabled(db):
-                    return {"triggered": False,
-                            "reason": "quark_disabled"}
-                other, other_binding = "quark", quark_binding
+                return {"triggered": False,
+                        "reason": "no_matching_binding"}
             orig_fid = (getattr(target, "drive_file_id", "") or "").strip()
             if provider == "pan115" and not orig_fid:
                 return {"triggered": False, "reason": "no_source_fid"}
             if provider == "drive" and not orig_fid:
                 return {"triggered": False, "reason": "no_drive_file"}
             dest = {"pan115": f"pan115:user-{user_id}",
-                    "drive": f"userdrive:{user_id}",
-                    "quark": f"quark:user-{user_id}"}[other]
-            scheme = {"pan115": "pan115:", "drive": "userdrive:",
-                      "quark": "quark:"}[other]
+                    "drive": f"userdrive:{user_id}"}[other]
+            scheme = {"pan115": "pan115:", "drive": "userdrive:"}[other]
             ready = _newest_ready_for_scheme(db, target.id, "user",
                                              str(user_id), scheme)
             if ready is not None:
@@ -3970,46 +3628,7 @@ def _series_preheat_resolve_dest(db, user_id, candidate):
                 else f"userdrive:{user_id}")
         scheme = "pan115:" if other == "pan115" else "userdrive:"
         return ("cross", provider, other, dest, scheme)
-    quark_binding = _active_binding(db, user_id, "quark")
-    if quark_binding is not None and quark_play_enabled(db):
-        return ("cross", provider, "quark", f"quark:user-{user_id}",
-                "quark:")
     return ("no_binding", provider, None, None, None)
-
-
-def _series_preheat_probe_once(db, job, drive_api_factory):
-    """探针单 inline 探一次：复用期二 probe_only 执行原样。
-
-    命中 → 执行器已落 done＋ready 变体，行保留（与普通探针
-    命中收尾一致）；未命中/失败/异常 → 删行（探针单是临时态，
-    不留 pending/failed 墓碑占节流桶）。返回 done / probe_miss。"""
-    try:
-        factory = drive_api_factory or DriveApiClient
-        result = run_probe_job_once(db, job, factory())
-        outcome = (result or {}).get("outcome", "")
-    except Exception:  # noqa: BLE001 — 探针异常按未命中删单
-        logger.warning("剧集预热探针异常 job=%s item=%s（删单）",
-                       job.id, job.item_id, exc_info=True)
-        try:
-            db.rollback()
-            db.delete(job)
-            db.commit()
-        except Exception:  # noqa: BLE001
-            pass
-        return "probe_miss"
-    if outcome == "done":
-        return "done"
-    logger.info("剧集预热探针未命中 job=%s item=%s（删单，不自动搬字节）",
-                job.id, job.item_id)
-    try:
-        db.delete(job)
-        db.commit()
-    except Exception:  # noqa: BLE001
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-    return "probe_miss"
 
 
 def maybe_series_preheat_transfer(db, anchor, user, *,
@@ -4044,8 +3663,7 @@ def maybe_series_preheat_transfer(db, anchor, user, *,
             db, anchor, series_preheat_next_count(db))
         if not candidates:
             return {"triggered": False, "reason": "no_candidates"}
-        if all(_active_binding(db, user_id, provider) is None
-               for provider in ("drive", "pan115", "quark")):
+        if _active_binding(db, user_id, "drive") is None:
             # 无绑定/绑定失效用户不建单并响亮记日志（任务书硬边界）
             logger.warning(
                 "剧集预热 no_binding：用户无生效绑定 user=%s series=%s "
@@ -4096,35 +3714,6 @@ def maybe_series_preheat_transfer(db, anchor, user, *,
                     continue
                 byte_jobs.append(job.id)
                 byte_left -= 1
-                continue
-            if (kind == "cross" and provider == "drive"
-                    and dest_provider == "pan115"):
-                try:
-                    job = create_cross_provider_job(
-                        db, cand, user_id, provider,
-                        trigger=TRIGGER_SERIES_PREHEAT,
-                        dest_provider="pan115")
-                except TransferError as exc:
-                    skipped.append({"item_id": cand.id,
-                                    "reason": exc.kind})
-                    continue
-                if not _job_is_probeable(db, job):
-                    # 不可探针（无可信 sha1）：删刚建的探针单，
-                    # 不留行；无指纹集靠期三沉淀追剧档另行覆盖。
-                    try:
-                        db.delete(job)
-                        db.commit()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    skipped.append({"item_id": cand.id,
-                                    "reason": "no_sha1"})
-                    continue
-                outcome = _series_preheat_probe_once(
-                    db, job, drive_api_factory)
-                if outcome == "done":
-                    probe_jobs.append(job.id)
-                else:
-                    probe_missed.append(cand.id)
                 continue
             skipped.append({"item_id": cand.id,
                             "reason": ("byte_cap" if strong
@@ -4331,75 +3920,9 @@ def claim_and_execute_inline(job_id, session_factory=None,
     return _execute_claimed_job(job_id, session_factory, drive_api_factory)
 
 
-def _inline_probe_eligible(db, job):
-    """点播当场探针合格性：_inline_job_eligible 的跨单镜像——
-    它排除跨单（分钟级搬字节不当场跑），本判定只收跨单里的
-    「可探针」子集（探针是秒级小请求，不搬字节）：
-
-    - trigger 必须 playback、owner_scope 必须 user（同当场口径）；
-    - 必须是跨 Drive→115 单且条目可探针（_job_is_probeable，
-      含探针节流：刚被工人探针试过的单不在请求里重复探）；
-    - 目标盘绑定必须生效（无绑定时探针只会落 no_binding，
-      不当场跑，工人口径不变）。
-    """
-    if job is None:
-        return False
-    if (getattr(job, "trigger", "") or "") != "playback":
-        return False
-    if (getattr(job, "owner_scope", "") or "") != "user":
-        return False
-    if not probe_enabled(db) or not cross_provider_enabled(db):
-        return False
-    if not _job_is_probeable(db, job, now=datetime.now()):
-        return False
-    try:
-        user_id = int((getattr(job, "owner_ref", "") or "").strip())
-    except (TypeError, ValueError):
-        return False
-    return _active_binding(db, user_id, "pan115") is not None
-
-
-def claim_and_probe_inline(job_id, session_factory=None,
-                           drive_api_factory=None):
-    """点播当场探针（同步，调用方须放线程里跑）：合格性 → 原子
-    探针认领 → 只试秒传（_execute_probe_job）。
-
-    返回 done / probe_miss / failed（执行器终态）/ not_claimed /
-    ineligible / missing / error。绝不抛异常——当场探针出什么
-    问题都不能把点播请求打成 500，回 preparing 让工人兜底。
-    """
-    if session_factory is None:
-        from backend.database import SessionLocal
-        session_factory = SessionLocal
-    if drive_api_factory is None:
-        drive_api_factory = DriveApiClient
-    db = session_factory()
-    try:
-        job = (db.query(em.TransferJob)
-               .filter(em.TransferJob.id == job_id).first())
-        if job is None:
-            return "missing"
-        if not _inline_probe_eligible(db, job):
-            return "ineligible"
-        if not claim_probe_job(db, job_id):
-            return "not_claimed"
-    except Exception:
-        logger.warning("点播当场探针：认领失败 job=%s", job_id,
-                       exc_info=True)
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        return "error"
-    finally:
-        db.close()
-    return _execute_probe_job(job_id, session_factory, drive_api_factory)
-
-
 def _play_inline_config():
     """当场先办配置快照（独立短会话热读）：{enabled, budget_sec,
-    concurrency, probe_enabled, probe_budget_sec}。读失败
-    fail-safe 回默认（开 / 20 秒 / 4 / 探针开 / 15 秒）——
+    concurrency}。读失败 fail-safe 回默认（开 / 20 秒 / 4）——
     配置读不到时不悄悄关掉救播放的路（与同类开关同口径）。"""
     try:
         from backend.database import SessionLocal
@@ -4407,53 +3930,13 @@ def _play_inline_config():
         try:
             return {"enabled": play_inline_enabled(db),
                     "budget_sec": play_inline_budget_sec(db),
-                    "concurrency": play_inline_concurrency(db),
-                    "probe_enabled": probe_enabled(db),
-                    "probe_budget_sec": play_inline_probe_budget_sec(db)}
+                    "concurrency": play_inline_concurrency(db)}
         finally:
             db.close()
     except Exception:
         return {"enabled": True,
                 "budget_sec": PLAY_INLINE_TRANSFER_BUDGET_DEFAULT,
-                "concurrency": PLAY_INLINE_TRANSFER_CONCURRENCY_DEFAULT,
-                "probe_enabled": True,
-                "probe_budget_sec": PLAY_INLINE_PROBE_BUDGET_DEFAULT}
-
-
-async def _try_inline_probe(gate, gate_callable, job_id, *,
-                            budget_sec,
-                            session_factory=None,
-                            drive_api_factory=None):
-    """点播当场探针一跳：命中返回重查后的新 gate；其余一切情况
-    返回 None（调用方照旧走现行路径）。绝不抛异常。
-
-    探针执行放线程跑并 shield：预算内没回来只说明探针慢（目录
-    核对等），请求侧不等——后台线程会把单收尾（命中 done /
-    未命中释放），下一次点播/工人轮次自然接上。
-    """
-    task = asyncio.ensure_future(asyncio.to_thread(
-        claim_and_probe_inline, job_id,
-        session_factory=session_factory,
-        drive_api_factory=drive_api_factory))
-    try:
-        outcome = await asyncio.wait_for(
-            asyncio.shield(task), timeout=budget_sec)
-    except (asyncio.TimeoutError, TimeoutError):
-        logger.info("[byos] play_inline_probe_timeout job=%s "
-                    "budget_sec=%s", job_id, budget_sec)
-        return None
-    except Exception:
-        logger.warning("点播当场探针异常 job=%s", job_id, exc_info=True)
-        return None
-    logger.info("[byos] play_inline_probe_outcome job=%s outcome=%s",
-                job_id, outcome)
-    if outcome != "done":
-        return None
-    try:
-        new_gate = await gate_callable()
-    except Exception:  # noqa: BLE001 — 重查失败不改 verdict
-        return None
-    return new_gate or gate
+                "concurrency": PLAY_INLINE_TRANSFER_CONCURRENCY_DEFAULT}
 
 
 async def maybe_run_play_inline(initial_gate, gate_callable, *,
@@ -4488,21 +3971,6 @@ async def maybe_run_play_inline(initial_gate, gate_callable, *,
     cfg = await asyncio.to_thread(_play_inline_config)
     if not cfg["enabled"]:
         return gate
-    # 期二点播当场探针：跨 Drive→115 且可探针的单先当场只试
-    # 秒传（预算 probe_budget_sec，默认 15 秒）——命中即同请求
-    # 重查门禁放行；未命中/不适用/超时一律落回下方现行当场搬运
-    # 判定（跨单在那里仍被排除、回 preparing，工人口径不变）。
-    # 超时不取消：已认领的探针在后台线程自会收尾（命中落
-    # done、未命中释放），与当场搬运的 shield 口径一致。
-    if cfg.get("probe_enabled"):
-        probe_gate = await _try_inline_probe(
-            gate, gate_callable, job_id,
-            budget_sec=cfg.get("probe_budget_sec")
-            or PLAY_INLINE_PROBE_BUDGET_DEFAULT,
-            session_factory=session_factory,
-            drive_api_factory=drive_api_factory)
-        if probe_gate is not None:
-            return probe_gate
     if not _inline_try_acquire(cfg["concurrency"]):
         logger.info("[byos] play_inline_skipped job=%s reason=no_slot",
                     job_id)
@@ -4798,56 +4266,6 @@ def note_quota_signal(db, item, user, playing_variant, drive_id):
                 else:
                     logger.warning(
                         "转存变体应急自动入队（用户盘）：item=%s user=%s "
-                        "job=%s", item_id, user_id, job.id)
-                    result = {"action": "queued", "job_id": job.id}
-            return _emit_quota_bound(result, item_id, user_id)
-        if user_id is not None and has_active_pan115_binding(db, user_id):
-            # 只绑了 115：入用户 115，绝不建服主 source 任务。
-            provider = _item_provider(db, item)
-            if provider == "pan115":
-                ready_user = _newest_ready_for_scheme(
-                    db, item_id, "user", str(user_id), "pan115:")
-                enqueue = "same"
-            elif provider == "drive":
-                ready_user = _newest_ready_for_scheme(
-                    db, item_id, "user", str(user_id), "pan115:")
-                enqueue = "cross"
-            else:
-                logger.info(
-                    "转存变体 Quota 信号：115 绑定但条目 provider 不明，"
-                    "不入队 item=%s user=%s", item_id, user_id)
-                return _emit_quota_bound(
-                    {"action": "skipped", "reason": "unknown_provider"},
-                    item_id, user_id)
-            if ready_user is not None:
-                result = {"action": "skipped", "reason": "has_ready_variant"}
-            elif _user_throttle_state(
-                    db, item_id, user_id,
-                    f"pan115:user-{user_id}")[0] in (
-                        "blocked", "waiver_exhausted"):
-                result = {"action": "throttled", "reason": "job_within_24h"}
-            elif not quota_auto_enqueue_enabled():
-                logger.info(
-                    "转存变体 Quota 信号：自动入队关，115 绑定用户仅记日志 "
-                    "item=%s user=%s", item_id, user_id)
-                result = {"action": "skipped", "reason": "auto_off"}
-            else:
-                try:
-                    if enqueue == "cross":
-                        job = create_cross_provider_job(
-                            db, item, user_id, "drive", trigger="auto")
-                    else:
-                        job = create_user_job(
-                            db, item, user_id, "pan115", trigger="auto")
-                except TransferError as exc:
-                    if exc.kind == "throttled":
-                        result = {"action": "throttled",
-                                  "reason": "job_within_24h"}
-                    else:
-                        result = {"action": "skipped", "reason": exc.kind}
-                else:
-                    logger.warning(
-                        "转存变体应急自动入队（用户 115）：item=%s user=%s "
                         "job=%s", item_id, user_id, job.id)
                     result = {"action": "queued", "job_id": job.id}
             return _emit_quota_bound(result, item_id, user_id)
@@ -6154,61 +5572,6 @@ def _staged_fetch(raw_fetch, stage):
     return _fetch
 
 
-def _multipart_sidecar_path(job_id):
-    return os.path.join(_stage_dir(), f"mp-{int(job_id)}.json")
-
-
-def _load_multipart_session(job_id, content_key, size, dest_cid):
-    """读分片续传会话：content_key＋大小＋目标目录三项全对才认。"""
-    try:
-        with open(_multipart_sidecar_path(job_id), "r",
-                  encoding="utf-8") as fh:
-            data = json.load(fh)
-        if (data.get("content_key") != content_key
-                or int(data.get("size", 0)) != int(size)
-                or data.get("dest_cid") != dest_cid):
-            return None
-        session = data.get("session") or {}
-        if not all(session.get(k) for k in
-                   ("bucket", "object_key", "upload_id", "callback")):
-            return None
-        parts = []
-        for part in session.get("parts") or []:
-            try:
-                parts.append({"PartNumber": int(part["PartNumber"]),
-                              "ETag": str(part["ETag"])})
-            except Exception:
-                return None
-        session["parts"] = parts
-        return session
-    except Exception:
-        return None
-
-
-def _save_multipart_session(job_id, content_key, size, dest_cid, session):
-    try:
-        directory = _stage_dir()
-        os.makedirs(directory, exist_ok=True)
-        path = _multipart_sidecar_path(job_id)
-        tmp = path + ".tmp"
-        payload = {"content_key": content_key, "size": int(size),
-                   "dest_cid": dest_cid, "session": session}
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        os.replace(tmp, path)
-    except Exception:
-        pass
-
-
-def _drop_multipart_session(job_id):
-    try:
-        path = _multipart_sidecar_path(job_id)
-        if os.path.exists(path):
-            os.remove(path)
-    except Exception:
-        pass
-
-
 _HEX40_CHARS = frozenset("0123456789abcdef")
 
 
@@ -6233,53 +5596,6 @@ def _trusted_item_sha1(item, source_size):
     if item_size and source_size and item_size != int(source_size):
         return ""
     return value
-
-
-def _job_probeable_sha1(db, job):
-    """任务行此刻是否「可探针」：可直接试秒传的 sha1 或 ""。
-
-    判定口径与执行器预检段一致：条目可信 sha1
-    （_trusted_item_sha1）优先；其次清单接管生效时的清单 sha1
-    （manifest_trusted_sha1）。只读条目行/清单行字段，不查外
-    部服务；任何异常回 ""（不可探针——安全方向：漏判只是走
-    现行搬字节道，绝不误判去探一份没有指纹的内容）。"""
-    try:
-        item = (db.query(em.MediaItem)
-                .filter(em.MediaItem.id == job.item_id,
-                        em.MediaItem.deleted_at.is_(None))
-                .first())
-        if item is None:
-            return ""
-        size = _to_int(getattr(item, "size", None))
-        sha1 = _trusted_item_sha1(item, size)
-        if sha1:
-            return sha1
-        if manifest_accounting_enabled(db) and manifest_takeover_active(db):
-            key = _cross_content_key(job, item)
-            if key:
-                from backend.emby_server import transfer_manifest as _tm
-                return _tm.manifest_trusted_sha1(db, key, size) or ""
-        return ""
-    except Exception:  # noqa: BLE001 — 判定失败按不可探针处理
-        return ""
-
-
-def _job_is_probeable(db, job, now=None):
-    """探针道候选判定：跨 Drive→115 的 user 单 + 未被探针节流
-    + 有可探针 sha1。115→Drive 与夸克方向无 initupload 式指纹
-    认领，不进探针道（方案 §4 附带说明）。"""
-    if not _is_cross_job(job):
-        return False
-    dest = (getattr(job, "dest_drive_id", "") or "").strip()
-    if not dest.startswith("pan115:"):
-        return False
-    if (getattr(job, "owner_scope", "") or "") != "user":
-        return False
-    last = getattr(job, "last_probe_at", None)
-    if last is not None and now is not None:
-        if (now - last).total_seconds() < probe_recheck_sec(db):
-            return False
-    return bool(_job_probeable_sha1(db, job))
 
 
 def _persist_item_sha1(db, item, sha1_hex, *, origin):
@@ -6838,361 +6154,11 @@ def _run_drive_user_job_path_b(db, job, item, drive_api, user_client,
 def _make_pan115_client(cookie):
     """115 客户端构造口（测试可 monkeypatch 本模块属性替换）。
 
-    生产路径固定用用户自己的 Cookie，绝不用服主/默认账号档。
+    供保留的 115→Drive 方向（_resolve_115_source）构造客户端，
+    cookie 来自服主侧 transfer115 账号档解析。
     """
     from backend.emby_server.transfer115 import Pan115Client
     return Pan115Client(cookie)
-
-
-def _ensure_115_transfer_dir(client):
-    """用户盘转存目录 cid：根目录下找 aetrix-transfer，没有就建。
-
-    建目录响应形态待 115 测试账号实测，故建完必按名重列根目录
-    验 cid，不依赖 mkdir 响应字段。
-    """
-    name = transfer_dir_name()
-    for entry in client.list_dir("0"):
-        if entry.get("is_dir") and (entry.get("name") or "") == name:
-            cid = entry.get("cid") or ""
-            if cid:
-                return cid
-    client.mkdir("0", name)
-    for entry in client.list_dir("0"):
-        if entry.get("is_dir") and (entry.get("name") or "") == name:
-            cid = entry.get("cid") or ""
-            if cid:
-                return cid
-    from backend.emby_server.transfer115 import Pan115Error
-    raise Pan115Error("115 建转存目录后仍找不到该目录")
-
-
-def _extract_115_copy_result(result):
-    """从 copy 响应里提新 fid + pickcode（响应形态待实测，多字段容错）。
-
-    fid 候选：fid/file_id/id；pickcode 候选：pickcode/pick_code/pc。
-    任一缺失都返回空串，调用方走列目录匹配回落。
-    """
-    if not isinstance(result, dict):
-        return "", ""
-    data = result.get("data")
-    if isinstance(data, list):
-        data = data[0] if data else {}
-    if not isinstance(data, dict):
-        data = result
-    fid = str(data.get("fid") or data.get("file_id")
-              or data.get("id") or "")
-    pickcode = str(data.get("pickcode") or data.get("pick_code")
-                   or data.get("pc") or "")
-    return fid, pickcode
-
-
-def _match_115_copy_in_dir_ex(client, dest_cid, name, size,
-                              expected_fid=None):
-    """列目标目录核对新文件（FMBY discover_transfer_target 口径）。
-
-    返回 (fid, pickcode, sha1)，核不到返回 ("", "", "")。只认非
-    目录项。sha1 是目录项自带的整文件哈希（115 列表透传，缺时
-    为空），供转存成功后沉淀条目 content_hash。
-    - 回执 fid 在目录中 → 返回回执 fid 及其 pickcode；
-    - 否则按名 + 大小（大小缺失时只按名）匹配，命中时返回；
-    - 否则恰好一个同名文件时返回它（目录为准）；
-    - 多个同名且无一是回执 id 时返回空（冲突，不猜）。
-    注意：目标目录若预先存在同名文件，单同名回落可能命中旧文件——
-    回执 fid 路径是主路径，转存目录正常为空（用户自建同名文件是
-    边缘情形，见报告已知项）；多同名冲突时宁可记 copy_unresolved
-    也不猜一个登记。
-    """
-    size_int = _to_int(size)
-    matches = []
-    for entry in client.list_dir(dest_cid):
-        if entry.get("is_dir"):
-            continue
-        if (entry.get("name") or "") != name:
-            continue
-        matches.append(entry)
-    if not matches:
-        return "", "", ""
-    if expected_fid:
-        for entry in matches:
-            if (entry.get("fid") or "") == expected_fid:
-                return (expected_fid, entry.get("pickcode") or "",
-                        entry.get("sha1") or "")
-    if size_int:
-        for entry in matches:
-            if _to_int(entry.get("size")) == size_int:
-                return (entry.get("fid") or "",
-                        entry.get("pickcode") or "",
-                        entry.get("sha1") or "")
-    if len(matches) == 1:
-        entry = matches[0]
-        return (entry.get("fid") or "", entry.get("pickcode") or "",
-                entry.get("sha1") or "")
-    return "", "", ""
-
-
-def _match_115_copy_in_dir(client, dest_cid, name, size, expected_fid=None):
-    """_match_115_copy_in_dir_ex 的两元组兼容口（旧调用点不动）。"""
-    fid, pickcode, _sha1 = _match_115_copy_in_dir_ex(
-        client, dest_cid, name, size, expected_fid=expected_fid)
-    return fid, pickcode
-
-
-def _run_pan115_job(db, job, item):
-    """115 用户盘任务：同 provider 内服务端 copy（不搬字节）。
-
-    凭据：用户自己的 115 Cookie（唯一口 binding_115_cookie，
-    绝不用服主档）。
-    新 fid + pickcode 登记用户行；Cookie 失效 → failed/auth_error
-    + 绑定落 expired（user_bindings._mark_failed），不重试、不回落。
-    copy 后必列目标目录核对（回执只作期望值，目录核到的 id 为准）；
-    核不到 → failed/copy_unresolved（不重试，避免重复 copy 产生重复文件）。
-    """
-    from backend.emby_server.transfer115 import Pan115AuthError, Pan115Error
-    uid = (getattr(job, "owner_ref", "") or "").strip()
-    try:
-        user_id = int(uid)
-    except (TypeError, ValueError):
-        user_id = None
-    orig_fid = (item.drive_file_id or "").strip()
-    if not orig_fid:
-        return _fail_job(db, job, "no_source_fid",
-                         "115 条目无源 fid，无法转存（等扫描补 fid）")
-    binding = _active_binding(db, user_id, "pan115") if user_id else None
-    if binding is None:
-        return _fail_job(db, job, "no_binding",
-                         "用户 115 绑定已失效或不存在（不重试）")
-    # 凭据唯一口：binding_115_cookie（含本人/115 行/凭据归属校验，
-    # 解封失败时 helper 内部已落 auth_error 失败态）。
-    try:
-        from backend.emby_server import user_bindings as ub
-        cookie = ub.binding_115_cookie(db, user_id, binding.id)
-    except ub.BindingError as exc:
-        if exc.kind == "auth_error":
-            return _fail_job(db, job, "auth_error", str(exc))
-        if exc.kind == "not_found":
-            return _fail_job(db, job, "no_binding", str(exc))
-        return {"job_id": job.id,
-                "outcome": _schedule_retry(db, job, exc)}
-    try:
-        client = _make_pan115_client(cookie)
-        dest_cid = _ensure_115_transfer_dir(client)
-        result = client.copy_file(orig_fid, dest_cid)
-        resp_fid, _resp_pickcode = _extract_115_copy_result(result)
-        # 转存后目录核对（FMBY discover 口径）：copy 回执只作期望值，
-        # 必须在目标目录里按名核到才登记；核不到记 copy_unresolved
-        #（不重试，避免重复 copy 产生重复文件；不回落源文件播放）。
-        new_fid, pickcode, entry_sha1 = _match_115_copy_in_dir_ex(
-            client, dest_cid, _copy_name_for_item(item),
-            getattr(item, "size", None), expected_fid=resp_fid or None)
-        if not new_fid:
-            return _fail_job(
-                db, job, "copy_unresolved",
-                f"115 copy 完成但目标目录核不到新文件（源 fid={orig_fid}，"
-                f"回执 fid={resp_fid or '无'}，目标目录 cid={dest_cid}，"
-                f"请人工核对，不自动重试）")
-    except Pan115AuthError as exc:
-        try:
-            from backend.emby_server import user_bindings as ub
-            ub._mark_failed(db, binding, "expired")
-        except Exception:
-            pass
-        return _fail_job(db, job, "auth_error", str(exc))
-    except Pan115Error as exc:
-        return {"job_id": job.id,
-                "outcome": _schedule_retry(db, job, exc)}
-    except Exception as exc:
-        return {"job_id": job.id,
-                "outcome": _schedule_retry(db, job, exc)}
-    # 同 provider copy 顺手沉淀：目标目录项自带整文件 sha1（115
-    # 列表透传），有就记进条目，给日后跨 provider 秒传留资格；
-    # 拿不到不硬凑、不为它新增任何下载。
-    if entry_sha1:
-        _persist_item_sha1(db, item, entry_sha1,
-                           origin="pan115_copy_dir")
-    row = _register_ready_variant(db, job, item, new_fid,
-                                  f"pan115:user-{uid}",
-                                  pickcode=pickcode or None)
-    return {"job_id": job.id, "outcome": "done", "variant_id": row.id}
-
-
-def _find_115_pickcode_by_fid(client, fid):
-    """老行 pickcode 回落：根目录 → aetrix-transfer 目录 → 按 fid 匹配。
-
-    找不到返回 ""。只查转存目录（副本只应在此目录）。
-    """
-    if not fid:
-        return ""
-    name = transfer_dir_name()
-    for entry in client.list_dir("0"):
-        if entry.get("is_dir") and (entry.get("name") or "") == name:
-            cid = entry.get("cid") or ""
-            if not cid:
-                continue
-            for item in client.list_dir(cid):
-                if not item.get("is_dir") and (item.get("fid") or "") == fid:
-                    return item.get("pickcode") or ""
-            return ""
-    return ""
-
-
-def _patrol_115_row(db, row, stats, now):
-    """115 副本巡检：download_url(存量 pickcode) 验活。
-
-    - 成功 → strike 清零；
-    - 认证错（Cookie 失效）→ 不记 strike（不是副本的错，绑定落态
-      由用户下次播放/工人处理，巡检不改绑定）；
-    - 其它错 → strike，满 2 次 stale；
-    - pickcode 为空的老行 → 目录匹配回落补 pickcode；
-    - 绑定已无 → 跳过（不记 strike、不改行）；
-    - 取链通道大小限制（50028，两通道都撞限时）→ 先以转存目录按 fid
-      列目核对：核到即按验活处理（文件没死，只是通道不肯发地址），
-      核不到仍不记 strike；
-    - stale 行验活成功 → 复活为 ready（stale_count 清零，计 revived）；
-      核不到/认证错/通道限且目录核不到 → 保持 stale，不重复记 strike。
-    """
-    from backend.emby_server.transfer115 import (
-        Pan115AuthError, Pan115ChannelLimitError, Pan115Error)
-    uid = (row.owner_ref or "").strip()
-    try:
-        user_id = int(uid)
-    except (TypeError, ValueError):
-        user_id = None
-    binding = _active_binding(db, user_id, "pan115") if user_id else None
-    if binding is None:
-        return
-    from backend.emby_server import user_bindings as ub
-    try:
-        cookie = ub.binding_115_cookie(db, user_id, binding.id)
-        client = _make_pan115_client(cookie)
-        pickcode = (row.pickcode or "").strip()
-        if not pickcode:
-            pickcode = _find_115_pickcode_by_fid(client,
-                                                 row.variant_file_id)
-            if pickcode:
-                row.pickcode = pickcode
-        if pickcode:
-            client.download_url(pickcode)
-        else:
-            raise _NotFound("115 副本无 pickcode 且目录匹配未找到")
-    except Pan115AuthError:
-        return  # 不记 strike
-    except Pan115ChannelLimitError:
-        # 两通道都撞限时，下载地址发不出不等于文件已死：再以转存
-        # 目录按 fid 列目核对一次（副本只应在此目录，fid 精确匹配）。
-        # 核到即按验活处理；核不到/列目本身失败仍不记 strike。
-        try:
-            listed = _find_115_pickcode_by_fid(client, row.variant_file_id)
-        except Exception:
-            listed = ""
-        if not listed:
-            row.last_checked_at = now
-            return  # 通道大小限制不记 strike（文件没死）
-        if row.status == "stale":
-            row.status = "ready"
-            stats["revived"] = stats.get("revived", 0) + 1
-        row.stale_count = 0
-        row.last_checked_at = now
-        return
-    except ub.BindingError:
-        return  # 凭据问题不记 strike（绑定落态已由 helper 处理）
-    except (_NotFound, _Forbidden, Pan115Error):
-        row.last_checked_at = now
-        if row.status == "stale":
-            return  # 已是 stale，不重复记 strike、不重复计入本轮新 stale
-        row.stale_count += 1
-        if row.stale_count >= STALE_STRIKES:
-            row.status = "stale"
-            stats["stale"] += 1
-    except Exception:
-        stats["errors"] += 1
-        logger.warning("115 副本巡检异常 variant=%s（不记 strike）",
-                       row.id, exc_info=True)
-        return
-    else:
-        if row.status == "stale":
-            row.status = "ready"
-            stats["revived"] = stats.get("revived", 0) + 1
-        row.stale_count = 0
-        row.last_checked_at = now
-
-
-def _patrol_quark_row(db, row, stats, now):
-    """夸克副本巡检：download_url(变体 fid) 验活（与 _patrol_115_row 同构）。
-
-    此前 patrol_once 没有夸克分流：quark: 行落进 Drive 分支，被拿去
-    调 Google Drive 的 files.get——夸克 fid 在谷歌侧必然 404，
-    每轮巡检记一次 strike、两轮置 stale，且 stale 的夸克行从不
-    纳入重验（只有 pan115: stale 行会被捞回）。生产实证（2026-11-02）：
-    全部 17 个被巡检过的夸克变体 stale_count=2/status=stale，
-    门禁又规定 stale_count>=1 的 ready 行不直接放行——新副本活
-    不过一轮巡检，用户永远撞「准备中」/重建（「第一次能播、
-    以后再也没成功过」的机制来源）。
-
-    口径与 115 巡检对齐：
-    - 成功 → strike 清零；stale 行复活为 ready（计 revived）；
-    - 认证错（QuarkAuthError，Cookie 失效）→ 不记 strike（不是
-      副本的错，绑定落态由播放/工人路径处理，巡检不改绑定）；
-    - 上游明确应答的拒绝（QuarkError 且 upstream_code 在场，如
-      文件不存在的信封错误）→ strike，满 2 次 stale；
-    - 其余（429/5xx/网络/响应形状异常，upstream_code 缺失）→
-      只记 errors、不记 strike（与 Drive 巡检同款：一过性不定性）；
-    - 绑定已无 / 凭据取用失败 → 跳过（不记 strike、不改行）。
-    验活请求吸收到的 Cookie 轮换照常 CAS 回写（absorb 口径，
-    失败不拖垮巡检）。
-    """
-    from backend.emby_server import quarkdrive
-    from backend.emby_server import transfer_quark
-    from backend.emby_server import user_bindings as ub
-    uid = (row.owner_ref or "").strip()
-    try:
-        user_id = int(uid)
-    except (TypeError, ValueError):
-        user_id = None
-    binding = _active_binding(db, user_id, "quark") if user_id else None
-    if binding is None:
-        return
-    try:
-        cookie = ub.binding_quark_cookie(db, user_id, binding.id)
-    except ub.BindingError:
-        return  # 凭据问题不记 strike（绑定落态已由 helper 处理）
-    client = transfer_quark._make_quark_client(cookie)
-    try:
-        client.download_url(row.variant_file_id)
-    except quarkdrive.QuarkAuthError:
-        ub.absorb_quark_cookie_rotation(db, binding, cookie,
-                                        client.cookie)
-        return  # 不记 strike
-    except quarkdrive.QuarkError as exc:
-        ub.absorb_quark_cookie_rotation(db, binding, cookie,
-                                        client.cookie)
-        if getattr(exc, "upstream_code", None) is None:
-            # 上游没给出明确应答（网络/429/5xx/形状异常）：一过性，
-            # 只记 errors、不记 strike。
-            stats["errors"] += 1
-            logger.warning(
-                "夸克副本巡检未定性失败 variant=%s step=%s（不记 strike）",
-                row.id, getattr(exc, "step", None))
-            return
-        row.last_checked_at = now
-        if row.status == "stale":
-            return  # 已是 stale，不重复记 strike
-        row.stale_count = (row.stale_count or 0) + 1
-        if row.stale_count >= STALE_STRIKES:
-            row.status = "stale"
-            stats["stale"] += 1
-    except Exception:
-        stats["errors"] += 1
-        logger.warning("夸克副本巡检异常 variant=%s（不记 strike）",
-                       row.id, exc_info=True)
-        return
-    else:
-        ub.absorb_quark_cookie_rotation(db, binding, cookie,
-                                        client.cookie)
-        if row.status == "stale":
-            row.status = "ready"
-            stats["revived"] = stats.get("revived", 0) + 1
-        row.stale_count = 0
-        row.last_checked_at = now
 
 
 # ---------------------------------------------------------------------------
@@ -7306,779 +6272,6 @@ def _resolve_115_source(db, item):
         return (client, pickcode, _to_int(entry.get("size")),
                 (entry.get("sha1") or "").strip())
     raise _CrossRemoteError(f"115 源路径形态未知：{path[:60]}")
-
-
-def _cloudpull_fallback(db, job, step, detail):
-    """形态 B 任一步失败的统一收尾：打 outcome 结构化日志 + 把
-    独立 error_kind 落到 job 行（瞬时标记——随后搬字节老路的
-    结果会覆盖/清除），返回 None 表示回落。绝不在这里判 job
-    failed：回落是换执行路、不是换播放源、更不是放弃这单；
-    老路也失败才走既有失败语义（调用方原样续行）。"""
-    logger.info("transfer_cloudpull outcome=fallback job=%s step=%s "
-                "error_kind=cloudpull_failed detail=%s",
-                getattr(job, "id", None), step, detail)
-    try:
-        job.error_kind = "cloudpull_failed"
-        job.error_detail = f"cloudpull {step}: {detail}"[:500]
-        db.commit()
-    except Exception:  # noqa: BLE001 — 标记落库失败不许挡住回落本身
-        try:
-            db.rollback()
-        except Exception:
-            pass
-    return None
-
-
-def _cloudpull_del_quietly(client, info_hash):
-    """删 115 侧云下载任务记录（best-effort）：记录里存有提交的
-    签名取流地址，成功与任务终态失败两处都删；删失败只记日志
-    ——签名本身有 TTL 兜底，不许因删不掉把已成的转存判失败。"""
-    if not info_hash:
-        return
-    try:
-        client.cloudpull_del_task(info_hash)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("transfer_cloudpull task_del failed hash=%s "
-                       "err=%s", info_hash, exc)
-
-
-def _try_cloudpull_lane(db, job, item, client, dest_cid, size,
-                        user_id, name):
-    """形态 B 云下载 lane（开关开时，秒传接力预检之后、搬字节
-    之前）：让点播用户本人的 115 自己拉我方现铸的签名取流地址，
-    字节不过服务器搬运路。成功返回 done 结果 dict；任一步失败
-    返回 None（已打 fallback 日志＋落 cloudpull_failed 标记），
-    调用方原样走搬字节老路。Pan115AuthError 不吞：Cookie 死是
-    绑定问题、不是 lane 失败，上抛给调用方走既有 _auth_fail。
-    """
-    from backend.emby_server.transfer115 import Pan115AuthError
-    from backend.emby_server.public_url import client_base_url
-
-    # ① 现铸转存专用签名取流地址：走唯一构造点，TTL 用转存
-    # 专用配置，api_key 传空——任务记录会存这条 URL，绝不把
-    # 任何用户令牌写进去。worker 无请求上下文，基址取公开基址
-    # 配置（client_base_url(None)＝EMBY_PUBLIC_URL）；取不到
-    # 就现铸不出来 → 回落。
-    base = ""
-    try:
-        base = client_base_url(None) or ""
-    except Exception:  # noqa: BLE001
-        base = ""
-    if not base:
-        return _cloudpull_fallback(
-            db, job, "mint", "公开基址未配置，现铸不出取流地址")
-    try:
-        from backend.emby_server.api import _signed_local_stream_url
-        url, _exp, _sig = _signed_local_stream_url(
-            item, base, user_id, db, api_key="", with_sign=True,
-            ttl_seconds=cross_cloudpull_ttl_sec(db))
-    except Exception as exc:  # noqa: BLE001
-        return _cloudpull_fallback(
-            db, job, "mint", f"现铸签名地址失败：{exc}")
-    if not url:
-        return _cloudpull_fallback(db, job, "mint", "现铸签名地址为空")
-
-    # ② 建单前快照：目标目录已有 fid 集（认领靠差集排除存量，
-    # 绝不认错旧文件）＋云下载任务基线 info_hash 集（轮询认领
-    # 靠它排除建单前就存在的任务）。
-    try:
-        before_fids = {
-            str(e.get("fid") or "")
-            for e in client.list_dir(dest_cid)
-            if not e.get("is_dir") and e.get("fid")
-        }
-        baseline_hashes = {
-            t.get("info_hash") or ""
-            for t in client.cloudpull_tasks()
-        }
-    except Pan115AuthError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        return _cloudpull_fallback(db, job, "snapshot", str(exc))
-
-    # ③ 建单到本人盘的既有转存目标目录。
-    try:
-        client.cloudpull_add_task(url, dest_cid)
-    except Pan115AuthError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        return _cloudpull_fallback(db, job, "add_task", str(exc))
-
-    # ④ 有界轮询：任务列表是账号级的，只认「info_hash 不在
-    # 基线集＋url 等于所铸地址」的那一条。列表瞬时错误容忍到
-    # deadline；终态失败/超时都回落（失败任务也删记录）。
-    deadline = _CLOUDPULL_NOW() + cross_cloudpull_timeout_sec(db)
-    task = None
-    while True:
-        try:
-            tasks = client.cloudpull_tasks()
-        except Pan115AuthError:
-            raise
-        except Exception:  # noqa: BLE001
-            tasks = None
-        if tasks is not None:
-            for entry in tasks:
-                if (entry.get("info_hash") or "") in baseline_hashes:
-                    continue
-                if entry.get("url") == url:
-                    task = entry
-                    break
-            if task is not None:
-                if (task.get("status") or 0) < 0:
-                    _cloudpull_del_quietly(
-                        client, task.get("info_hash"))
-                    return _cloudpull_fallback(
-                        db, job, "task_failed",
-                        "115 云下载任务终态失败 "
-                        f"status={task.get('status')}")
-                if (task.get("status") == 2
-                        or (task.get("percentDone") or 0) >= 100):
-                    break
-        if _CLOUDPULL_NOW() >= deadline:
-            if task is not None:
-                _cloudpull_del_quietly(client, task.get("info_hash"))
-            return _cloudpull_fallback(
-                db, job, "timeout",
-                f"{cross_cloudpull_timeout_sec(db)} 秒内任务未完成")
-        _CLOUDPULL_SLEEP(CLOUDPULL_POLL_SEC)
-    info_hash = (task or {}).get("info_hash") or ""
-
-    # ⑤ 认领：落盘名取自 URL 路径尾段（如 stream.m2ts）、不是
-    # 片名，只按「不在快照内＋大小相等＋后缀相同」认，绝不按
-    # 名匹配；多条候选时任务回执 file_id 指中的优先；仍定不
-    # 了一律回落，不猜。
-    from urllib.parse import urlsplit
-    tail = urlsplit(url).path.rsplit("/", 1)[-1]
-    suffix = ""
-    if "." in tail:
-        suffix = "." + tail.rsplit(".", 1)[-1].lower()
-    if not suffix:
-        _cloudpull_del_quietly(client, info_hash)
-        return _cloudpull_fallback(
-            db, job, "claim",
-            f"取流地址尾段无后缀（{tail}），无法安全认领")
-    try:
-        entries = client.list_dir(dest_cid)
-    except Pan115AuthError:
-        _cloudpull_del_quietly(client, info_hash)
-        raise
-    except Exception as exc:  # noqa: BLE001
-        _cloudpull_del_quietly(client, info_hash)
-        return _cloudpull_fallback(db, job, "claim", str(exc))
-    candidates = [
-        e for e in entries
-        if not e.get("is_dir")
-        and str(e.get("fid") or "")
-        and str(e.get("fid") or "") not in before_fids
-        and _to_int(e.get("size")) == size
-        and str(e.get("name") or "").lower().endswith(suffix)
-    ]
-    if len(candidates) > 1:
-        task_fid = str((task or {}).get("file_id") or "")
-        narrowed = [e for e in candidates
-                    if str(e.get("fid") or "") == task_fid]
-        if len(narrowed) == 1:
-            candidates = narrowed
-    if len(candidates) != 1:
-        _cloudpull_del_quietly(client, info_hash)
-        return _cloudpull_fallback(
-            db, job, "claim",
-            f"目标目录按大小＋后缀认领到 {len(candidates)} 个新文件，不猜")
-    entry = candidates[0]
-    new_fid = str(entry.get("fid") or "")
-    pickcode = str(entry.get("pickcode") or "")
-
-    # ⑥ 改名回副本名（best-effort：落盘名只是难看、不影响可播
-    # 性，失败只记日志；变体认的是 fid 不是名）。
-    if name and str(entry.get("name") or "") != name:
-        try:
-            client.rename_file(new_fid, name)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("transfer_cloudpull rename failed job=%s "
-                           "fid=%s err=%s", job.id, new_fid, exc)
-
-    # ⑦ 目录项 sha1 沉淀（与搬字节路同口径，给接力留弹药；
-    # _persist_item_sha1 自行校验格式，非 sha1 静默跳过）。
-    entry_sha1 = str(entry.get("sha1") or "").strip().lower()
-    if entry_sha1:
-        _persist_item_sha1(db, item, entry_sha1,
-                           origin="drive_to_115_cloudpull")
-
-    # ⑧ 登记点播用户本人变体 ready；⑨ 立即删任务记录。
-    row = _register_ready_variant(db, job, item, new_fid,
-                                  f"pan115:user-{user_id}",
-                                  pickcode=pickcode or None, size=size)
-    _cloudpull_del_quietly(client, info_hash)
-    logger.info("transfer_cloudpull outcome=hit job=%s item=%s "
-                "fid=%s size=%s", job.id, item.id, new_fid, size)
-    return {"job_id": job.id, "outcome": "done", "variant_id": row.id}
-
-
-def _run_cross_drive_to_115(db, job, item, drive_api, probe_only=False):
-    """跨 provider Drive→115：先试秒传，未命中/无哈希再全量搬字节。
-
-    秒传（initupload，2026-10-30 整套）：条目有可信 sha1 且开关
-    开时先试秒传——命中不搬一字节（>5 GiB 亦可），走现有按名
-    核对＋登记直接 done；未命中/协议异常无缝回落全量；没有可信
-    sha1 时不为算哈希额外多下一整遍，直接全量并在该程沉淀
-    sha1 留给下一单。全量走现行 simple_upload（≤5 GiB）：SA
-    令牌按段取字节、字节必经 worker 中转（分段读取器直供表单
-    上传，不落盘），读取器外包透传哈希计 sha1，与上传回调
-    sha1 交叉核对——不一致以回调为准（回调是 115 对实际落盘
-    字节算的整文件哈希，是目标端事实），沉淀进条目 content_hash。
-    分片上传（initupload OSS 多段，>5 GiB）：秒传未命中且文件
-    超过 simple 上限时走 multipart_upload（开关
-    pan115_multipart_upload_enabled 默认开，关时维持 unsupported
-    旧口径）；无可信 sha1 的大文件先流式算哈希沉淀再照常试秒传
-    （见下）。分片路 sha1 交叉核对从严：回调与源端透传不一致
-    判 failed/remote_error 不登记（多段拼出的落盘字节与源不是
-    同一份时没有「以回调为准」的余地；simple 路口径不变）；
-    其余收尾（目录按名核对 + 登记）与全量路共用。
-    用户 115 Cookie 失效 → 绑定落 expired + failed/auth_error
-    （与同 provider 115 执行器同口径）；SA 源下载 401/403 →
-    failed/auth_error，但绝不碰用户绑定（失效的是源侧 SA）；
-    其余失败 → 有界重试。上传/秒传后必列用户 115 转存目录
-    按名核对（FMBY discover 口径），核不到记 copy_unresolved
-    不重试。秒传尝试结果（hit/miss/error）均有结构化日志；
-    接力漏斗另有 transfer_relay outcome=hit|miss|error|skip
-    结构化日志（预检段落点与口径见函数内「秒传接力预检段」）。
-    形态 B 云下载（开关 transfer_cross_cloudpull_enabled，默认
-    关）：接力未命中且开关开时先走 _try_cloudpull_lane（115 自
-    己拉现铸签名取流地址，字节不过服务器），成功即 done、失败
-    明确回落本函数的搬字节老路（error_kind=cloudpull_failed 只
-    作瞬时标记 + transfer_cloudpull outcome 日志），绝不因
-    cloudpull 失败直接判 job failed。
-    probe_only=True（期二探针道）：只跑秒传接力预检段——命中
-    走与普通路逐字一致的收尾（目录核对＋登记＋done）；未命中、
-    无可信 sha1、秒传开关关、以及探针途中的网络/凭据失败一律
-    返回 outcome="probe_miss"（响亮记 transfer_probe 日志），
-    由调用方释放回 pending 等普通认领，绝不在探针里烧
-    attempts 或落重试/终态。结构性事实（no_binding、源已死
-    dead、无源盘 no_drive、大小未知 unsupported）与普通路同
-    口径落终态，不在探针里改判。字节搬运段（哈希遍、
-    cloudpull、simple/multipart）在 probe_only 下一行不跑。
-    """
-    from backend.emby_server.transfer115 import Pan115AuthError, Pan115Error
-    from backend.emby_server import user_bindings as ub
-    uid = (getattr(job, "owner_ref", "") or "").strip()
-    try:
-        user_id = int(uid)
-    except (TypeError, ValueError):
-        user_id = None
-    binding = _active_binding(db, user_id, "pan115") if user_id else None
-    if binding is None:
-        return _fail_job(db, job, "no_binding",
-                         "用户 115 绑定已失效或不存在（不重试）")
-    try:
-        cookie = ub.binding_115_cookie(db, user_id, binding.id)
-    except ub.BindingError as exc:
-        if probe_only:
-            # 探针取不到 Cookie（凭据侧故障）：响亮记日志 + 按
-            # 未命中释放，终态口径留给普通执行路同点判定。
-            logger.warning(
-                "transfer_probe outcome=error job=%s item=%s "
-                "stage=cookie kind=%s err=%s（释放回队列）",
-                job.id, item.id, exc.kind, exc)
-            return {"job_id": job.id, "outcome": "probe_miss"}
-        if exc.kind == "auth_error":
-            return _fail_job(db, job, "auth_error", str(exc))
-        if exc.kind == "not_found":
-            return _fail_job(db, job, "no_binding", str(exc))
-        return {"job_id": job.id,
-                "outcome": _schedule_retry(db, job, exc)}
-    orig_fid = (item.drive_file_id or "").strip()
-    source_drive = (getattr(job, "drive_id", "") or "").strip()
-    if not source_drive:
-        return _fail_job(db, job, "no_drive", "跨任务无源 Drive 盘标识")
-    name = _copy_name_for_item(item)
-    try:
-        info = drive_api.get_file(source_drive, orig_fid)
-        size = _to_int((info or {}).get("size"))
-    except (_NotFound, _Forbidden) as exc:
-        return _fail_job(db, job, "dead", f"Drive 源已死/无权：{exc}")
-    except Exception as exc:
-        if probe_only:
-            logger.warning(
-                "transfer_probe outcome=error job=%s item=%s "
-                "stage=get_file err=%s（释放回队列）",
-                job.id, item.id, exc)
-            return {"job_id": job.id, "outcome": "probe_miss"}
-        return {"job_id": job.id,
-                "outcome": _schedule_retry(db, job, exc)}
-    if not size:
-        size = _to_int(getattr(item, "size", None))
-    if size <= 0:
-        return _fail_job(
-            db, job, "unsupported",
-            "Drive 源文件大小未知/为零，无法分段搬运（不猜大小）")
-
-    # 源字节暂存（在途合并＋源侧断点续传）：字节搬运路（哈希遍、
-    # simple、分片）走暂存包装；秒传接力的 sign_check 区间读保持
-    # 直读源（稀疏读不进暂存、不依赖暂存）。
-    _stage = _acquire_source_stage("drive", source_drive, orig_fid, size)
-    _content_key = _stage_key("drive", source_drive, orig_fid, size)
-
-    def _raw_fetch(start, end):
-        return drive_api.download_range(source_drive, orig_fid, start, end)
-
-    _fetch = _staged_fetch(_raw_fetch, _stage)
-
-    def _open_client():
-        client = _make_pan115_client(cookie)
-        return client, _ensure_115_transfer_dir(client)
-
-    def _auth_fail(exc):
-        try:
-            ub._mark_failed(db, binding, "expired")
-        except Exception:
-            pass
-        return _fail_job(db, job, "auth_error", str(exc))
-
-    client = None
-    dest_cid = ""
-    rapid_fid = None  # None = 未命中路（走/已走全量）；str = 秒传回执期望 fid
-    chosen_sha1 = ""
-    # ---- 秒传接力预检段（2026-10-30）----
-    # 落点定在执行侧（本执行器由 run_transfer_job_once 在认领后
-    # 调用），绝不放在建单时：排队 job 建单时条目可能尚无哈希，
-    # 在途 job 完成沉淀后，只有等排队 job 自己被认领执行、走到
-    # 这里再查 content_hash 才看得到——同片同 provider 的第二人
-    # 靠这一眼命中接力，不必再搬一遍字节。口径：条目可信 sha1
-    # （_trusted_item_sha1）且开关开时，用目标用户本人 Cookie 试
-    # initupload 认领；命中走下方现行目录核对＋登记本人变体行
-    # 直接 done；未命中/无哈希/协议异常一律原样回落全量搬运，
-    # 失败口径一行不变。他人变体行绝不共用——命中也只在本人盘
-    # 生成本人行。接力漏斗以结构化日志 transfer_relay
-    # outcome=hit|miss|error|skip 观测（跨用户真实命中率上线后
-    # 靠它读）；pan115_rapid 是协议层日志，并行保留。
-    stored_sha1 = _trusted_item_sha1(item, size)
-    # 换代线地基记账（2026-11-01，step 1 余项＋step 2）：交付状态
-    # 落盘＋块哈希清单的记账句柄。只在本执行器（Drive→115 搬字
-    # 节路）接线，纯记账/透传、fail-open（transfer_manifest 模块
-    # 头注）：开关关或建句柄失败时 _recorder/_tman 恒为 None，
-    # 下面所有接线点据此短路，行为与此前逐字一致。
-    _tman = None
-    _recorder = None
-    if manifest_accounting_enabled(db) and not probe_only:
-        # probe_only 不搬字节：记账句柄（为字节程攒块清单而设）
-        # 不建，探针的清单 sha1 查询走下方独立只读口。
-        try:
-            from backend.emby_server import transfer_manifest as _tman
-            _recorder = _tman.begin_recorder(db, _content_key, size)
-            if _recorder is None:
-                _tman = None
-        except Exception:  # noqa: BLE001 — 记账接线失败不打挂搬运
-            _tman = None
-            _recorder = None
-    if (probe_only and not stored_sha1
-            and manifest_accounting_enabled(db)
-            and manifest_takeover_active(db)):
-        # 探针口径的清单 sha1：只读查询，与普通路接管采信同源。
-        try:
-            from backend.emby_server import transfer_manifest as _tm2
-            _probe_manifest_sha1 = _tm2.manifest_trusted_sha1(
-                db, _content_key, size)
-            if _probe_manifest_sha1:
-                stored_sha1 = _probe_manifest_sha1
-        except Exception:  # noqa: BLE001 — 查不到按无指纹处理
-            pass
-    if (not stored_sha1 and _tman is not None
-            and manifest_takeover_active(db)):
-        # 换代线 step 4 接管：清单已 complete 的整文件 sha1 直接
-        # 采信（入册前已经过现行交付链交叉核对，见清单模型头
-        # 注），省掉下面大文件的整遍哈希重读。清单未齐/开关关
-        # 时 stored_sha1 维持空、哈希遍口径逐字不变。
-        _manifest_sha1 = _tman.manifest_trusted_sha1(
-            db, _content_key, size)
-        if _manifest_sha1:
-            stored_sha1 = _manifest_sha1
-            logger.info(
-                "transfer_manifest outcome=sha1_trusted job=%s "
-                "item=%s size=%s", job.id, item.id, size)
-    if probe_only and not stored_sha1:
-        # 探针道只收已有指纹的单（认领侧已过滤）；走到这里说明
-        # 指纹在建单后失效（条目大小变更等）——按未命中释放，
-        # 绝不在探针里为算哈希整遍读源（那是搬字节道的活）。
-        logger.info("transfer_probe outcome=miss job=%s item=%s "
-                    "reason=no_trusted_sha1", job.id, item.id)
-        return {"job_id": job.id, "outcome": "probe_miss"}
-    if (not stored_sha1 and size > _115_SIMPLE_UPLOAD_LIMIT
-            and pan115_multipart_upload_enabled(db)):
-        # initupload（秒传与分片共用）以整文件 sha1 为必填入参：
-        # ≤5 GiB 的 simple_upload 用不上哈希，维持「不为算哈希多
-        # 下一整遍」；大文件无可信 sha1 时没有别的路——流式过一
-        # 遍源字节算 sha1 并沉淀（字节只过 worker 内存、不落盘），
-        # 算完照常先试秒传、未命中再走分片。开关关时不白算。
-        hash_reader = _HashingReader(_SegmentReader(size, _fetch), size)
-        if _recorder is not None:
-            # 块哈希清单透传：哈希遍整文件顺序流经，顺手攒块
-            # SHA-256 与整文件 MD5（同一程、零额外源读）。
-            hash_reader = _tman.TrackingReader(
-                hash_reader, _recorder.tracker)
-        try:
-            while hash_reader.read(_CROSS_SEGMENT):
-                pass
-        except _CrossAuthError as exc:
-            # SA 源凭据失效：只记任务失败，绝不落用户 115 绑定。
-            return _fail_job(db, job, "auth_error", str(exc))
-        except Exception as exc:
-            return {"job_id": job.id,
-                    "outcome": _schedule_retry(db, job, exc)}
-        computed_sha1 = hash_reader.sha1_hexdigest() or ""
-        if computed_sha1:
-            _persist_item_sha1(db, item, computed_sha1,
-                               origin="drive_to_115_hash_pass")
-            stored_sha1 = computed_sha1
-            logger.info("pan115_multipart hash_pass item=%s job=%s "
-                        "size=%s", item.id, job.id, size)
-            if _recorder is not None:
-                # 清单入册：本程块已攒满（哈希遍整文件流经），
-                # 整文件 sha1 以刚算出并沉淀的透传值为锚。
-                _recorder.flush(db, whole_sha1=computed_sha1)
-    rapid_enabled = pan115_rapid_upload_enabled(db)
-    if not stored_sha1:
-        logger.info("transfer_relay outcome=skip item=%s job=%s "
-                    "provider=pan115 owner=%s reason=no_trusted_sha1",
-                    item.id, job.id, uid)
-    elif not rapid_enabled:
-        logger.info("transfer_relay outcome=skip item=%s job=%s "
-                    "provider=pan115 owner=%s reason=switch_off",
-                    item.id, job.id, uid)
-    if probe_only and not rapid_enabled:
-        logger.info("transfer_probe outcome=miss job=%s item=%s "
-                    "reason=rapid_switch_off", job.id, item.id)
-        return {"job_id": job.id, "outcome": "probe_miss"}
-    if stored_sha1 and rapid_enabled:
-        try:
-            client, dest_cid = _open_client()
-        except Pan115AuthError as exc:
-            if probe_only:
-                logger.warning(
-                    "transfer_probe outcome=error job=%s item=%s "
-                    "stage=open_client err=%s（释放回队列）",
-                    job.id, item.id, exc)
-                return {"job_id": job.id, "outcome": "probe_miss"}
-            return _auth_fail(exc)
-        except Exception as exc:
-            if probe_only:
-                logger.warning(
-                    "transfer_probe outcome=error job=%s item=%s "
-                    "stage=open_client err=%s（释放回队列）",
-                    job.id, item.id, exc)
-                return {"job_id": job.id, "outcome": "probe_miss"}
-            return {"job_id": job.id,
-                    "outcome": _schedule_retry(db, job, exc)}
-        try:
-            rapid = client.rapid_upload(name, size, stored_sha1, dest_cid,
-                                        range_reader=_raw_fetch)
-        except Pan115AuthError as exc:
-            if probe_only:
-                logger.warning(
-                    "transfer_probe outcome=error job=%s item=%s "
-                    "stage=rapid_upload err=%s（释放回队列）",
-                    job.id, item.id, exc)
-                return {"job_id": job.id, "outcome": "probe_miss"}
-            return _auth_fail(exc)
-        except _CrossAuthError as exc:
-            if probe_only:
-                logger.warning(
-                    "transfer_probe outcome=error job=%s item=%s "
-                    "stage=rapid_upload err=%s（释放回队列）",
-                    job.id, item.id, exc)
-                return {"job_id": job.id, "outcome": "probe_miss"}
-            # SA 源凭据失效（sign_check 取区间时）：只记任务失败，
-            # 绝不落用户 115 绑定（与全量路同口径）。
-            return _fail_job(db, job, "auth_error", str(exc))
-        except Exception as exc:  # noqa: BLE001 — 协议异常一律回落全量
-            logger.info("pan115_rapid outcome=error item=%s job=%s "
-                        "err=%s（回落全量上传）", item.id, job.id, exc)
-            logger.info("transfer_relay outcome=error item=%s job=%s "
-                        "provider=pan115 owner=%s err=%s",
-                        item.id, job.id, uid, exc)
-            rapid = None
-        if rapid is not None:
-            outcome = (rapid or {}).get("outcome")
-            logger.info("pan115_rapid outcome=%s item=%s job=%s size=%s",
-                        outcome, item.id, job.id, size)
-            logger.info("transfer_relay outcome=%s item=%s job=%s "
-                        "provider=pan115 owner=%s",
-                        outcome, item.id, job.id, uid)
-            if outcome == "hit":
-                rapid_fid = (rapid or {}).get("fid") or ""
-    if probe_only:
-        # 探针裁决点：命中落下方现行收尾（目录核对＋登记＋done，
-        # 与普通路命中收尾逐字一致）；其余一律 probe_miss 释放，
-        # 不进 cloudpull、不进搬字节段——协议异常（rapid 恒
-        # None）记 outcome=error 响亮告警，未命中记 outcome=miss。
-        if rapid_fid is None:
-            if rapid is None:
-                logger.warning(
-                    "transfer_probe outcome=error job=%s item=%s "
-                    "stage=rapid_upload（释放回队列）", job.id, item.id)
-            else:
-                logger.info("transfer_probe outcome=miss job=%s "
-                            "item=%s", job.id, item.id)
-            return {"job_id": job.id, "outcome": "probe_miss"}
-        logger.info("transfer_probe outcome=hit job=%s item=%s",
-                    job.id, item.id)
-    if rapid_fid is None and cross_cloudpull_enabled(db):
-        # 形态 B 云下载 lane（2026-10-30 立项，默认关）：接力未
-        # 命中后、搬字节之前，让用户本人的 115 自己拉现铸的签名
-        # 取流地址。成功直接 done；任一步失败回落下方搬字节老路
-        # （含 >5 GiB 的 unsupported 判定，一行不改）；Cookie 死
-        # 走既有 _auth_fail，不回落。
-        if client is None:
-            try:
-                client, dest_cid = _open_client()
-            except Pan115AuthError as exc:
-                return _auth_fail(exc)
-            except Exception as exc:
-                return {"job_id": job.id,
-                        "outcome": _schedule_retry(db, job, exc)}
-        try:
-            cloud_result = _try_cloudpull_lane(
-                db, job, item, client, dest_cid, size, user_id, name)
-        except Pan115AuthError as exc:
-            return _auth_fail(exc)
-        if cloud_result is not None:
-            return cloud_result
-    if rapid_fid is None:
-        if size > _115_SIMPLE_UPLOAD_LIMIT \
-                and not pan115_multipart_upload_enabled(db):
-            return _fail_job(
-                db, job, "unsupported",
-                f"文件 {size} 字节超过 115 简单上传 5 GiB 上限且秒传"
-                f"未命中；115 分片上传开关关闭，不静默回落")
-        if client is None:
-            try:
-                client, dest_cid = _open_client()
-            except Pan115AuthError as exc:
-                return _auth_fail(exc)
-            except Exception as exc:
-                return {"job_id": job.id,
-                        "outcome": _schedule_retry(db, job, exc)}
-        reader = _HashingReader(_SegmentReader(size, _fetch), size)
-        via_multipart = size > _115_SIMPLE_UPLOAD_LIMIT
-        if via_multipart and _recorder is not None:
-            # 块哈希清单透传（分片路）：上传读程顺手攒块——哈希
-            # 遍没跑（已有可信 sha1）时靠这一程从 0 攒满；续传
-            # 时只补本程顺序读过的块，攒不齐的块保持未入册。
-            reader = _tman.TrackingReader(reader, _recorder.tracker)
-        try:
-            if via_multipart:
-                if not stored_sha1:
-                    return _fail_job(
-                        db, job, "unsupported",
-                        "文件超过 115 简单上传 5 GiB 上限且无可信整"
-                        "文件 sha1（initupload 分片协议必填），"
-                        "不静默回落")
-                if (_recorder is not None
-                        and manifest_takeover_active(db)):
-                    # 换代线 step 4 接管：恢复顺序翻转——落盘
-                    # 交付行（经三项校验）为准，sidecar 退为第
-                    # 二落点；两者都在且 upload_id 不一致时以落
-                    # 盘行为准并响亮记日志（落盘行经 failed 事
-                    # 件同步过最新会话，见 _mp_progress，不会比
-                    # sidecar 旧）。续传判定仍归 transfer115 的
-                    # ListParts 对账，本处只决定恢复来源。
-                    mp_session = _tman.restore_delivery_session(
-                        db, job.id, _content_key, size, dest_cid)
-                    _sidecar_session = _load_multipart_session(
-                        job.id, _content_key, size, dest_cid)
-                    if mp_session is not None:
-                        if (_sidecar_session is not None
-                                and str(_sidecar_session.get(
-                                    "upload_id") or "")
-                                != str(mp_session.get(
-                                    "upload_id") or "")):
-                            logger.warning(
-                                "pan115 分片会话落盘行与 sidecar "
-                                "不一致 job=%s item=%s：以落盘行为准",
-                                job.id, item.id)
-                    else:
-                        mp_session = _sidecar_session
-                else:
-                    mp_session = _load_multipart_session(
-                        job.id, _content_key, size, dest_cid)
-                    if mp_session is None and _recorder is not None:
-                        # 交付状态落盘恢复（换代线 step 1 余项）：
-                        # sidecar 缺失（容器重建把 /tmp 清掉）时凭
-                        # transfer_deliveries 行恢复会话，并回写
-                        # sidecar——之后续传判定仍归 transfer115 的
-                        # ListParts 对账，本处只是多一个找回来源，
-                        # 三项校验（content_key＋size＋目标目录）与
-                        # sidecar 同口径。恢复不到按无会话走全新
-                        # 上传（与 sidecar 丢失的现行语义一致）。
-                        mp_session = _tman.restore_delivery_session(
-                            db, job.id, _content_key, size, dest_cid)
-                        if mp_session is not None:
-                            _save_multipart_session(
-                                job.id, _content_key, size, dest_cid,
-                                mp_session)
-                            logger.info(
-                                "pan115 分片会话已由交付落盘恢复 "
-                                "job=%s item=%s（sidecar 缺失）",
-                                job.id, item.id)
-
-                # 会话状态放闭包里递进（不依赖 sidecar 回读：回读的
-                # 校验会把 callback 为空等中间态判掉，导致续传丢会话）。
-                _mp_state = {"session": mp_session}
-
-                def _persist_delivery():
-                    if _recorder is None:
-                        return
-                    _tman.persist_delivery(
-                        db, job_id=job.id, content_key=_content_key,
-                        dest_provider="pan115",
-                        dest_binding_id=getattr(binding, "id", None),
-                        dest_ref=dest_cid,
-                        session=_mp_state.get("session") or {},
-                        size=size, state="active")
-
-                def _mp_progress(ev):
-                    if ev.get("event") == "init":
-                        _mp_state["session"] = ev.get("session") or {}
-                        _save_multipart_session(
-                            job.id, _content_key, size, dest_cid,
-                            _mp_state["session"])
-                        _persist_delivery()
-                    elif ev.get("event") == "part":
-                        sess = _mp_state["session"] or {}
-                        parts = list(sess.get("parts") or [])
-                        parts.append({"PartNumber": ev["number"],
-                                      "ETag": ev["etag"]})
-                        sess["parts"] = parts
-                        _save_multipart_session(
-                            job.id, _content_key, size, dest_cid, sess)
-                        _persist_delivery()
-                    elif ev.get("event") == "failed":
-                        # 失败事件带权威会话（含刚刷新的 token
-                        # 记账）：sidecar 维持既有口径不回写，
-                        # 落盘行同步到这一版，供重建后恢复时
-                        # 与服务端对账的起点不比 sidecar 旧。
-                        if ev.get("session"):
-                            _mp_state["session"] = ev["session"]
-                        _persist_delivery()
-
-                try:
-                    result = client.multipart_upload(
-                        reader, name, size, stored_sha1, dest_cid,
-                        range_reader=_fetch, resume_session=mp_session,
-                        on_progress=_mp_progress)
-                except (Pan115AuthError, _CrossAuthError):
-                    raise
-                except Exception as exc:
-                    outcome = _schedule_retry(db, job, exc)
-                    if outcome == "failed" and mp_session:
-                        # 终态：清掉续传会话并 best-effort abort 旧会话
-                        try:
-                            client.abort_multipart_session(mp_session)
-                        except Exception:
-                            pass
-                        _drop_multipart_session(job.id)
-                        if _recorder is not None:
-                            _tman.finish_delivery(db, job.id, "aborted")
-                    return {"job_id": job.id, "outcome": outcome}
-                _drop_multipart_session(job.id)
-                if _recorder is not None:
-                    _tman.finish_delivery(db, job.id, "completed")
-                if (result or {}).get("outcome") == "hit":
-                    # 秒传开关关时分片初始化可直接判存量命中：与
-                    # 秒传命中同收尾（目录核对 + 登记），不算全量路。
-                    rapid_fid = (result or {}).get("fid") or ""
-                    result = None
-            else:
-                result = client.simple_upload(reader, name, dest_cid)
-        except Pan115AuthError as exc:
-            return _auth_fail(exc)
-        except _CrossAuthError as exc:
-            # SA 源凭据失效：只记任务失败，绝不落用户 115 绑定。
-            return _fail_job(db, job, "auth_error", str(exc))
-        except Exception as exc:
-            return {"job_id": job.id,
-                    "outcome": _schedule_retry(db, job, exc)}
-        if result is None:
-            # 分片初始化判存量命中：与秒传命中同收尾。
-            resp_fid = rapid_fid
-        else:
-            resp_fid = (result or {}).get("fid") or ""
-            # sha1 沉淀：回调（115 落盘事实）优先、透传哈希兜底；
-            # 两者不一致打警告并以回调为准（见函数头注释）。
-            # 例外：分片路（字节经 OSS 多段拼接）不一致 = 落盘
-            # 字节与源不是同一份，判失败不登记（函数头注释）。
-            # A-091：分片路回调必须先与可信源 sha1 比对——续传时
-            # 全新 _HashingReader 哈希链断裂致 stream_sha1 恒空，
-            # 下面的流式核对恒假，绝不能只凭回调自证即登记；
-            # stored_sha1 是 multipart 必填的独立源真相。
-            callback_sha1 = ((result or {}).get("sha1") or "").strip().lower()
-            stream_sha1 = reader.sha1_hexdigest() or ""
-            if (via_multipart and callback_sha1 and stored_sha1
-                    and callback_sha1 != stored_sha1):
-                return _fail_job(
-                    db, job, "remote_error",
-                    "115 分片上传 sha1 与可信源 sha1 不一致（回调 "
-                    f"{callback_sha1[:12]}… ≠ 可信 {stored_sha1[:12]}…），"
-                    "落盘字节与源不一致，不登记变体")
-            if via_multipart and not stream_sha1:
-                logger.warning(
-                    "pan115 分片上传透传哈希不可用 item=%s job=%s"
-                    "（续传致哈希链断裂或未读满），流式核对跳过、"
-                    "仅以可信源 sha1 核对回调", item.id, job.id)
-            if (via_multipart and callback_sha1 and stream_sha1
-                    and callback_sha1 != stream_sha1):
-                return _fail_job(
-                    db, job, "remote_error",
-                    "115 分片上传 sha1 交叉核对不一致（回调 "
-                    f"{callback_sha1[:12]}… ≠ 源端 {stream_sha1[:12]}…），"
-                    "落盘字节与源不一致，不登记变体")
-            if callback_sha1 and stream_sha1 \
-                    and callback_sha1 != stream_sha1:
-                logger.warning(
-                    "pan115 上传 sha1 不一致 item=%s callback=%s "
-                    "stream=%s（以回调为准）",
-                    item.id, callback_sha1[:12], stream_sha1[:12])
-            chosen_sha1 = callback_sha1 or stream_sha1
-            if chosen_sha1:
-                _persist_item_sha1(db, item, chosen_sha1,
-                                   origin="drive_to_115_upload")
-            if _recorder is not None:
-                # 清单入册（complete 时整文件锚交叉核对已由上
-                # 面现行口径完成）：整文件 sha1 以交叉核对后
-                # 的 chosen_sha1（分片路与可信源/流式任一不符
-                # 已在上方判失败、走不到这里）为锚并册；块未
-                # 攒齐或锚缺失时清单保持 partial，后续搬运续填。
-                _recorder.flush(db, whole_sha1=chosen_sha1 or None)
-    else:
-        resp_fid = rapid_fid
-    try:
-        new_fid, pickcode, entry_sha1 = _match_115_copy_in_dir_ex(
-            client, dest_cid, name, size, expected_fid=resp_fid or None)
-    except Exception as exc:
-        return {"job_id": job.id,
-                "outcome": _schedule_retry(db, job, exc)}
-    if not new_fid:
-        return _fail_job(
-            db, job, "copy_unresolved",
-            f"115 跨转存完成但目标目录核不到新文件（源 fid={orig_fid}，"
-            f"回执 fid={resp_fid or '无'}，目标目录 cid={dest_cid}，"
-            f"请人工核对，不自动重试）")
-    if rapid_fid is None and not chosen_sha1 and entry_sha1:
-        # 全量路回调与透传都没给 sha1 时，用目录项 sha1 兜底沉淀；
-        # 但目录项也是 115 侧自证：与可信源 sha1 不一致时不沉淀
-        # （A-091 同族缺口的保守处理：不把 115 侧哈希写进条目
-        # 可信列；目录核对通过的登记本身不在本次改动范围，见
-        # PR 未知项）。
-        if stored_sha1 and entry_sha1.strip().lower() != stored_sha1:
-            logger.warning(
-                "pan115 目录项 sha1 与可信源不一致 item=%s，不沉淀",
-                item.id)
-        else:
-            _persist_item_sha1(db, item, entry_sha1,
-                               origin="drive_to_115_dir")
-    row = _register_ready_variant(db, job, item, new_fid,
-                                  f"pan115:user-{uid}",
-                                  pickcode=pickcode or None, size=size)
-    return {"job_id": job.id, "outcome": "done", "variant_id": row.id}
 
 
 def _run_cross_115_to_drive(db, job, item):
@@ -8294,23 +6487,13 @@ def _run_cross_115_to_drive(db, job, item):
 def _run_cross_job(db, job, item, drive_api, probe_only=False):
     """跨 provider 任务分发：按 dest_drive_id 定方向（不按 provider）。
 
-    dest pan115: 开头 → Drive→115；dest userdrive: 开头 → 115→Drive；
-    dest quark: 开头 → 任一源→用户夸克盘（二期，执行面在
-    transfer_quark，延迟导入避免模块环）；其它 dest（理论上
-    到不了，_is_cross_job 已过滤）→ unsupported。
-    probe_only 只对 Drive→115 方向有意义（其余方向无指纹认领
-    通道），调用方（run_probe_job_once）已按方向过滤，不会
-    把探针送进其它执行器。
+    现存唯一可执行方向：dest userdrive: 开头 → 115→Drive。
+    pan115:/quark: 落点在一期已由执行入口兜底终态化
+    （provider_removed），到不了分发；其它 dest → unsupported。
     """
     dest = (getattr(job, "dest_drive_id", "") or "").strip()
-    if dest.startswith("pan115:"):
-        return _run_cross_drive_to_115(db, job, item, drive_api,
-                                       probe_only=probe_only)
     if dest.startswith("userdrive:"):
         return _run_cross_115_to_drive(db, job, item)
-    if dest.startswith("quark:"):
-        from backend.emby_server import transfer_quark
-        return transfer_quark.run_cross_to_quark(db, job, item, drive_api)
     return _fail_job(db, job, "unsupported",
                      f"跨任务落盘标识未知：{dest}（不重试）")
 
@@ -8501,7 +6684,14 @@ def run_transfer_job_once(db, job, drive_api):
                              CROSS_PROVIDER_DISABLED_DETAIL)
         return _run_cross_job(db, job, item, drive_api)
     if provider == "pan115":
-        return _run_pan115_job(db, job, item)
+        # 115 用户盘执行器已删（二期）：pan115+user 残行（dest 未标
+        # removed、入口兜底没拦下的）直接终态化，不许再对已下线
+        # 用户盘发任何请求。Drive 两路（user Path A/B 与 source
+        # 同盘）在下方，照常执行——本分支只许拦 pan115，不许无
+        # 条件 return，否则 Drive 路径会被误终态化（#1778 冒烟
+        # 26 红的真回归，test_worker_copy_success 等即栽于此）。
+        return _fail_job(db, job, PROVIDER_REMOVED_KIND,
+                         PROVIDER_REMOVED_DETAIL)
     if owner_scope == "user":
         return _run_drive_user_job(db, job, item, drive_api)
     orig_fid = item.drive_file_id.strip()
@@ -8783,7 +6973,7 @@ def _patrol_loop(stop_event, session_factory, drive_api_factory):
     到期跑全量。巡检逐行打上游活体请求（610 行变体、逐行多次
     调用、单调用超时 20 秒级），2026-11-02 15:37 CST 部署重启
     后主循环卡在巡检里 12 分钟以上认领 0 单（py-spy 两次采样
-    实证主线程停在 _patrol_115_row / _patrol_quark_row 的 httpx
+    实证主线程停在 115/夸克巡检行的 httpx
     调用中），8 单 due 无人认领；同日多次部署重启反复触发。
     与租约回收 2026-10-31 独立化同口径：巡检慢/卡只拖巡检
     自己，绝不占住认领主链路。节奏不变：启动先跑一轮，其后
@@ -8849,31 +7039,8 @@ def _running_counts_by_owner(db, now=None):
     return counts
 
 
-#: quark 落点 per-owner 在飞上限（硬钳 1，2026-11-02 止血）：
-#: 夸克凭据对并发使用最敏感（__puus 轮换互踩是 403 风暴根因），
-#: 同一用户同时只许 1 单夸克落点转存在飞——与执行侧 per-binding
-#: 锁（user_bindings.quark_binding_lock）协同：一把锁串行凭据
-#: 临界区，这道钳子从调度层先把同用户夸克单串行化，点播当场
-#: 转存与工人队列对同一绑定的互斥走锁、不另起第二套。
-QUARK_PER_OWNER_INFLIGHT = 1
-
-
-def _running_quark_counts_by_owner(db, now=None):
-    """当前 running 的 quark 落点单按归属计数（钳 1 的计数口）。"""
-    counts = {}
-    for row in _running_job_rows(db, now=now):
-        if _dest_scheme(getattr(row, "dest_drive_id", "")) == "quark:":
-            key = _owner_key(row)
-            counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
 def _running_cross_count(db, now=None):
-    """当前 running（租约未过期）的跨 provider 单数：跨道上限计数。
-
-    探针道认领的行（claimed_by 带 probe: 前缀）不计：探针只试
-    秒传、不搬字节，不占跨槽（期二口径）；探针行被普通认领接
-    手时 claimed_by 改写为工人标识，自然回到计数内。"""
+    """当前 running（租约未过期）的跨 provider 单数：跨道上限计数。"""
     now = now or datetime.now()
     rows = (db.query(em.TransferJob)
             .filter(em.TransferJob.status == "running")
@@ -8881,8 +7048,7 @@ def _running_cross_count(db, now=None):
                 (em.TransferJob.lease_expires_at.is_(None))
                 | (em.TransferJob.lease_expires_at > now))
             .all())
-    return sum(1 for row in rows if _is_cross_job(row)
-               and not (row.claimed_by or "").startswith(_PROBE_CLAIMED_BY_PREFIX))
+    return sum(1 for row in rows if _is_cross_job(row))
 
 
 def _is_aged_cross(job, now, cross_aging_sec):
@@ -8903,8 +7069,7 @@ def _is_aged_cross(job, now, cross_aging_sec):
 
 def _pick_candidates(candidates, limit, running_counts, cap, now=None,
                      cross_cap=None, cross_running=0, cross_aging_sec=None,
-                     probeable_ids=None, vip_owners=None,
-                     quark_cap=None, quark_running_counts=None):
+                     vip_owners=None):
     """公平挑单：点播组（trigger=playback）在前、后台组在后；
     每组内按用户轮流取
     （每轮每用户先取 1 单，再取第 2 单……），直至 limit 或取尽。
@@ -8928,12 +7093,6 @@ def _pick_candidates(candidates, limit, running_counts, cap, now=None,
     跨 provider 搬字节单另有全局在途上限（cross_cap，None=不限）：
     在途（含本轮已挑）达上限后跨单跳过、同 provider 单照常挑——
     慢单不许占满整条道（2026-10-30 重开硬要求）。
-    探针分层（期一，probeable_ids 非空时生效，None=现行行为逐字
-    不变）：可探针跨单（id 在 probeable_ids 内）在同 owner 组内
-    排到不可探针单之前；不可探针跨单的总占用（cross_running +
-    本轮已挑的不可探针跨单）另受 cross_cap-1 约束——跨槽恒为
-    可探针单保留至少 1 槽（cross_cap≥2 时），免得它被小时级
-    搬运单挤到天荒地老。可探针单自身只受 cross_cap 总帽约束。
     白名单 VIP（2026-11-02 独一无二体验包·转存 VIP，vip_owners 非空
     时生效，None=现行行为逐字不变）：vip_owners 是 owner 键集合
     （名单由 claim_due_jobs 按 codes 口径现算），命中的 owner 在
@@ -8941,11 +7100,6 @@ def _pick_candidates(candidates, limit, running_counts, cap, now=None,
     原公平键（在途数→最老等待→owner 键）排序，per-owner cap 与
     跨槽约束照旧——普通 owner 在同一轮后续轮次仍按原序推进，
     不会被饿死（只是同轮排在 VIP 之后，名额尽时顺延下一轮认领）。
-    quark 落点钳（quark_cap 非 None 时生效，None=现行行为不变）：
-    dest 为 quark: 的单另受 per-owner 在飞上限 quark_cap 约束
-    （计数口径 quark_running_counts＋本轮已挑），同 owner 的其余
-    落点单不受影响——夸克凭据并发敏感，调度层先串行化（见
-    QUARK_PER_OWNER_INFLIGHT）。
     返回挑中的任务行（不改状态，认领在 claim_due_jobs 里做）。"""
     now = now or datetime.now()
     fast = [c for c in candidates
@@ -8956,23 +7110,14 @@ def _pick_candidates(candidates, limit, running_counts, cap, now=None,
     for job in fast:
         if _is_aged_cross(job, now, cross_aging_sec):
             job._claim_aged = True
-    probe_reserve = (1 if probeable_ids and cross_cap is not None
-                     and cross_cap >= 2 else 0)
     picked = []
     used = dict(running_counts)
-    used_quark = dict(quark_running_counts or {})
     picked_cross = 0
-    picked_cross_plain = 0
     for lane in (fast, slow):
-        # 按用户分组，保持每组内 id 顺序；探针分层时同组内
-        # 可探针跨单稳定排到前面（同类内仍 FIFO）。
+        # 按用户分组，保持每组内 id 顺序（同类内仍 FIFO）。
         by_owner = {}
         for job in lane:
             by_owner.setdefault(_owner_key(job), []).append(job)
-        if probeable_ids:
-            for group in by_owner.values():
-                group.sort(
-                    key=lambda j: 0 if id(j) in probeable_ids else 1)
         # 每 owner 名下最老候选的 created_at（等待键），候选集在本
         # 次挑单内固定，先算好；created_at 缺失按最早处理。
         oldest_at = {
@@ -9000,27 +7145,12 @@ def _pick_candidates(candidates, limit, running_counts, cap, now=None,
                 if used.get(key, 0) >= cap:
                     continue
                 job = group[round_no]
-                is_quark_job = (
-                    _dest_scheme(getattr(job, "dest_drive_id", ""))
-                    == "quark:")
-                if (quark_cap is not None and is_quark_job
-                        and used_quark.get(key, 0) >= quark_cap):
-                    continue  # quark 落点 per-owner 钳（见 QUARK_PER_OWNER_INFLIGHT）
                 if cross_cap is not None and _is_cross_job(job):
                     if cross_running + picked_cross >= cross_cap:
                         continue
-                    if (probe_reserve
-                            and id(job) not in probeable_ids
-                            and cross_running + picked_cross_plain
-                            >= cross_cap - probe_reserve):
-                        continue  # 预留槽只留给可探针单
                 picked.append(job)
                 if _is_cross_job(job):
                     picked_cross += 1
-                    if not probeable_ids or id(job) not in probeable_ids:
-                        picked_cross_plain += 1
-                if is_quark_job:
-                    used_quark[key] = used_quark.get(key, 0) + 1
                 used[key] = used.get(key, 0) + 1
                 progressed = True
             if not progressed:
@@ -9186,18 +7316,6 @@ def claim_due_jobs(db, now=None, limit=None, worker_id=None):
         return []
     cap = per_owner_inflight(db)
     running_counts = _running_counts_by_owner(db, now=now)
-    # 期一探针分层：开关开时先算 due 里可探针跨单的 id 集（判定
-    # 只读条目行/清单行，见 _job_probeable_sha1），交给挑单层做
-    # 优先＋预留；关 = probeable_ids 恒 None，排序逐字不变。
-    probeable_ids = None
-    if probe_priority_enabled(db):
-        probeable_ids = set()
-        for _job in due:
-            if _is_cross_job(_job) and _job_probeable_sha1(db, _job):
-                probeable_ids.add(id(_job))
-                _job._claim_probeable = True
-        if not probeable_ids:
-            probeable_ids = None
     # 白名单（永久）账号转存 VIP：名单只复用 codes 口径（批量版
     # whitelist_account_ids），现算不存第二份状态；名单读取失败
     # 不挡认领——本轮回落普通公平序（fail-open 到现行行为）。
@@ -9217,10 +7335,7 @@ def claim_due_jobs(db, now=None, limit=None, worker_id=None):
         cross_cap=cross_lane_concurrency(db),
         cross_running=_running_cross_count(db, now=now),
         cross_aging_sec=cross_aging_sec(db),
-        probeable_ids=probeable_ids,
-        vip_owners=vip_owners,
-        quark_cap=QUARK_PER_OWNER_INFLIGHT,
-        quark_running_counts=_running_quark_counts_by_owner(db, now=now))
+        vip_owners=vip_owners)
     if not picked:
         return []
     lease_until = now + timedelta(seconds=worker_lease_sec())
@@ -9274,238 +7389,6 @@ def claim_due_jobs(db, now=None, limit=None, worker_id=None):
     db.commit()
     _log_claim_pick(worker_id, picked, claimed, running_counts, now)
     return claimed
-
-
-# ---------------------------------------------------------------------------
-# 探针道认领/执行（期二）：只试秒传的轻量道，不占跨槽
-# ---------------------------------------------------------------------------
-
-#: 探针道认领标记：claimed_by 前缀。_running_cross_count 据它
-#: 把探针行排除在跨槽计数外；租约回收/心跳不读它，口径不变。
-_PROBE_CLAIMED_BY_PREFIX = "probe:"
-
-
-def claim_probe_jobs(db, now=None, limit=None, worker_id=None):
-    """探针道认领：只挑可探针的跨 Drive→115 pending 单。
-
-    与 claim_due_jobs 的关系：同一原子认领原语（条件 UPDATE、
-    rowcount 定胜负——与 claim_due_jobs 的等价路径同款）、同一
-    类别级熔断过滤与 no_binding 认领前复核；不同在于不查跨槽
-    占用（探针不占跨槽）、不套 per-owner 在飞上限与公平轮转
-    （探针是秒级小请求，候选按 id 序取到 limit 为止），认领行
-    打 probe: 标记并落 claimed_at/last_probe_at。
-    探针道或跨 provider 任一总开关关时恒回 []。"""
-    if not probe_enabled(db) or not cross_provider_enabled(db):
-        return []
-    from sqlalchemy import text
-    now = now or datetime.now()
-    limit = limit if limit is not None else probe_lane_concurrency(db)
-    worker_id = worker_id or (_PROBE_CLAIMED_BY_PREFIX + _WORKER_ID)
-    reclaim_expired_leases(db, now=now)
-    due = (db.query(em.TransferJob)
-           .filter(em.TransferJob.status == "pending",
-                   (em.TransferJob.next_retry_at.is_(None))
-                   | (em.TransferJob.next_retry_at <= now))
-           .order_by(em.TransferJob.id)
-           .limit(200)
-           .all())
-    if not due:
-        return []
-    paused_rules = transfer_paused_categories(db)
-    if paused_rules:
-        due = [j for j in due if not job_category_paused(j, paused_rules)]
-        if not due:
-            return []
-    due = _fail_user_jobs_without_binding(db, due)
-    picked = []
-    for job in due:
-        if len(picked) >= limit:
-            break
-        # 剧集预热探针单不走探针清扫：它由预热触发线程 inline 探完，
-        # 清扫再认领会与 inline 探针双跑（两次 initupload＋重复登记）。
-        if (job.trigger or "") == TRIGGER_SERIES_PREHEAT:
-            continue
-        if _job_is_probeable(db, job, now=now):
-            picked.append(job)
-    if not picked:
-        return []
-    lease_until = now + timedelta(seconds=worker_lease_sec())
-    claimed = []
-    for job in picked:
-        result = db.execute(
-            text("UPDATE emby_transfer_jobs SET status='running', "
-                 "lease_expires_at=:lease, claimed_by=:worker, "
-                 "claimed_at=:now, last_probe_at=:now "
-                 "WHERE id=:jid AND status='pending'"),
-            {"lease": lease_until, "worker": worker_id, "jid": job.id,
-             "now": now})
-        if result.rowcount == 1:
-            claimed.append(job.id)
-    db.commit()
-    if claimed:
-        logger.info("转存探针认领 probe_pick worker=%s jobs=%s",
-                    worker_id, claimed)
-    return claimed
-
-
-def claim_probe_job(db, job_id, worker_id=None, now=None):
-    """单单探针认领（点播当场探针用）：与 claim_probe_jobs 同
-    口径的单行版——类别级熔断命中直接不认领；条件 UPDATE 原子
-    认领，rowcount==1 才算领到（已被领走/已终态/退避期回 0）。"""
-    from sqlalchemy import text
-    now = now or datetime.now()
-    worker_id = worker_id or (_PROBE_CLAIMED_BY_PREFIX
-                              + _INLINE_WORKER_ID)
-    _job_row = (db.query(em.TransferJob)
-                .filter(em.TransferJob.id == job_id).first())
-    if _job_row is not None and job_category_paused(
-            _job_row, transfer_paused_categories(db)):
-        return False
-    lease_until = now + timedelta(seconds=worker_lease_sec())
-    result = db.execute(
-        text("UPDATE emby_transfer_jobs SET status='running', "
-             "lease_expires_at=:lease, claimed_by=:worker, "
-             "claimed_at=:now, last_probe_at=:now "
-             "WHERE id=:jid AND status='pending' "
-             "AND (next_retry_at IS NULL OR next_retry_at <= :now)"),
-        {"lease": lease_until, "worker": worker_id, "jid": job_id,
-         "now": now})
-    db.commit()
-    return result.rowcount == 1
-
-
-def _release_probe_job(db, job, now=None):
-    """探针未命中/失败释放：回 pending 等普通认领接手。
-
-    红线：不烧 attempts（本函数绝不写 attempts）、不写
-    error_kind/error_detail、不置 failed；next_retry_at 清空，
-    普通认领零延迟接手（节流只管探针道自身，靠 last_probe_at）。"""
-    now = now or datetime.now()
-    job.status = "pending"
-    job.last_probe_at = now
-    job.next_retry_at = None
-    job.lease_expires_at = None
-    job.claimed_by = None
-    db.commit()
-
-
-def run_probe_job_once(db, job, drive_api):
-    """探针执行入口：只试秒传，返回 {"job_id", "outcome"}。
-
-    outcome：done（命中且现行收尾完成）/ probe_miss（未命中或
-    探针失败，调用方释放回 pending）/ failed（执行器既有终态
-    口径——no_binding 等结构性事实，与普通执行一致，不在探
-    针里改判）。不走 run_transfer_job_once：它在分发前
-    attempts+=1 且带调度合并让路，探针一概不沾；直接调跨
-    执行器的 probe_only 模式。条目缺失/无 fid 不是探针能判
-    的终态，按 probe_miss 释放、留给普通执行路落 item_gone。"""
-    item = None
-    if job.item_id is not None:
-        item = (db.query(em.MediaItem)
-                .filter(em.MediaItem.id == job.item_id,
-                        em.MediaItem.deleted_at.is_(None))
-                .first())
-    if item is None or not (getattr(item, "drive_file_id", "")
-                            or "").strip():
-        logger.warning("transfer_probe outcome=error job=%s "
-                       "reason=item_missing（释放回队列）", job.id)
-        return {"job_id": job.id, "outcome": "probe_miss"}
-    if not _is_cross_job(job) or not (
-            getattr(job, "dest_drive_id", "") or "").startswith("pan115:"):
-        logger.warning("transfer_probe outcome=error job=%s "
-                       "reason=not_probe_lane（释放回队列）", job.id)
-        return {"job_id": job.id, "outcome": "probe_miss"}
-    return _run_cross_drive_to_115(db, job, item, drive_api,
-                                   probe_only=True)
-
-
-def _execute_probe_job(job_id, session_factory, drive_api_factory):
-    """执行一单已探针认领的任务（独立会话）：命中 done；未命中
-    释放回 pending；执行器终态（failed）只清租约。任何异常都
-    释放回 pending 并响亮记日志——绝不让单子卡在探针态（租约
-    回收只是最后兜底）。返回 outcome 字符串。探针是秒级动作，
-    不起心跳线程（租约 300 秒远大于探针时长）。"""
-    db = session_factory()
-    try:
-        job = db.query(em.TransferJob).filter(
-            em.TransferJob.id == job_id).first()
-        if job is None:
-            return "missing"
-        try:
-            result = run_probe_job_once(db, job, drive_api_factory())
-        except Exception:
-            logger.warning("转存探针执行异常 job=%s（释放回队列）",
-                           job_id, exc_info=True)
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            fresh = db.query(em.TransferJob).filter(
-                em.TransferJob.id == job_id).first()
-            if fresh is not None and fresh.status == "running":
-                _release_probe_job(db, fresh)
-            return "probe_miss"
-        outcome = result.get("outcome", "")
-        fresh = db.query(em.TransferJob).filter(
-            em.TransferJob.id == job_id).first()
-        if fresh is not None:
-            if outcome == "probe_miss" and fresh.status == "running":
-                _release_probe_job(db, fresh)
-            else:
-                # done/failed：执行器已落终态，这里只清租约
-                # （与 _execute_claimed_job 同口径）。
-                fresh.lease_expires_at = None
-                fresh.claimed_by = None
-                db.commit()
-        if outcome == "done":
-            # 与普通执行同口径：本人副本就绪即刷新交付计划
-            # （fail-open，见 _execute_claimed_job 同段）。
-            try:
-                from backend.emby_server import delivery_plan as _dp
-                _dp.refresh_plan_for_job(db, job)
-            except Exception:  # noqa: BLE001 — 刷新失败不影响结果
-                logger.warning("交付计划刷新失败 job=%s", job_id,
-                               exc_info=True)
-        return outcome
-    finally:
-        db.close()
-
-
-def process_probe_round(session_factory, drive_api_factory, now=None,
-                        limit=None):
-    """探针清扫一轮：认领可探针单并逐个只试秒传。
-
-    认领批量 = transfer_probe_lane_concurrency（默认 4），池宽
-    同值并发执行（独立会话，与工人执行同款线程安全口径）；
-    不走 process_claimed_round 的滑动窗口补认领——探针不占跨
-    槽、不与搬字节轮次互相等待。守护主循环每轮先跑本清扫再
-    跑普通认领轮。返回统计 dict。"""
-    now = now or datetime.now()
-    db = session_factory()
-    try:
-        claimed = claim_probe_jobs(db, now=now, limit=limit)
-        lane = probe_lane_concurrency(db)
-    finally:
-        db.close()
-    if not claimed:
-        return {"processed": 0, "hit": 0, "miss": 0, "claimed": []}
-    outcomes = []
-    if len(claimed) == 1 or lane <= 1:
-        for job_id in claimed:
-            outcomes.append(_execute_probe_job(
-                job_id, session_factory, drive_api_factory))
-    else:
-        with ThreadPoolExecutor(max_workers=min(lane, len(claimed)),
-                                thread_name_prefix="transfer-probe") as pool:
-            futures = [pool.submit(_execute_probe_job, job_id,
-                                   session_factory, drive_api_factory)
-                       for job_id in claimed]
-            for fut in futures:
-                outcomes.append(fut.result())
-    return {"processed": len(outcomes),
-            "hit": outcomes.count("done"),
-            "miss": outcomes.count("probe_miss"),
-            "claimed": claimed}
 
 
 def queue_stats(db, now=None):
@@ -9816,14 +7699,6 @@ def patrol_once(db, drive_api_factory, now=None):
             row.status = "orphan"
             stats["orphaned_items"] += 1
             continue
-        if (row.variant_drive_id or "").startswith("pan115:"):
-            # 115 副本不用 Drive get_file 验活（盘不同、凭据不同）。
-            _patrol_115_row(db, row, stats, now)
-            continue
-        if (row.variant_drive_id or "").startswith("quark:"):
-            # 夸克副本同样不用 Drive get_file 验活（盘不同、凭据不同）。
-            _patrol_quark_row(db, row, stats, now)
-            continue
         try:
             client.get_file(row.variant_drive_id or "", row.variant_file_id)
         except (_NotFound, _Forbidden):
@@ -9933,16 +7808,6 @@ def _daemon_main_loop(stop, state, session_factory, drive_api_factory):
     while not stop.is_set():
         try:
             if master_enabled():
-                # 探针道清扫（期二）：每轮先跑——可探针单不经
-                # 跨槽认领，命中即 done、未命中释放回队列由下方
-                # 普通认领轮接手；清扫异常只跳过本轮探针，绝不
-                # 炸主循环（普通认领轮照常）。
-                try:
-                    process_probe_round(session_factory,
-                                        drive_api_factory)
-                except Exception:
-                    logger.warning("转存探针清扫异常，已跳过本轮",
-                                   exc_info=True)
                 stats = process_claimed_round(
                     session_factory, drive_api_factory)
                 if stats["claimed"]:
@@ -10003,7 +7868,7 @@ __all__ = [
     "master_enabled", "auto_enabled", "transfer_dir_name",
     "QuotaPageError", "is_quota_page_bytes", "is_transfer_dir_rel",
     "TransferError",
-    "has_active_drive_binding", "has_active_pan115_binding",
+    "has_active_drive_binding",
     "get_ready_variant_for_user",
     "resolve_play_file_id", "note_quota_signal", "create_manual_job",
     "create_user_job", "ensure_user_copy_gate",
@@ -10014,10 +7879,6 @@ __all__ = [
     "worker_concurrency", "worker_per_user_max", "worker_lease_sec",
     "lane_concurrency", "per_owner_inflight",
     "cross_provider_enabled", "cross_lane_concurrency",
-    "probe_enabled", "probe_priority_enabled", "probe_lane_concurrency",
-    "probe_recheck_sec", "play_inline_probe_budget_sec",
-    "claim_probe_jobs", "claim_probe_job", "run_probe_job_once",
-    "process_probe_round", "claim_and_probe_inline",
     "series_preheat_enabled", "series_preheat_daily_max",
     "series_preheat_next_count", "maybe_series_preheat_transfer",
     "transfer_config_payload", "write_transfer_config",

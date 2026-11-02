@@ -657,10 +657,6 @@ def items_dedup_cache_update_config(
 class TransferConfigRequest(BaseModel):
     cross_provider_transfer_enabled: bool = True
     transfer_cross_lane_concurrency: int = 2
-    # 探针道单轮认领上限（2026-11-01 期二）：默认 4，范围钳在
-    # config_schema 的 transfer 家族（1~16）；探针只试秒传、
-    # 不占跨 provider 在途上限。
-    transfer_probe_lane_concurrency: int = 4
     # 剧集预热（2026-11-01 期四）：总开关默认开；搬字节预热独立
     # 日帽默认 2（与 prefetch 帽分开计）；候选集数默认 3。范围钳在
     # config_schema 的 transfer 家族（日帽 1~16、集数 1~10）。
@@ -670,16 +666,8 @@ class TransferConfigRequest(BaseModel):
     transfer_cross_aging_sec: int = 1800
     transfer_fast_lane_concurrency: int = 8
     transfer_per_owner_inflight: int = 2
-    pan115_rapid_upload_enabled: bool = True
-    pan115_multipart_upload_enabled: bool = True
     transfer_rebind_waiver_window_days: int = 7
     transfer_rebind_waiver_max_uses: int = 1
-    # 形态 B 云下载（2026-10-30 立项）：开关默认关（用户亲批），
-    # TTL 默认 43200（12 小时，转存专用签名口径），轮询超时默认
-    # 3600；范围钳在 config_schema 的 transfer 家族里校验。
-    transfer_cross_cloudpull_enabled: bool = False
-    transfer_cross_cloudpull_ttl_sec: int = 43200
-    transfer_cross_cloudpull_timeout_sec: int = 3600
     # 换代线地基记账（2026-11-01）：交付状态落盘＋块哈希清单，
     # 纯记账 fail-open，默认开；校验在 config_schema 的
     # transfer 家族里。
@@ -688,10 +676,6 @@ class TransferConfigRequest(BaseModel):
     # 续传恢复＋清单 sha1 采信＋同内容调度合并；须与记账开关
     # 联动才生效，默认开。
     transfer_manifest_takeover_enabled: bool = True
-    # 夸克二期（转存 + 点播中继）：默认开（站内规矩）；关时只绑
-    # 夸克的用户点播被门禁明示挡下、不回落共享。校验在
-    # config_schema 的 transfer 家族里。
-    quark_play_enabled: bool = True
     # 类别级熔断（2026-11-01 预见层 v2）：暂停规则 JSON 数组文本
     # [{provider, error_kind}]，error_kind="*" 为该 provider 全部
     # 类别；默认 "[]" = 不暂停、现行行为不变。结构校验在
@@ -769,8 +753,6 @@ def transfer_update_config(
                 request.cross_provider_transfer_enabled),
             transfer_cross_lane_concurrency=(
                 request.transfer_cross_lane_concurrency),
-            transfer_probe_lane_concurrency=(
-                request.transfer_probe_lane_concurrency),
             transfer_series_preheat_enabled=(
                 request.transfer_series_preheat_enabled),
             transfer_series_preheat_daily_max=(
@@ -782,25 +764,14 @@ def transfer_update_config(
             transfer_fast_lane_concurrency=(
                 request.transfer_fast_lane_concurrency),
             transfer_per_owner_inflight=request.transfer_per_owner_inflight,
-            pan115_rapid_upload_enabled=(
-                request.pan115_rapid_upload_enabled),
-            pan115_multipart_upload_enabled=(
-                request.pan115_multipart_upload_enabled),
             transfer_rebind_waiver_window_days=(
                 request.transfer_rebind_waiver_window_days),
             transfer_rebind_waiver_max_uses=(
                 request.transfer_rebind_waiver_max_uses),
-            transfer_cross_cloudpull_enabled=(
-                request.transfer_cross_cloudpull_enabled),
-            transfer_cross_cloudpull_ttl_sec=(
-                request.transfer_cross_cloudpull_ttl_sec),
-            transfer_cross_cloudpull_timeout_sec=(
-                request.transfer_cross_cloudpull_timeout_sec),
             transfer_manifest_accounting_enabled=(
                 request.transfer_manifest_accounting_enabled),
             transfer_manifest_takeover_enabled=(
                 request.transfer_manifest_takeover_enabled),
-            quark_play_enabled=request.quark_play_enabled,
             transfer_paused_categories=request.transfer_paused_categories,
         )
     except (ValueError, TypeError) as exc:
@@ -810,8 +781,6 @@ def transfer_update_config(
             request.cross_provider_transfer_enabled,
             "transfer_cross_lane_concurrency":
             request.transfer_cross_lane_concurrency,
-            "transfer_probe_lane_concurrency":
-            request.transfer_probe_lane_concurrency,
             "transfer_series_preheat_enabled":
             request.transfer_series_preheat_enabled,
             "transfer_series_preheat_daily_max":
@@ -824,21 +793,10 @@ def transfer_update_config(
             request.transfer_fast_lane_concurrency,
             "transfer_per_owner_inflight":
             request.transfer_per_owner_inflight,
-            "pan115_rapid_upload_enabled":
-            request.pan115_rapid_upload_enabled,
-            "pan115_multipart_upload_enabled":
-            request.pan115_multipart_upload_enabled,
             "transfer_rebind_waiver_window_days":
             request.transfer_rebind_waiver_window_days,
             "transfer_rebind_waiver_max_uses":
             request.transfer_rebind_waiver_max_uses,
-            "transfer_cross_cloudpull_enabled":
-            request.transfer_cross_cloudpull_enabled,
-            "transfer_cross_cloudpull_ttl_sec":
-            request.transfer_cross_cloudpull_ttl_sec,
-            "transfer_cross_cloudpull_timeout_sec":
-            request.transfer_cross_cloudpull_timeout_sec,
-            "quark_play_enabled": request.quark_play_enabled,
             "transfer_paused_categories":
             request.transfer_paused_categories,
             "transfer_sediment_enabled":

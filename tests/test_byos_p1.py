@@ -1,15 +1,15 @@
-"""BYOS P1（绑定管理 + 115 直链播放）。
+"""BYOS P1 绑定管理（2026-11-02 二期删除后的存续口径）。
 
-钉死的范围（多一件不做）：
-- 新表 user_storage_bindings（label 唯一、provider/status 约束）+
-  凭据只存 mount_credentials 行引用，不另起第三套秘密存储；
-- 建绑即验活（115 check + 列根目录）、解绑删双行、失效三档；
-- 115 直链变体：清单追加 + 取流 302 + 凭据绝不跨用户（不走共享
-  pickcode 缓存、不读写共享目录缓存）；
-- 无绑定用户与共享库行为不变（清单不含 byos115_direct）。
-
-不做：Drive OAuth（P2）、按绑定扫描（P3）、路径授权、前端。
-115 网络全部用桩替身，不碰真实 115。
+原 P1 范围里的 115 用户绑盘线（建绑验活/直链变体/凭据隔离）已随
+二期整体删除，本文件只保留仍然成立的钉子：
+- user_storage_bindings / mount_credentials 的模型约束（provider
+  枚举含存量 pan115/quark 值，存量数据不删、CHECK 不收窄）；
+- 已下线 provider（pan115/quark）建绑一律拒绝（unsupported +
+  下线文案、不落行）；Drive 明文凭据仍拒绝、指引 OAuth 口；
+- 解绑删双行（外键强制口径）；
+- 管理员侧 Pan115Mount 的 cookie_override 实例仍不读写共享目录
+  缓存（共享挂载保留能力）；
+- 变体解析器对显式请求变体的通用口径（保留逻辑）。
 """
 
 import pytest
@@ -22,9 +22,7 @@ from backend import models as base_models
 from backend.emby_server import models as em
 from backend.emby_server import mounts as mount_lib
 from backend.emby_server import play_variants as pv
-from backend.emby_server import transfer115
 from backend.emby_server import user_bindings as ub
-from backend.emby_server.upstream_sources import unseal_secret
 
 
 @pytest.fixture()
@@ -43,69 +41,11 @@ def db(db_factory):
     session.close()
 
 
-class _Stub115Client:
-    """115 客户端桩：行为由构造参数定，调用次数可数。"""
-
-    calls = {"check": 0, "list_dir": 0, "download_url": 0}
-
-    def __init__(self, cookie, ua=""):
-        self.cookie = cookie
-        self.behavior = _Stub115Client.behavior
-
-    def check(self):
-        _Stub115Client.calls["check"] += 1
-        if self.behavior == "auth_error":
-            raise transfer115.Pan115AuthError("Cookie 已失效")
-        if self.behavior == "throttled":
-            raise transfer115.Pan115Error("115 返回 HTTP 429")
-        if self.behavior == "transient":
-            raise transfer115.Pan115Error("115 返回 HTTP 500")
-        return {"ok": True, "uid": "u1", "vip": False}
-
-    def list_dir(self, cid="0", limit=200):
-        _Stub115Client.calls["list_dir"] += 1
-        if self.behavior == "auth_error":
-            raise transfer115.Pan115AuthError("Cookie 已失效")
-        return [{"name": "f.mkv", "pc": "PC1", "is_dir": False}]
-
-    def download_url(self, pickcode, **kwargs):
-        _Stub115Client.calls["download_url"] += 1
-        if self.behavior == "auth_error":
-            raise transfer115.Pan115AuthError("Cookie 已失效")
-        return f"https://down.115.com/{pickcode}"
-
-
-_Stub115Client.behavior = "ok"
-
-
-@pytest.fixture(autouse=True)
-def _stub_client(monkeypatch):
-    _Stub115Client.behavior = "ok"
-    _Stub115Client.calls = {"check": 0, "list_dir": 0, "download_url": 0}
-    monkeypatch.setattr(ub.transfer115, "Pan115Client", _Stub115Client)
-    yield
-
-
 def _mount115(db):
     m = em.StorageMount(name="m115", mount_type="115", path="115:/")
     db.add(m)
     db.commit()
     return m
-
-
-def _item(db, mount, rel="/f.mkv"):
-    lib = em.Library(guid="lib1", name="lib1")
-    db.add(lib)
-    db.commit()
-    it = em.MediaItem(guid="g1", library_id=lib.id, item_type="movie",
-                      name="片", file_path=f"mount://{mount.id}{rel}")
-    db.add(it)
-    db.commit()
-    return it
-
-
-def _bind(db, user_id=7, label="主号"):
-    return ub.create_binding(db, user_id, "pan115", label, "COOKIE-XYZ")
 
 
 # ---------- 模型约束 ----------
@@ -149,9 +89,15 @@ def test_mount_attached_credential_unique_still_enforced(db):
 
 
 
-def test_create_binding_empty_credential_rejected(db):
-    with pytest.raises(ub.BindingError):
-        ub.create_binding(db, 7, "pan115", "空", "   ")
+def test_create_binding_removed_provider_rejected(db):
+    # 二期删除口径：pan115/quark 建绑在任何凭据处理之前拒绝
+    # （unsupported + 下线文案、不落行、不验活）。原「空凭据拒绝」
+    # 用例随 Cookie 型建绑口一起消失，拒绝点前移到 provider 门。
+    for provider in ("pan115", "quark"):
+        with pytest.raises(ub.BindingError) as excinfo:
+            ub.create_binding(db, 7, provider, "旧盘", "SOME-CREDENTIAL")
+        assert excinfo.value.kind == "unsupported"
+        assert excinfo.value.message == ub.REMOVED_PROVIDER_MESSAGE
     assert db.query(em.UserStorageBinding).count() == 0
 
 

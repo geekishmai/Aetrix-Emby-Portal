@@ -205,11 +205,7 @@ def post_want(
             library_item_id=row.id,
             message="该片源所在网盘（115）已下线，想看转存暂不支持。",
         )
-    has_binding = (
-        tv.has_active_drive_binding(db, user.id)
-        if provider == "drive"
-        else tv.has_active_pan115_binding(db, user.id)
-    )
+    has_binding = tv.has_active_drive_binding(db, user.id)
     if not has_binding:
         return WantRecord(
             tmdb_id=key,

@@ -98,83 +98,7 @@ def _cross_job(db, item_id, user_id=7, dest=None, drive_id="shared1"):
     return row
 
 
-class _FakeSA:
-    def __init__(self, payload=_PAYLOAD):
-        self.payload = payload
-        self.download_calls = 0
 
-    def get_file(self, drive_id, fid):
-        return {"id": fid, "size": len(self.payload)}
-
-    def download_range(self, drive_id, fid, start, end):
-        self.download_calls += 1
-        return self.payload[start:end + 1]
-
-
-class _FakeUser115:
-    def __init__(self, multipart_mode="ok"):
-        self.dirs = {
-            "0": [{"name": "aetrix-transfer", "is_dir": True, "cid": "900"}],
-            "900": [],
-        }
-        self.multipart_mode = multipart_mode
-        self.multipart_calls = []
-        self.rapid_calls = []
-
-    def list_dir(self, cid="0", limit=200):
-        return list(self.dirs.get(str(cid), []))
-
-    def mkdir(self, parent_cid, name):
-        self.dirs.setdefault("0", []).append(
-            {"name": name, "is_dir": True, "cid": "900"})
-        return {}
-
-    def _place(self, filename, fid, pickcode, size, sha1):
-        self.dirs["900"] = [{"name": filename, "is_dir": False, "fid": fid,
-                             "pickcode": pickcode, "size": size,
-                             "sha1": sha1}]
-
-    def rapid_upload(self, filename, filesize, file_sha1, pid,
-                     range_reader=None):
-        self.rapid_calls.append(file_sha1)
-        return {"outcome": "miss", "fid": "", "pickcode": "", "raw": {}}
-
-    def simple_upload(self, fileobj, filename, pid):
-        data = fileobj.read()
-        sha1 = hashlib.sha1(data).hexdigest()
-        self._place(filename, "upfid", "pcup", len(data), sha1)
-        return {"fid": "upfid", "pickcode": "pcup", "sha1": sha1, "raw": {}}
-
-    def multipart_upload(self, fileobj, filename, filesize, file_sha1, pid,
-                         range_reader=None, resume_session=None,
-                         on_progress=None):
-        self.multipart_calls.append(resume_session)
-        if self.multipart_mode == "fail_once" and len(self.multipart_calls) == 1:
-            if on_progress is not None:
-                on_progress({"event": "init",
-                             "session": {"bucket": "bkt", "object_key": "obj",
-                                         "upload_id": "UP-1",
-                                         "callback": {"callback": "Yg==",
-                                                      "callback_var": "dmI="},
-                                         "parts": []}})
-                on_progress({"event": "part", "number": 1, "etag": "E1"})
-            raise transfer115.Pan115Error("模拟分片上传中途失败")
-        self._place(filename, "mpfid", "pcmp", filesize, file_sha1)
-        return {"outcome": "uploaded", "fid": "mpfid", "pickcode": "pcmp",
-                "sha1": file_sha1, "raw": {}}
-
-
-@pytest.fixture()
-def stage_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRANSFER_STAGE_DIR", str(tmp_path / "stage"))
-    monkeypatch.setattr(tv, "_CROSS_SEGMENT", 512)
-    return tmp_path / "stage"
-
-
-def _patch_cross(monkeypatch, fake115):
-    monkeypatch.setattr(tv, "_make_pan115_client", lambda ck: fake115)
-    monkeypatch.setattr(ub, "binding_115_cookie",
-                        lambda db_arg, user_id, binding_id: "COOKIE")
 
 
 # ---------- 清单可信 sha1 ----------
@@ -206,45 +130,7 @@ def test_manifest_trusted_sha1_partial_manifest_rejected(db):
 
 
 
-# ---------- 续传恢复优先级：落盘行 > sidecar（接管开时） ----------
 
-def _run_fail_once(db, monkeypatch, stage_env):
-    monkeypatch.setattr(tv, "_115_SIMPLE_UPLOAD_LIMIT", 1024)
-    item = _item(db)
-    _binding(db, 7)
-    fake115 = _FakeUser115(multipart_mode="fail_once")
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    job = _cross_job(db, item.id, user_id=7)
-    res1 = tv.run_transfer_job_once(db, job, sa)
-    assert res1["outcome"] == "retried"
-    return item, job, fake115, sa
-
-
-def _rewrite_db_session_upload_id(db, job_id, upload_id):
-    row = db.query(em.TransferDelivery).filter_by(job_id=job_id).first()
-    assert row is not None
-    data = json.loads(row.session)
-    data["upload_id"] = upload_id
-    row.session = json.dumps(data)
-    db.commit()
-
-
-
-
-
-
-# ---------- 调度合并 ----------
-
-def _leader(db, item_id, user_id=7, lease_alive=True):
-    job = _cross_job(db, item_id, user_id=user_id)
-    job.status = "running"
-    job.attempts = 1
-    job.lease_expires_at = (datetime.now() + timedelta(seconds=600)
-                            if lease_alive
-                            else datetime.now() - timedelta(seconds=5))
-    db.commit()
-    return job
 
 
 

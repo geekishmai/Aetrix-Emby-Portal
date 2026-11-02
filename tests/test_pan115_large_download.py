@@ -3,15 +3,18 @@
 
 根因：webapi ``/files/download`` 对大文件回 state=False、msg_code=50028
 「文件大小超出限制，请使用115电脑端下载」，转存副本播不了、巡检还把
-副本记 strike 标 stale。本文件锁三件事：
+副本记 strike 标 stale。本文件锁两件事（transfer115 客户端本身保留，
+供管理员侧 115 共享挂载与 115→Drive 方向使用）：
 
 1. 50028 必须被分类成通道限制错误（Pan115ChannelLimitError），不是
    普通业务错误；
 2. download_url 在 50028 时回落 app chrome 加密通道取到地址；
    播放器场景（带 ua）走 app 通道优先（直链绑 UA，网页端用播放器
-   UA 签的地址拉流会被 CDN 拒，生产探针实证）；
-3. 巡检对通道限制不记 strike；播放侧 resolve 对通道限制不落绑定
-   失败态、kind=size_limit。
+   UA 签的地址拉流会被 CDN 拒，生产探针实证）。
+
+原第 3 件（用户 115 副本巡检对通道限制不记 strike）随用户绑盘线
+二期删除：巡检不再处理 pan115: 落点行（整行跳过口径由
+test_pan115_stale_rescue.py 的新用例钉住），本文件不再保留该用例。
 
 全部离线：115 API 一律用 _http_json 桩 / 客户端桩。
 """
@@ -29,9 +32,7 @@ from sqlalchemy.pool import StaticPool
 
 from backend import models as base_models
 from backend.emby_server import models as em
-from backend.emby_server import transfer_variant as tv
 from backend.emby_server import transfer115
-from backend.emby_server import user_bindings as ub
 from backend.integrations import store
 from backend.emby_server import stream_limits as sl
 
@@ -165,92 +166,6 @@ def test_download_url_both_channels_limited_raises_channel_limit(monkeypatch):
     client = transfer115.Pan115Client(AUTH)
     with pytest.raises(transfer115.Pan115ChannelLimitError):
         client.download_url("PC-BIG")
-
-
-# ---------- 巡检不记 strike ----------
-
-class _LimitFake115:
-    def __init__(self, exc):
-        self._exc = exc
-
-    def download_url(self, pickcode, **kw):
-        raise self._exc
-
-
-def _item115(db):
-    row = em.MediaItem(guid="tv115-large-1", library_id=1, item_type="movie",
-                       name="大片", drive_file_id="srcfid",
-                       file_path="mount://9/电影/a.mkv", size=1000)
-    db.add(row)
-    db.commit()
-    return row
-
-
-def _binding115(db, user_id):
-    cred = em.MountCredential(scope="user", owner_user_id=user_id,
-                              status="active")
-    db.add(cred)
-    db.commit()
-    row = em.UserStorageBinding(user_id=user_id, provider="pan115",
-                                account_label="test115",
-                                credential_id=cred.id, status="active")
-    db.add(row)
-    db.commit()
-    return row
-
-
-def _ready_115_row(db, item_id):
-    row = em.TransferVariant(item_id=item_id, source_file_id="srcfid",
-                             variant_file_id="newfid",
-                             variant_drive_id="pan115:user-7",
-                             owner_scope="user", owner_ref="7",
-                             status="ready", pickcode="PC-BIG")
-    db.add(row)
-    db.commit()
-    return row
-
-
-def test_patrol_channel_limit_no_strike(db, monkeypatch):
-    item = _item115(db)
-    _binding115(db, 7)
-    row = _ready_115_row(db, item.id)
-    fake = _LimitFake115(
-        transfer115.Pan115ChannelLimitError("文件大小超出限制"))
-    monkeypatch.setattr(tv, "_make_pan115_client", lambda auth: fake)
-    monkeypatch.setattr(ub, "binding_115_cookie",
-                        lambda db_arg, user_id, binding_id: AUTH)
-    tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert row.status == "ready" and row.stale_count == 0
-    tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert row.status == "ready" and row.stale_count == 0
-
-
-# ---------- 播放侧 resolve ----------
-
-class _ResolveFake115:
-    behavior = "ok"
-    seen = {}
-
-    def __init__(self, auth, ua=""):
-        type(self).seen = {"ua": ua}
-
-    def download_url(self, pickcode, **kw):
-        type(self).seen["app_first"] = kw.get("app_first")
-        if type(self).behavior == "limit":
-            raise transfer115.Pan115ChannelLimitError("文件大小超出限制")
-        return APP_URL
-
-
-def _patch_resolve(monkeypatch, behavior):
-    _ResolveFake115.behavior = behavior
-    monkeypatch.setattr(ub, "unseal_secret", lambda sealed: AUTH)
-    monkeypatch.setattr(transfer115, "Pan115Client", _ResolveFake115)
-
-
-
-
 
 
 def test_download_url_app_first_app_error_no_web_fallback(monkeypatch):

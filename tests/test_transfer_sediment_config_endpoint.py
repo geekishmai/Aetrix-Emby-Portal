@@ -75,16 +75,10 @@ def _full_payload(**overrides):
         "transfer_cross_aging_sec": 1800,
         "transfer_fast_lane_concurrency": 8,
         "transfer_per_owner_inflight": 2,
-        "pan115_rapid_upload_enabled": True,
-        "pan115_multipart_upload_enabled": True,
         "transfer_rebind_waiver_window_days": 7,
         "transfer_rebind_waiver_max_uses": 1,
-        "transfer_cross_cloudpull_enabled": False,
-        "transfer_cross_cloudpull_ttl_sec": 43200,
-        "transfer_cross_cloudpull_timeout_sec": 3600,
         "transfer_manifest_accounting_enabled": True,
         "transfer_manifest_takeover_enabled": True,
-        "quark_play_enabled": True,
         "transfer_paused_categories": "[]",
     }
     payload.update(overrides)
