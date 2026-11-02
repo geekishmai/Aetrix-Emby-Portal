@@ -3296,7 +3296,7 @@ def _claim_group_atomic(db, q, now) -> list:
     try:
         db.query(em.MediaItem).filter(
             em.MediaItem.id.in_(cand_ids),
-            em.MediaItem.enrich_status == "pending",
+            em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
         ).update(
             {"enrich_status": "enriching",
              "enrich_claimed_at": now,  # claim 租约：janitor 据此回收僵尸行
@@ -3382,6 +3382,13 @@ def enrich_episode_quota_status(db) -> dict:
         "episode_allowed_now": (not mode) or (not night_enabled)
         or in_window or used < effective,
     }
+
+
+#: 可认领状态（2026-11-03 排查）：pending + 外部停泊的 retrying。
+#: 现网有 244 行 enrich_status='retrying'（代码从不写这个值，全仓只有计数器；
+#: 系人工 SQL 停泊到次日 18:00）。旧抢单谓词只认 'pending'，这批行即使到期
+#: 也永远不会被领取；纳入后按 next_retry_at 到期自动恢复。
+_CLAIMABLE_STATUSES = ("pending", "retrying")
 
 
 def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
@@ -3488,7 +3495,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
     groups_q = (db.query(group_key.label("g"),
                          _func.max(em.MediaItem.date_added).label("latest"),
                          em.MediaItem.library_id.label("lib"))
-                .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+                .filter(em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
+                        due, unlocked,
                         not_episode, not_merged, not_ban_backfill, queue_pred)
                 # library_id 必须显式入组（PG 要求）：组键是全局 id，
                 # 同一组恒在同一库内，(group_key, library_id) 与 group_key 等价。
@@ -3500,7 +3508,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
         if len(claimed) >= limit:
             break
         q = (db.query(em.MediaItem)
-             .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+             .filter(em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
+                     due, unlocked,
                      not_episode, not_merged, not_ban_backfill, queue_pred,
                      group_key == gid)
              .order_by(

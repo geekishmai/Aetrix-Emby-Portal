@@ -839,13 +839,17 @@ class Pan115Client:
 
     # ---- 目录 ----
 
-    def list_dir(self, cid: str = "0", limit: int = 200) -> list[dict]:
+    def list_dir(self, cid: str = "0", limit: int = 1000) -> list[dict]:
         """列目录（用于目标路径浏览）
 
         P1 修复（审查）：此前写死 limit=200/offset=0，超 200 个文件的目录
         被静默截断。现自动翻页取全量（单页 limit 可配，上限 1000）。
+
+        QA AC-3 P1（2026-11-03）：默认页从 200 提到 **1000**（115 /files
+        单页上限，OpenList/AList 驱动源码默认同为 1000）。1020 项的华语
+        电影根目录从 6 页降到 2 页——首扫 list 次数直接砍掉 2/3。
         """
-        limit = max(1, min(int(limit or 200), 1000))
+        limit = max(1, min(int(limit or 1000), 1000))
         out: list[dict] = []
         offset = 0
         while True:

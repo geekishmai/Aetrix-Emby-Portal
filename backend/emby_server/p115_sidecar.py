@@ -59,7 +59,7 @@ from backend.emby_server.provider_runtime import (
 )
 
 PROVIDER = "p115"
-DEFAULT_PAGE_SIZE = 200
+DEFAULT_PAGE_SIZE = 1000  # 115 /files 单页上限 1000（QA AC-3 P1：减少根目录页数）
 MAX_PAGE_SIZE = 1000
 MAX_SYNC_ENTRIES = 100000
 
@@ -92,6 +92,11 @@ class _SessionState:
     client: object = None
     cid_cache: dict = field(default_factory=dict)
     pick_cache: dict = field(default_factory=dict)
+    # 目录列举缓存：cid -> (expire_monotonic, items)。首扫 partial 根因之一：
+    # 每个 list_page 都 _raw_list 全目录，且每个条目的 _cid_of/_locate 都重列
+    # 父目录（1020 项的根 = 每部 6 次 115 list）。会话内 30s TTL 复用，
+    # 与宿主 mounts.cached_listing 的 30s 同口径；错误不缓存。
+    dir_cache: dict = field(default_factory=dict)
     # life_poll 快照：key = 监视目录元组，value = {path: 指纹}；
     # 只存本 sidecar 进程内存，不落盘、不跨进程（与 full_sync 的 generation 同口径）。
     life_snapshots: dict = field(default_factory=dict)
@@ -143,10 +148,26 @@ class P115SidecarHandler:
 
     # ---- 目录解析（与 Pan115Mount._cid_of/_locate 同语义，sidecar 内单份） ----
     def _raw_list(self, state: _SessionState, cid: str) -> list[dict]:
+        """列目录（会话内 30s TTL 缓存，键 = cid）。
+
+        sidecar 的每次 list_page / _cid_of / _locate 都走这里；不缓存时
+        1020 项的根目录会被每个条目的路径解析重列一遍（首扫 16.6 list/部
+        的主因）。TTL 与宿主 cached_listing 同为 30s；读失败不缓存。
+        """
+        import time as _t
+        now = _t.monotonic()
+        hit = state.dir_cache.get(cid)
+        if hit is not None and hit[0] > now:
+            return list(hit[1])
         try:
-            return state.client.list_dir(cid or "0")
+            items = state.client.list_dir(cid or "0")
         except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
             raise _map_115_error(exc) from exc
+        state.dir_cache[cid] = (now + 30.0, list(items))
+        if len(state.dir_cache) > 512:   # 单会话上限，防大库长扫描吃内存
+            for k in list(state.dir_cache)[:256]:
+                state.dir_cache.pop(k, None)
+        return items
 
     def _cid_of(self, state: _SessionState, rel: str) -> str:
         rel = "/" + (rel or "").lstrip("/")
@@ -154,7 +175,13 @@ class P115SidecarHandler:
         if rel in state.cid_cache and state.cid_cache[rel]:
             return state.cid_cache[rel]
         cid = state.root_cid
+        prefix = ""
         for part in [p for p in rel.split("/") if p]:
+            prefix = f"{prefix}/{part}"
+            cached = state.cid_cache.get(prefix)
+            if cached:
+                cid = cached
+                continue
             child = next(
                 (e for e in self._raw_list(state, cid)
                  if e.get("name") == part and e.get("is_dir")),
@@ -163,6 +190,7 @@ class P115SidecarHandler:
             if child is None:
                 raise ProviderRuntimeError("not_found", f"115 上找不到目录：{rel}")
             cid = str(child.get("cid") or "")
+            state.cid_cache[prefix] = cid
         state.cid_cache[rel] = cid
         return cid
 
