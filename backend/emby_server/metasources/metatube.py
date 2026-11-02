@@ -78,7 +78,6 @@ def _token_code(token: str) -> Optional[str]:
         if letters.lower() not in _NOISE:
             return f"{m.group(1)}{letters.upper()}-{m.group(3)}"
     return None
-    return None
 
 
 def extract_code(title: str) -> Optional[str]:
