@@ -4558,20 +4558,26 @@ def _dest_provider_of_dest(dest):
 
 
 def _recent_user_jobs(db, item_id, owner_ref, window_sec=THROTTLE_SEC):
-    """该条目该用户桶内、节流窗内的任务行（不限落点）。
+    """该条目该用户桶内、节流窗内的全部任务行（不限落点、不限状态）。
 
-    PA-039：终态 failed 行不计入节流窗——死单既不挡重建，也不
-    消耗换绑豁免额度；pending/running/done 仍按原口径计入。
-    本函数唯一调用方是 _user_throttle_state（找源确认的节流分流
-    helper 另行在 Python 层区分在途/失败，不依赖本函数返回死单）。
+    failed 行必须留给调用方看，两个消费方都依赖它：
+    - _user_throttle_state 的换绑豁免分类按落点方案判读历史单，
+      终态不改变「历史单落在哪个方案」这一事实（旧方案 failed 单
+      仍是换绑证据、同方案 failed 单仍构成节流，见
+      test_transfer_rebind_waiver 的既定口径）；
+    - 找源确认的分流 helper（_throttled_confirm_response）在
+      Python 层区分在途/失败，靠本函数返回死单才能识别「最新单
+      已失败」并走 force 重建。
+    PA-039 的「死单不挡重建」由确认层分流＋_latest_job 的
+    statuses 过滤兑现，不在本函数藏行（曾在此加 status 过滤，
+    豁免记账与同方案节流随之误判，CI 实证后撤销）。
     """
     cutoff = datetime.now() - timedelta(seconds=window_sec)
     return (db.query(em.TransferJob)
             .filter(em.TransferJob.item_id == item_id,
                     em.TransferJob.owner_scope == "user",
                     em.TransferJob.owner_ref == owner_ref,
-                    em.TransferJob.created_at >= cutoff,
-                    em.TransferJob.status != "failed")
+                    em.TransferJob.created_at >= cutoff)
             .all())
 
 

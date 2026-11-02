@@ -1,14 +1,19 @@
-"""PA-039（查询层口径）：节流窗与最新单查询只认有效状态。
+"""PA-039（分层口径）：死单不挡重建，落在确认层兑现，不藏行。
 
 接在已合入的确认分支分流（test_pa039_throttle_failed_rebuild.py）
-之后，根因仍在查询层：_recent_user_jobs 不滤状态、
-_latest_job 不限状态。本文件钉住查询层口径：
+之后。本文件钉住的分层口径（曾试图在 _recent_user_jobs 一处
+滤掉 failed，因与换绑豁免套件的既定分类冲突、CI 实证后撤销）：
 
-- 窗内唯一任务已 failed → 节流判 clear（不挡重建）、不耗豁免；
-- 最新单查询（有效状态）遇 failed 单 → 不指死单；
+- 最新单查询（有效状态）遇 failed 单 → 不指死单
+  （_latest_job 的 statuses 参数，查询层）；
+- 节流状态层看全量历史：同方案 failed 单仍构成 blocked、
+  异方案 failed 单仍是换绑 waiver 证据（与
+  test_transfer_rebind_waiver 同口径，终态不改变落点事实）；
 - 真正在途 pending / 已成 done 单 → 节流口径不变（不许把节流修没）；
-- 确认端到端：failed 单后重确认回 queued（不回 already_queued 指死单），
-  在途 pending + 更新 failed 共存时仍回 already_queued 指着在途单。
+- 「死单不挡重建」由确认层兑现：_throttled_confirm_response
+  识别最新单已 failed → force 重建；端到端：failed 单后重确认
+  回 queued（不回 already_queued 指死单），在途 pending + 更新
+  failed 共存时仍回 already_queued 指着在途单。
 
 不连生产库。查询层用内存 SQLite 单表；确认层复用
 test_pa039_throttle_failed_rebuild.py 同款夹具形态。
@@ -52,15 +57,21 @@ def _add(db, item_id, status, hours_ago=1, dest="userdrive:7"):
     db.commit()
 
 
-def test_failed_only_throttle_is_clear():
+def test_failed_only_same_scheme_throttle_state_stays_blocked():
+    # 状态层口径：同方案 failed 单仍构成节流（与换绑豁免套件
+    # test_mixed_recent_jobs_throttle_without_waiver 同口径）。
+    # PA-039 的「死单不挡重建」不在状态层藏行，而在找源确认层
+    # 兑现：_throttled_confirm_response 识别最新单已 failed 后走
+    # force 重建——端到端由本文件确认用例与
+    # test_pa039_throttle_failed_rebuild.py 钉住。
     db = _tiny_db()
     _add(db, 42, "failed")
     state, from_scheme = tv._user_throttle_state(db, 42, 7, "userdrive:7")
-    assert state == "clear"
+    assert state == "blocked"
     assert from_scheme == ""
-    # 不抛节流异常：重建一路畅通
-    use_waiver, _ = tv._raise_if_user_throttled(db, 42, 7, "userdrive:7")
-    assert use_waiver is False
+    with pytest.raises(tv.TransferError) as excinfo:
+        tv._raise_if_user_throttled(db, 42, 7, "userdrive:7")
+    assert excinfo.value.kind == "throttled"
 
 
 def test_failed_only_latest_valid_is_none_but_default_unchanged():
@@ -94,12 +105,22 @@ def test_pending_and_done_still_throttle():
     assert state == "blocked"
 
 
-def test_failed_does_not_burn_rebind_waiver():
-    # 只有死单（另一方案）时不走豁免：直接 clear，不耗豁免额度。
-    db = _tiny_db()
+def test_failed_only_other_scheme_is_rebind_waiver():
+    # 只有死单、且落在另一方案：仍是换绑场景（与豁免套件
+    # test_create_cross_job_waiver_direct 同口径——旧方案单的
+    # 终态不改变其落点事实）。状态判定本身不记账：豁免行只在
+    # 建单成功时由 _record_throttle_waiver 落，额度不被空耗。
+    # （waiver 分支要查豁免计数表，本用例单独建两张表。）
+    engine = create_engine("sqlite://")
+    em.TransferJob.__table__.create(engine)
+    em.TransferThrottleWaiver.__table__.create(engine)
+    db = sessionmaker(bind=engine)()
     _add(db, 42, "failed", dest="pan115:9")
-    state, _ = tv._user_throttle_state(db, 42, 7, "userdrive:7")
-    assert state == "clear"
+    state, from_scheme = tv._user_throttle_state(db, 42, 7, "userdrive:7")
+    assert state == "waiver"
+    assert from_scheme == "pan115:"
+    use_waiver, _ = tv._raise_if_user_throttled(db, 42, 7, "userdrive:7")
+    assert use_waiver is True
 
 
 # ---------------- 确认端到端（复用已验证夹具形态） ----------------

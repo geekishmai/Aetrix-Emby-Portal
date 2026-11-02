@@ -254,7 +254,8 @@ def confirm_source(
                 return retry
             # PA-039：回落分支的 already_queued 只认有效状态，死单
             # 绝不能再被指着（本分支仅在分流 helper 返回 None 时走到，
-            # 即窗内最新单非失败终态；failed 早被节流窗过滤，不再挡路）。
+            # 即最新单为 done 等非失败终态；failed-only 的重建已由
+            # 分流 helper 走 force 口径处理，不会落到这里）。
             existing = tv._latest_job(db, item.id, "user", str(user.id),
                                       statuses=("pending", "running", "done"))
             if existing is not None:
