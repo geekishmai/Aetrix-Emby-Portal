@@ -64,6 +64,18 @@ def httpx_state(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_outbound_verify(monkeypatch):
+    """本文件测的是 httpx 传输重试逻辑，不是 DNS：出站校验桩成放行。
+
+    假 httpx 本来就不发真请求，校验若走真 DNS 会把重试用例耦合到
+    运行环境的 DNS 解析结果（沙箱里 image.tmdb.org 曾解析到
+    198.18.x 被判私网）。真校验另有覆盖：PA-076 新用例（字面 IP，
+    零 DNS）与 test_audit_a053_upstream_ssrf（verify 单元）。
+    """
+    monkeypatch.setattr(image_store, "verify_outbound_url", lambda url: None)
+
+
+@pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
     """退避不真睡，但记录睡了几次（要断言退避真的发生）"""
     slept: list = []

@@ -43,6 +43,10 @@ from typing import Optional
 
 from backend.emby_server import scan_progress as progress
 from backend.emby_server.env_util import env_int
+from backend.emby_server.upstream_http import (
+    OutboundBlockedError,
+    verify_outbound_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -631,20 +635,62 @@ def _download_attempts() -> int:
     return 1 + env_int("EMBY_IMAGE_RETRIES", 2, 0)
 
 
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_MAX_IMAGE_REDIRECTS = 5
+
+
+def _host_for_log(url: str) -> str:
+    """日志用主机名（守卫拦截时绝不把完整 URL 打进日志）。"""
+    try:
+        from urllib.parse import urlsplit
+
+        return urlsplit(url).hostname or "?"
+    except Exception:  # noqa: BLE001 — 日志辅助绝不抛异常
+        return "?"
+
+
 def _fetch_once(url: str, timeout: int) -> tuple:
     """单次下载：返回 (内容, 是否值得重试)（问题一：以前没有重试这个概念）
 
     瞬态失败（网络异常 / 429 / 5xx）→ ``(None, True)``——网络抖动时该退避重打；
     确定性失败（404、超大、内容类型不对，重试也不会变）→ ``(None, False)``。
+
+    PA-076：取图层是 SSRF 守卫的唯一落点（写入侧拦不住重定向后跳私网）。
+    首跳与每个重定向目标发请求前都走 ``verify_outbound_url``（解析复验，
+    拒绝回环/私网/链路本地/保留地址）；被拦截是确定性失败，不重试、
+    不发出站请求。重定向由本函数手动逐跳跟随（httpx 默认跟随已关），
+    超过 ``_MAX_IMAGE_REDIRECTS`` 跳同样按确定性失败计。
     """
     try:
         import httpx
+        from urllib.parse import urljoin
 
         # v2.42.9：图片走 image.tmdb.org（另一个 CDN，不吃 api_key 配额），单独计时——
         # 它以前既不占 TMDB 限流、也不进任何可见指标，是整条链上最容易被忽视的尾巴
         with progress.stage_timer("image_dl"):
-            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-                resp = client.get(url)
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                current = url
+                resp = None
+                for hop in range(_MAX_IMAGE_REDIRECTS + 1):
+                    try:
+                        verify_outbound_url(current)
+                    except OutboundBlockedError:
+                        logger.warning(
+                            "图片下载被出站守卫拦截（主机已脱敏）: %s",
+                            _host_for_log(current))
+                        return None, False
+                    resp = client.get(current)
+                    location = (resp.headers or {}).get("location")
+                    if resp.status_code in _REDIRECT_STATUSES and location:
+                        if hop >= _MAX_IMAGE_REDIRECTS:
+                            logger.info("图片下载重定向过多，放弃: %s",
+                                        _host_for_log(current))
+                            return None, False
+                        current = urljoin(current, location)
+                        continue
+                    break
+                if resp is None:  # pragma: no cover — 循环恒有一次请求
+                    return None, False
         if resp.status_code >= 429 or resp.status_code >= 500:
             logger.info("图片下载暂不可达（HTTP %s，将重试）: %s", resp.status_code, url)
             return None, True
