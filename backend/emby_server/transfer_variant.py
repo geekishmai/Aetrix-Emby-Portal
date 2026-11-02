@@ -5672,8 +5672,10 @@ class _HashingReader:
 # - 目的端 sha1 交叉核对（simple 回调为准、分片从严）仍在，暂存字
 #   节陈旧时由核对兜底，不会把错字节登记成副本；
 # - 清扫只看 mtime（TTL 外删）：进行中的暂存因持续写盘 mtime 新
-#   鲜、不会被误删；总量帽只在新建时把关（拒绝新建、不删已有），
-#   避免删掉正在被读的文件；
+#   鲜、不会被误删；看门狗另有按任务引用判活/终态的清道
+#   （sweep_stage_orphans），活单文件绝不删。总量帽只在新建时
+#   把关（拒绝新建、不删已有），避免删掉正在被读的文件；认领
+#   时另按盘上实占兜底护栏（_stage_guard_state），防新单堆满盘；
 # - 暂存文件只活在 worker 容器本地盘（默认 /tmp），容器重建即失，
 #   丢失只退回现行口径、不影响任何任务语义。
 def _stage_dir() -> str:
@@ -5696,6 +5698,40 @@ def _stage_max_total_bytes() -> int:
             "TRANSFER_STAGE_MAX_TOTAL_BYTES", str(8 * 1024 ** 3))))
     except (TypeError, ValueError):
         return 8 * 1024 ** 3
+
+
+def _stage_dir_total_bytes(directory) -> int:
+    """暂存目录总占用（字节）：目录内全部常规文件按盘上实占计。
+
+    st-*.bin/.json、mp-*.json 与写残片都实打实占盘——护栏与事故
+    口径都按总量算，不按类别挑。目录不存在/不可读按 0（容器刚
+    重建时暂存本就为空，不是错误）。"""
+    total = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    for name in names:
+        try:
+            path = os.path.join(directory, name)
+            if os.path.isfile(path):
+                total += os.path.getsize(path)
+        except OSError:
+            pass
+    return total
+
+
+def _stage_guard_state():
+    """认领护栏现状：(暂存目录总占用字节, 上限字节)。
+
+    上限复用 TRANSFER_STAGE_MAX_TOTAL_BYTES，与 _acquire_source_
+    stage 的新建准入同一把尺：准入是单文件事前估算（total＋size
+    ≤ 帽才放行），会被并发竞态与在途文件增长穿透（2026-11-02
+    事故实占 12G 而默认帽 8GiB）；认领护栏按盘上实占兜底——实
+    占 ≥ 帽时新跨盘单暂缓认领，等在途单完成、清道回收后自动恢
+    复。上限 ≤ 0 表示护栏关（与准入的 0=全拒口径不同：护栏若按
+    0 执行会把全部跨盘单永久压死，故 0 只关护栏这一道）。"""
+    return _stage_dir_total_bytes(_stage_dir()), _stage_max_total_bytes()
 
 
 def _stage_key(provider, drive_id, fid, size) -> str:
@@ -5832,6 +5868,182 @@ def _sweep_stages(directory, ttl_sec):
                 pass
     except OSError:
         pass
+
+
+# ---- 暂存清道（按任务引用删残留，2026-11-02 磁盘事故单）----
+# _sweep_stages 只看 mtime TTL：长上传（整份暂存读盘上传可持续
+# 数小时、mtime 冻结在下载完成时刻）会越过 TTL 被误删，反之终
+# 态单的残留也要白等满 TTL。清道改按任务引用判定：非终态
+# （pending/running）跨单引用的暂存是活单文件——pending 的重
+# 试要复用暂存前缀与分片会话，running 的正在读写——绝不删；
+# 对应单已终态（done/failed）或根本不存在的才是残留，mtime
+# 超过宽限后删除并记日志计数。宽限是引用判定的竞态兜底：文
+# 件刚落盘、任务行状态刚翻转的瞬间窗口里一律不动。
+#: 活单状态：pending（排队/待重试）与 running（正在搬）。
+_STAGE_LIVE_JOB_STATUSES = ("pending", "running")
+
+
+def _stage_orphan_grace_sec() -> int:
+    """清道宽限（秒）：mtime 新于宽限的暂存文件一律不删。
+
+    默认 900，下限 0（0 = 只靠引用判定，不建议）。"""
+    try:
+        return max(0, int(os.environ.get(
+            "TRANSFER_STAGE_ORPHAN_GRACE_SEC", "900")))
+    except (TypeError, ValueError):
+        return 900
+
+
+def _live_stage_refs(db):
+    """非终态跨单引用的暂存引用：(精确键集合, 内容签名集合, 活单 id 集合)。
+
+    精确键走 _cross_content_key（条目登记 size 口径）；签名只取
+    身份段 (provider, drive_id, fid)，清道时配 sidecar 落盘的
+    真实 size 重算键，兜住执行器实测 size 与登记 size 漂移时
+    精确键对不上的情形（漂移方向见 _cross_content_key 头注：
+    对合并是安全方向，对清道是误删方向，必须兜）。"""
+    keys = set()
+    sigs = set()
+    job_ids = set()
+    jobs = (db.query(em.TransferJob)
+            .filter(em.TransferJob.status.in_(_STAGE_LIVE_JOB_STATUSES))
+            .all())
+    items = {}
+    item_ids = {j.item_id for j in jobs if j.item_id}
+    if item_ids:
+        for item in (db.query(em.MediaItem)
+                     .filter(em.MediaItem.id.in_(list(item_ids))).all()):
+            items[item.id] = item
+    for job in jobs:
+        job_ids.add(job.id)
+        if not _is_cross_job(job):
+            continue
+        item = items.get(job.item_id)
+        if item is None:
+            continue
+        key = _cross_content_key(job, item)
+        if key:
+            keys.add(key)
+        sig = _stage_ref_signature(job, item)
+        if sig is not None:
+            sigs.add(sig)
+    return keys, sigs, job_ids
+
+
+def sweep_stage_orphans(db, directory=None, now_ts=None):
+    """按任务引用清扫暂存残留，返回统计 dict。
+
+    删除判定（引用不活＋mtime 超宽限，两条都满足才删）：
+    - st-<key>.bin/.json：key 不在活单精确键里，且用 sidecar
+      落盘 size 对活单签名重算的键也不命中；
+    - mp-<job_id>.json：对应任务行不存在或已终态；
+    - *.tmp 写残片：无引用语义，超宽限即删。
+    活单文件绝不删；删了才记一条 info 日志（文件数/字节数/
+    保留数），无删除不打日志（看门狗每周期都跑，不许刷屏）。
+    只删文件，绝不动任务行与注册表（注册表里的 stage 对象在
+    文件被删后 _load_prefix 自然归零重建，best-effort 语义）。"""
+    directory = directory or _stage_dir()
+    now_ts = time.time() if now_ts is None else now_ts
+    grace = _stage_orphan_grace_sec()
+    stats = {"removed_files": 0, "removed_bytes": 0, "kept_live_files": 0}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return stats
+    live_keys, live_sigs, live_job_ids = _live_stage_refs(db)
+    # sidecar 落盘 size 索引（key -> size），供签名重算键。
+    sidecar_size = {}
+    for name in names:
+        if name.startswith("st-") and name.endswith(".json"):
+            try:
+                with open(os.path.join(directory, name), "r",
+                          encoding="utf-8") as fh:
+                    sidecar_size[name[3:-5]] = int(
+                        json.load(fh).get("size", 0))
+            except Exception:
+                pass
+
+    def _old_enough(path):
+        try:
+            return now_ts - os.path.getmtime(path) > grace
+        except OSError:
+            return False
+
+    def _remove(path):
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        try:
+            os.remove(path)
+        except OSError:
+            return
+        stats["removed_files"] += 1
+        stats["removed_bytes"] += size
+
+    def _stage_key_live(key):
+        if key in live_keys:
+            return True
+        size = sidecar_size.get(key)
+        if size:
+            for provider, drive_id, fid in live_sigs:
+                if _stage_key(provider, drive_id, fid, size) == key:
+                    return True
+        return False
+
+    for name in names:
+        path = os.path.join(directory, name)
+        if name.endswith(".tmp"):
+            if _old_enough(path):
+                _remove(path)
+            continue
+        if name.startswith("st-") and (name.endswith(".bin")
+                                       or name.endswith(".json")):
+            key = name[3:-4] if name.endswith(".bin") else name[3:-5]
+            if _stage_key_live(key):
+                stats["kept_live_files"] += 1
+                continue
+            if _old_enough(path):
+                _remove(path)
+            continue
+        if name.startswith("mp-") and name.endswith(".json"):
+            try:
+                job_id = int(name[3:-5])
+            except ValueError:
+                job_id = None
+            if job_id is not None and job_id in live_job_ids:
+                stats["kept_live_files"] += 1
+                continue
+            if _old_enough(path):
+                _remove(path)
+            continue
+    if stats["removed_files"]:
+        logger.info("转存暂存清道：删除残留 %d 个文件 / %d 字节"
+                    "（保留活单引用 %d 个），目录 %s",
+                    stats["removed_files"], stats["removed_bytes"],
+                    stats["kept_live_files"], directory)
+    return stats
+
+
+def _sweep_stage_orphans_once(session_factory, source="janitor"):
+    """开短会话跑一次暂存清道，返回删除文件数；异常只记 warning
+    返回 0（与 _reclaim_leases_once 同口径：兜底自身绝不许炸，
+    DB 抖一下不能把看门狗带走）。"""
+    db = None
+    try:
+        db = session_factory()
+        stats = sweep_stage_orphans(db)
+        return stats["removed_files"]
+    except Exception:
+        logger.warning("转存工人：暂存清道失败（%s），下一周期重试",
+                       source, exc_info=True)
+        return 0
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def _acquire_source_stage(provider, drive_id, fid, size):
@@ -8056,6 +8268,32 @@ MERGE_DEFER_SEC = 60
 MERGE_MAX_WAIT_SEC = 6 * 3600
 
 
+def _stage_ref_signature(job, item):
+    """任务行对应的暂存内容签名 (provider, drive_id, fid)，不含 size。
+
+    与 _cross_content_key 的键派生同源同分支（本函数只取身份
+    段）：Drive 源落 115 → (drive, 源盘, 源 fid)；115 源落
+    Drive → (pan115, "", 源 fid)；夸克落点不改口径、只认源
+    （同内容多人转存到不同盘共用同一份源暂存/清单）。非跨单
+    形态返回 None。暂存清道用它配 sidecar 落盘 size 重算键，
+    见 _live_stage_refs。"""
+    if item is None:
+        return None
+    dest = (getattr(job, "dest_drive_id", None) or "").strip()
+    fid = getattr(item, "drive_file_id", None) or ""
+    if dest.startswith("pan115:"):
+        return ("drive", getattr(job, "drive_id", None) or "", fid)
+    if dest.startswith("userdrive:"):
+        return ("pan115", "", fid)
+    if dest.startswith("quark:"):
+        provider = (getattr(job, "provider", None) or "").strip()
+        if provider == "drive":
+            return ("drive", getattr(job, "drive_id", None) or "", fid)
+        if provider == "pan115":
+            return ("pan115", "", fid)
+    return None
+
+
 def _cross_content_key(job, item):
     """跨 provider 单的 content_key（与暂存/清单 _stage_key 同口径）。
 
@@ -8063,30 +8301,17 @@ def _cross_content_key(job, item):
     以 (pan115, "", 源 fid, size) 为键。size 取条目登记值：与
     执行器实测 size 不一致时键对不上、合并漏触发（安全方向：
     漏合并只是多读一遍源，绝不误合并到别的内容上）。
+    身份段派生与 _stage_ref_signature 共用一处，不许两处漂移。
     """
     if item is None:
         return None
     size = _to_int(getattr(item, "size", None))
     if size <= 0:
         return None
-    dest = (getattr(job, "dest_drive_id", None) or "").strip()
-    fid = getattr(item, "drive_file_id", None) or ""
-    if dest.startswith("pan115:"):
-        return _stage_key("drive", getattr(job, "drive_id", None) or "",
-                          fid, size)
-    if dest.startswith("userdrive:"):
-        return _stage_key("pan115", "", fid, size)
-    if dest.startswith("quark:"):
-        # 夸克落点不改内容键口径：键只认源（同内容多人转存到
-        # 不同盘共用同一份源暂存/清单，与落哪家盘无关）。
-        provider = (getattr(job, "provider", None) or "").strip()
-        if provider == "drive":
-            return _stage_key("drive",
-                              getattr(job, "drive_id", None) or "",
-                              fid, size)
-        if provider == "pan115":
-            return _stage_key("pan115", "", fid, size)
-    return None
+    sig = _stage_ref_signature(job, item)
+    if sig is None:
+        return None
+    return _stage_key(sig[0], sig[1], sig[2], size)
 
 
 def _find_merge_leader(db, job, content_key):
@@ -8483,6 +8708,10 @@ def _lease_reclaim_loop(stop_event, session_factory):
     任何一轮里都不耽误死单回队。"""
     while not stop_event.is_set():
         _reclaim_leases_once(session_factory, source="janitor")
+        # 暂存清道搭同一周期：按任务引用回收无活单的暂存残留
+        # （见 sweep_stage_orphans），与回收各自独立兜底、一坏
+        # 不拖另一道；暂存实占回落靠它，认领护栏才有解除路径。
+        _sweep_stage_orphans_once(session_factory, source="janitor")
         stop_event.wait(worker_sweep_sec())
 
 
@@ -8834,6 +9063,24 @@ def claim_due_jobs(db, now=None, limit=None, worker_id=None):
             logger.info("转存工人：类别级熔断压住 %d 单不认领（规则 %s）",
                         len(held), paused_rules)
             due = [j for j in due if not job_category_paused(j, paused_rules)]
+            if not due:
+                return []
+    # 暂存总量护栏（2026-11-02 磁盘事故）：暂存目录实占达上限
+    # 时，本轮跨盘单暂缓认领——与类别级熔断同口径：留 pending、
+    # 不烧 attempts，也不许被下面的 no_binding 复核判死（压住
+    # 是「等盘回落」，不是「判掉」）；同 provider 单不经暂存、
+    # 照常认领。在途单完成＋清道回收后实占回落，下一轮自动恢
+    # 复，绝不让新单继续往满盘上堆到 health down。
+    _stage_total, _stage_cap = _stage_guard_state()
+    if _stage_cap > 0 and _stage_total >= _stage_cap:
+        held = [j for j in due if _is_cross_job(j)]
+        if held:
+            logger.warning(
+                "转存工人：暂存护栏压住 %d 单跨盘转存不认领"
+                "（暂存占用 %d 字节 ≥ 上限 %d 字节；留 pending "
+                "不烧 attempts，暂存回落后自动恢复）",
+                len(held), _stage_total, _stage_cap)
+            due = [j for j in due if not _is_cross_job(j)]
             if not due:
                 return []
     # 认领前 no_binding 复核：建单后解绑的 user 单在此秒判终态，
@@ -9537,6 +9784,9 @@ def start_transfer_daemon(session_factory=None, drive_api_factory=None):
         drive_api_factory = DriveApiClient
     # 启动即回收：先把前任进程留下的过期租约单交还队列，再起线程。
     _reclaim_leases_once(session_factory, source="startup")
+    # 启动即清道：前任进程留下的无活单暂存残留先回收一遍，
+    # 免得认领护栏被陈年残留长期压住（引用判定见清道口径）。
+    _sweep_stage_orphans_once(session_factory, source="startup")
     janitor = threading.Thread(
         target=_lease_reclaim_loop, args=(stop, session_factory),
         daemon=True, name="transfer-lease-reclaim")
@@ -9679,6 +9929,7 @@ __all__ = [
     "transfer_config_payload", "write_transfer_config",
     "worker_sweep_sec", "notify_transfer_wakeup", "pause_user_queue",
     "is_user_paused", "reclaim_expired_leases", "claim_due_jobs",
+    "sweep_stage_orphans",
     "queue_stats", "queue_alerts", "process_claimed_round",
     "play_inline_enabled", "play_inline_budget_sec",
     "play_inline_concurrency", "claim_job_for_inline",
