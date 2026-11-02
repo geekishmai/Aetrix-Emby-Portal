@@ -1260,6 +1260,7 @@ class TmdbClient:
 
     def __init__(self) -> None:
         self._keys_lock = threading.Lock()
+        self._keys_checked_at = 0.0
         # 当前 key 来源：env（环境变量）/ db（后台填写）/ none（未配置），界面展示用
         self.key_source = "none"
         self.api_keys: list[str] = []
@@ -1293,6 +1294,7 @@ class TmdbClient:
             self.api_key = self.api_keys[0] if self.api_keys else ""
             self._key_index = 0
             self.key_source = source if keys else "none"
+            self._keys_checked_at = time.monotonic()
             # 已被换掉的 key 不再留着冷却记录（它不在池子里了，记着也没用）
             alive = set(self.api_keys)
             self._cooldown = {k: v for k, v in self._cooldown_map().items() if k in alive}
@@ -1316,6 +1318,30 @@ class TmdbClient:
         self._set_keys(keys, source)
         self._ensure_session()
         return {"source": self.key_source, "count": len(self.api_keys)}
+
+    def _maybe_refresh_keys(self) -> None:
+        """跨进程补刷密钥池：后台保存只在 API 进程调 ``refresh_keys``，
+        worker / EA 是别的进程，单例在启动时读一次就再也不知道后台加了 key——
+        刚加 key 后的补全会当成「未配置」直接走多源兜底并记为完成。
+
+        这里按 ``TMDB_KEYS_REFRESH_SEC``（默认 60 秒，0 关闭）节流地重读一次配置，
+        池子真变了才替换（不打乱轮转与冷却记录）。读到空池不替换：删光 key 这种
+        少见操作留给重启生效，换来不会因一次读库失败把可用的池子清空。
+        """
+        interval = env_float("TMDB_KEYS_REFRESH_SEC", 60.0)
+        now = time.monotonic()
+        if interval <= 0 or now - self._keys_checked_at < interval:
+            return
+        self._keys_checked_at = now
+        keys = _env_keys()
+        source = "env"
+        if not keys:
+            keys = _db_keys(None)
+            source = "db" if keys else "none"
+        if keys and keys != self.api_keys:
+            logger.info("TMDB 密钥池已变化（%d → %d 把），本进程热更新", len(self.api_keys), len(keys))
+            self._set_keys(keys, source)
+            self._ensure_session()
 
     def _keyed_limiter(self, key: str) -> "_RequestLimiter":
         """取某次请求该走的令牌桶：按 key 独立（v2.57.0 item3）。
@@ -1630,6 +1656,7 @@ class TmdbClient:
 
     @property
     def configured(self) -> bool:
+        self._maybe_refresh_keys()
         return bool(self.api_keys)
 
     def stats(self) -> dict:

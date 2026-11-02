@@ -420,3 +420,26 @@ def test_keys_endpoint_reports_pool_state_and_mirror(db):
     assert body["pool"][0]["reason"] == "限流（HTTP 429）"
     # 原文永远不出口
     assert "key-0001" not in str(body)
+
+
+def test_worker_process_picks_up_keys_added_elsewhere(monkeypatch):
+    """后台在 API 进程加 key，worker 进程的单例要在节流间隔后自己读到（不必重启）。"""
+    from backend.emby_server import tmdb as tmdb_lib
+
+    client = tmdb_lib.TmdbClient.__new__(tmdb_lib.TmdbClient)
+    client.__init__()
+    monkeypatch.setattr(tmdb_lib, "_env_keys", lambda: [])
+    stored = []
+    monkeypatch.setattr(tmdb_lib, "_db_keys", lambda db=None: list(stored))
+    client._set_keys([], "none")
+    assert client.configured is False
+
+    stored.append("key-added-in-api")          # 别的进程写进了配置
+    assert client.configured is False           # 节流间隔内不重读
+    client._keys_checked_at -= 61
+    assert client.configured is True
+    assert client.api_keys == ["key-added-in-api"]
+
+    stored.clear()                              # 读到空池不清空现有池
+    client._keys_checked_at -= 61
+    assert client.configured is True
