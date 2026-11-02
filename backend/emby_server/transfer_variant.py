@@ -8775,6 +8775,35 @@ def _lease_reclaim_loop(stop_event, session_factory):
         stop_event.wait(worker_sweep_sec())
 
 
+def _patrol_loop(stop_event, session_factory, drive_api_factory):
+    """副本巡检看门狗：独立于守护主循环的每日巡检。
+
+    为什么必须独立（2026-11-02 生产实证）：巡检原本搭主循环的
+    车（认领轮之后顺带跑），且 state 初值使每次进程启动首轮就
+    到期跑全量。巡检逐行打上游活体请求（610 行变体、逐行多次
+    调用、单调用超时 20 秒级），2026-11-02 15:37 CST 部署重启
+    后主循环卡在巡检里 12 分钟以上认领 0 单（py-spy 两次采样
+    实证主线程停在 _patrol_115_row / _patrol_quark_row 的 httpx
+    调用中），8 单 due 无人认领；同日多次部署重启反复触发。
+    与租约回收 2026-10-31 独立化同口径：巡检慢/卡只拖巡检
+    自己，绝不占住认领主链路。节奏不变：启动先跑一轮，其后
+    每 PATROL_INTERVAL_SEC 一轮；总闸关时不跑（与原主循环内
+    门控口径一致）；异常只记 warning，不炸线程。"""
+    while not stop_event.is_set():
+        if master_enabled():
+            db = None
+            try:
+                db = session_factory()
+                try:
+                    patrol_once(db, drive_api_factory)
+                finally:
+                    db.close()
+            except Exception:
+                logger.warning("转存巡检轮次异常，已跳过本轮",
+                               exc_info=True)
+        stop_event.wait(PATROL_INTERVAL_SEC)
+
+
 def reclaim_expired_leases(db, now=None):
     """租约回收：running 且租约已过期 → pending（attempts 不变），
     兼容旧行：租约 NULL 且 updated_at 距今超 STUCK_RUNNING_SEC
@@ -9824,11 +9853,14 @@ def start_transfer_daemon(session_factory=None, drive_api_factory=None):
     - 兜底扫仍是 60 秒（TRANSFER_WORKER_SWEEP_SEC，默认 60），
       唤醒路径（Redis 断连、进程重启）失效时仍能跑，绝不改 5 秒。
     - 每轮先跑可伸缩认领轮（快通道优先、按用户限流、租约认领、
-      并行执行），再按需跑每天一次巡检；闲置 TTL 每小时独立一轮；总闸关时空转等待。
+      并行执行）；闲置 TTL 每小时独立一轮；总闸关时空转等待。
     - 租约回收双保险（2026-10-31 僵单事件后加）：启动时先同步回收
       一次（上一个进程死了留下的过期单不等主循环第一轮），另有
       看门狗线程按兜底扫间隔独立周期回收（见 _lease_reclaim_loop，
       回收不再搭认领/主循环迭代的车）。
+    - 每日巡检独立线程（2026-11-02 解耦）：_patrol_loop 自起
+      线程跑 patrol_once，不再搭主循环迭代的车（见该函数注释
+      的生产实证：巡检卡住主循环 12 分钟以上认领 0 单）。
     - session_factory / drive_api_factory 可注入（测试用），默认
       生产值：backend.database.SessionLocal / DriveApiClient。
     任何异常只记 warning、不炸线程。返回线程对象，调用方持有以便观测。
@@ -9854,6 +9886,11 @@ def start_transfer_daemon(session_factory=None, drive_api_factory=None):
         target=_wake_subscriber_loop, args=(stop,), daemon=True,
         name="transfer-wake-subscriber")
     subscriber.start()
+    patrol = threading.Thread(
+        target=_patrol_loop, args=(stop, session_factory,
+                                   drive_api_factory),
+        daemon=True, name="transfer-patrol")
+    patrol.start()
     thread = threading.Thread(
         target=_daemon_main_loop,
         args=(stop, state, session_factory, drive_api_factory),
@@ -9890,7 +9927,8 @@ def _idle_cleanup_due(state, now_ts) -> bool:
 
 def _daemon_main_loop(stop, state, session_factory, drive_api_factory):
     """Daemon 主循环：唤醒即跑一轮，队列未空立即续跑，空了等唤醒
-    或 60 秒兜底扫；巡检每天一次；闲置 TTL 每小时独立一轮；
+    或 60 秒兜底扫；闲置 TTL 每小时独立一轮；每日巡检不在本
+    循环（_patrol_loop 独立线程，2026-11-02 解耦）；
     异常只记 warning 不炸线程。"""
     while not stop.is_set():
         try:
@@ -9916,13 +9954,10 @@ def _daemon_main_loop(stop, state, session_factory, drive_api_factory):
                     if remaining:
                         continue
                 now_ts = time.time()
-                if now_ts - state["last_patrol"] >= PATROL_INTERVAL_SEC:
-                    db = session_factory()
-                    try:
-                        patrol_once(db, drive_api_factory)
-                    finally:
-                        db.close()
-                    state["last_patrol"] = now_ts
+                # 每日巡检已独立成线程（_patrol_loop，2026-11-02
+                # 解耦）：逐行上游活体请求的慢活绝不许再占住认领
+                # 主循环，state["last_patrol"] 自此闲置（键保留，
+                # 既有构造方不必改）。
                 # 防外流闲置 TTL（2026-10-28 2 小时单）：从每日巡检解耦，
                 # 每小时独立一轮；copy_idle_cleanup 自带 try/except 与
                 # 有界批次，异常只记 warning，绝不炸工人循环。
