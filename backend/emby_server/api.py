@@ -5421,6 +5421,37 @@ def _note_play_start_safe(item: em.MediaItem, **kwargs) -> None:
         pass
 
 
+def _note_115_probe_hop(item: em.MediaItem, *, user_id, method: str,
+                        verdict: str, status, probe_ms: int,
+                        size, req_ua: str, sign_ua: str, path: str) -> None:
+    """115 出流探测跳留痕：结构化日志一行 + 起播台账一行（同口径）。
+
+    背景（2026-11-02 取证 §6）：115 台账此前只记到「取链成功 +
+    302」，链发出之后的探测结果没有结构化落账，逐跳日志又会被
+    部署重启销毁——下次出问题还是瞎。本跳与解析行同 method /
+    variant，error_kind 记 ``alive_probe_<结论>``、resolve_ms 记
+    本跳（探测）耗时，与解析行按时间先后拼出「取链 → 探测 →
+    302/409」完整时间线；结构化日志侧记文件大小、探测状态码与
+    请求/签名 UA 指纹（只记指纹，见 user_bindings.ua_fingerprint）。
+    两处落点各自已有静默兜底，这里再套一层：留痕失败绝不影响出流。
+    """
+    try:
+        from backend.emby_server import user_bindings as _ub_trace
+
+        _ub_trace.log_115_alive_probe(
+            item_id=getattr(item, "id", None), user_id=user_id,
+            size=size, verdict=verdict, status=status,
+            req_ua=req_ua, sign_ua=sign_ua, path=path)
+    except Exception:  # noqa: BLE001 — 留痕不许打断出流
+        pass
+    _note_play_start_safe(
+        item, user_id=user_id, method=method,
+        variant=play_variants.BYOS115_DIRECT,
+        result="error" if verdict == "dead" else "ok",
+        error_kind=f"alive_probe_{verdict}",
+        resolve_ms=probe_ms)
+
+
 def _note_upstream_play_start_safe(user_id, resolve_ms) -> None:
     """上游播放口的起播打点安全口（#25-4 补记）。
 
@@ -6564,9 +6595,25 @@ async def video_stream(
                 variant=play_variants.BYOS115_DIRECT,
                 result="ok",
                 resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
+            # 探测 UA 用实际签名 UA（Signed115Url 透传）：请求 UA
+            # 非空时两者恒一致；请求没带 UA 时签名回服务器级
+            # PAN115_UA，探测再用空 UA 就恒 403/unknown、信号失真。
+            # 探测结果逐跳留痕（结构化日志 + 台账一行，见
+            # _note_115_probe_hop）。
+            _sign_ua115 = (getattr(_url115, "sign_ua", "") or "").strip() \
+                or (request.headers.get("user-agent") or "")
+            _probe_t0 = time.perf_counter()
             _alive115 = await run_db(
-                _ub115.check_115_download_alive, _url115,
-                request.headers.get("user-agent") or "")
+                _ub115.check_115_download_alive, _url115, _sign_ua115)
+            _note_115_probe_hop(
+                item, user_id=getattr(user, "id", None),
+                method="transfer115_copy",
+                verdict=str(_alive115),
+                status=getattr(_alive115, "status", None),
+                probe_ms=int((time.perf_counter() - _probe_t0) * 1000),
+                size=getattr(_variant115, "size_bytes", None),
+                req_ua=request.headers.get("user-agent") or "",
+                sign_ua=_sign_ua115, path="transfer115_copy")
             if _alive115 == "dead":
                 # 死链不 302：播放器跟随 302 只会撞 404。记一 strike、
                 # 预算内重建一单，409 明示正在重新转存；预算耗尽时
@@ -6767,9 +6814,24 @@ async def video_stream(
                     method="transfer115_copy",
                     variant=play_variants.BYOS115_DIRECT, result="ok",
                     resolve_ms=int((time.perf_counter() - _byos_t0q) * 1000))
+                # 探测 UA 与留痕口径与 serve_115_copy 主路径一致
+                # （实际签名 UA + 逐跳落账，见 _note_115_probe_hop）。
+                _sign_ua115q = (
+                    getattr(_url115, "sign_ua", "") or "").strip() \
+                    or (request.headers.get("user-agent") or "")
+                _probe_t0q = time.perf_counter()
                 _alive115q = await run_db(
-                    _ub115q.check_115_download_alive, _url115,
-                    request.headers.get("user-agent") or "")
+                    _ub115q.check_115_download_alive, _url115, _sign_ua115q)
+                _note_115_probe_hop(
+                    item, user_id=getattr(user, "id", None),
+                    method="transfer115_copy",
+                    verdict=str(_alive115q),
+                    status=getattr(_alive115q, "status", None),
+                    probe_ms=int(
+                        (time.perf_counter() - _probe_t0q) * 1000),
+                    size=getattr(_v115q, "size_bytes", None),
+                    req_ua=request.headers.get("user-agent") or "",
+                    sign_ua=_sign_ua115q, path="transfer115_copy_quota")
                 if _alive115q == "dead":
                     # 115 回落链也是死链：不 302，记 strike 并预算内重建；
                     # 仍报额度 409（主因是 Drive 副本额度满），重建后台跑。
@@ -7413,6 +7475,36 @@ async def video_stream(
             method="byos115_direct", variant=play_variants.BYOS115_DIRECT,
             result="ok",
             resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
+        # 存活探测（2026-11-02 补，与 serve_115_copy 主路径同口径）：
+        # 此前本路径取链成功即 302，死链服务端零感知、台账零痕迹
+        # （本变体上线至今台账 0 条）。探测用实际签名 UA、结果逐跳
+        # 留痕；dead 时不发必撞 404 的 302，记 error 行并 409 明示。
+        # 与副本路径的区别只在善后：本路径播的是挂载原件、没有
+        # 用户副本可重建，只明示不重建；unknown 沿旧行为放行 302。
+        _sign_ua_byos = (getattr(_byos_url, "sign_ua", "") or "").strip() \
+            or (request.headers.get("user-agent") or "")
+        _probe_t0b = time.perf_counter()
+        _alive_byos = await run_db(
+            _ub.check_115_download_alive, _byos_url, _sign_ua_byos)
+        _note_115_probe_hop(
+            item, user_id=getattr(user, "id", None),
+            method="byos115_direct",
+            verdict=str(_alive_byos),
+            status=getattr(_alive_byos, "status", None),
+            probe_ms=int((time.perf_counter() - _probe_t0b) * 1000),
+            size=getattr(_byos_url, "size", None)
+            or getattr(item, "size", None),
+            req_ua=request.headers.get("user-agent") or "",
+            sign_ua=_sign_ua_byos, path="byos115_direct")
+        if _alive_byos == "dead":
+            _note_play_start_safe(
+                item, user_id=getattr(user, "id", None),
+                method="byos115_direct",
+                variant=play_variants.BYOS115_DIRECT,
+                result="error", error_kind="115_direct_dead")
+            raise HTTPException(
+                status_code=409,
+                detail="115 直链已失效（文件可能已被移动或删除），请稍后重试")
         return _observe_traffic(
             RedirectResponse(_byos_url, status_code=302,
                              headers=_strategy.DIRECT_REDIRECT_HEADERS))

@@ -2188,7 +2188,8 @@ def log_byos(event: str, **fields) -> None:
 
     事件名只认 ``byos_gate_block`` / ``byos_enqueue`` /
     ``byos_quota_force`` / ``byos_ready_play`` / ``byos_usercopy_quota`` /
-    ``byos_usercopy_interstitial`` / ``byos_usercopy_quota_relay``。
+    ``byos_usercopy_interstitial`` / ``byos_usercopy_quota_relay`` /
+    ``byos115_alive_probe``。
     日志失败不影响播放。
     """
     try:
