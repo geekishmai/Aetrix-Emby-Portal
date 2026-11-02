@@ -326,11 +326,18 @@ def item_image(item_id: str, image_type: str, request: Request,
             if abs_path and _os.path.isfile(abs_path):
                 return _serve_sized(abs_path, ew, eh)
             raise HTTPException(status_code=404, detail="Image not found")
-        if lib is not None and getattr(lib, "is_virtual", False):
-            # 虚拟库无显式封面：派生封面与 Views 同口径（借代表海报 /
-            # 回退成员 / SVG 占位）；真实库与有显式封面的库不受影响。
-            from backend.emby_server import library_covers as _lc
-            _derived = _lc.resolve_virtual_library_cover(db, lib)
+        from backend.emby_server import library_covers as _lc
+
+        if lib is not None and (
+            getattr(lib, "is_virtual", False) or _lc.is_applecms_library(lib)
+        ):
+            # 虚拟库 / CMS 库无显式封面：派生封面与 Views 同口径（借代表
+            # 海报 / 回退成员 / SVG 占位）；真实库与有显式封面的库不受影响。
+            _derived = (
+                _lc.resolve_virtual_library_cover(db, lib)
+                if getattr(lib, "is_virtual", False)
+                else _lc.resolve_cms_library_cover(db, lib)
+            )
             if _derived["source"] in ("borrow", "fallback"):
                 _derived_item = db.query(em.MediaItem).filter(
                     em.MediaItem.id == _derived["item_id"]).first()

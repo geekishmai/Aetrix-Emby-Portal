@@ -2492,13 +2492,19 @@ def user_views(user_id: str, user: models.WebUser = Depends(get_emby_user),
         if is_virtual and not virtual_on:
             continue
         # 媒体库封面：有 cover_path 才给 Primary 标记，客户端才会去拉 /Images/Primary。
-        # 虚拟库无 cover_path 时派生封面（借代表海报 / 回退首个有海报成员 /
-        # SVG 占位），走同一 Primary 口径；真实库与已有显式封面的虚拟库
-        # 逻辑逐字不动（primary_aspect 对真实库恒等于旧的 cover_path 条件）。
+        # 虚拟库与 CMS 库（kind=applecms）无 cover_path 时派生封面（借代表
+        # 海报 / 回退首个有海报成员 / SVG 占位），走同一 Primary 口径；
+        # 真实库与已有显式封面的库逻辑逐字不动（primary_aspect 对真实库
+        # 恒等于旧的 cover_path 条件）。
         cover_path = getattr(lib, "cover_path", None)
         primary_aspect = 0.6666667 if cover_path else None
-        if is_virtual and not cover_path:
-            _derived = library_covers.resolve_virtual_library_cover(db, lib)
+        _is_cms = library_covers.is_applecms_library(lib)
+        if not cover_path and (is_virtual or _is_cms):
+            _derived = (
+                library_covers.resolve_virtual_library_cover(db, lib)
+                if is_virtual
+                else library_covers.resolve_cms_library_cover(db, lib)
+            )
             if _derived["source"] in ("borrow", "fallback"):
                 cover_tag = _derived["tag"]
                 image_tags = {"Primary": cover_tag}

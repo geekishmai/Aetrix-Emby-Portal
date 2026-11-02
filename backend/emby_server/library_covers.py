@@ -38,6 +38,7 @@ import os
 
 from backend.emby_server import image_store
 from backend.emby_server import models as em
+from backend.emby_server.applecms_library import is_applecms_library
 from backend.emby_server.env_util import env_int
 from backend.emby_server.identity_gate import _own_bound
 from backend.models import SystemConfig
@@ -196,6 +197,22 @@ def resolve_library_cover(db, lib, kind: str) -> dict:
     """
     if kind == "logo":
         return {"url": None, "source": "none"}
+    # CMS 库（kind=applecms）无显式封面时走派生（借代表海报 / SVG 占位）：
+    # 这类库从没有封面文件、cover_path 恒空，不存在旧行为可回退，
+    # 与虚拟库派生同理不看借图开关；有 cover_path 时仍走下面原策略
+    # （管理员显式封面优先），本地库与虚拟库路径逐字不变。
+    if is_applecms_library(lib) and not getattr(lib, "cover_path", None):
+        derived = resolve_cms_library_cover(db, lib)
+        if derived["source"] in ("borrow", "fallback"):
+            item = (
+                db.query(em.MediaItem)
+                .filter(em.MediaItem.id == derived["item_id"])
+                .first()
+            )
+            url = _item_poster_url(item) if item is not None else None
+            if url:
+                return {"url": url, "source": "borrow"}
+        return {"url": _svg_url(lib), "source": "svg"}
     if not borrow_enabled():
         return _legacy_cover(lib)
     for step in effective_strategy_order(db):
@@ -357,7 +374,16 @@ def resolve_virtual_library_cover(db, lib):
     借图不是货架准入），但代表本身须已绑定；成员口径与计数一致
     （平台聚合、movie/series、排除 is_hidden）。本函数不写库。
     """
-    rows = _virtual_member_rows(db, lib)
+    return _derive_cover_from_rows(_virtual_member_rows(db, lib))
+
+
+def _derive_cover_from_rows(rows):
+    """派生封面共用实现（虚拟库 / CMS 库同一份，代表选取不许有第二套）：
+
+    rows 为 _VIRTUAL_COLS 列元组、已按 id 升序。borrow＝案 A 代表
+    （_pick_virtual_representative）；fallback＝首个有海报成员；
+    svg＝无人有海报时占位。
+    """
     rep = _pick_virtual_representative(rows)
     if rep is not None:
         return {
@@ -380,3 +406,38 @@ def resolve_virtual_library_cover(db, lib):
         "item_id": None,
         "item_guid": None,
     }
+
+
+# ==================== CMS 库派生封面（kind=applecms） ====================
+# CMS 库的内容由同步工人喂 library_id 直属的托管行，没有自己的目录
+# 与封面文件，cover_path/cover_template 恒空（建库流程从没生成过封面
+# 文件），与虚拟库同形态：Views 无 Primary 标记、出图口无字节可出。
+# 派生口径与虚拟库完全一致（借代表海报 / 回退首个有海报成员 / SVG
+# 占位、读时派生不写库），差别只在成员口径：CMS 成员是 library_id
+# 直属条目，不走平台聚合。代表选取复用 _derive_cover_from_rows。
+
+
+def _cms_member_rows(db, lib):
+    """CMS 库成员列：library_id 直属的顶层 movie/series，排除
+    is_hidden 与 merged_into_id 非空的合并副本，按 id 升序（回退的
+    确定性顺序与代表分组的最低 id 口径都依赖它）。软删除行由全局
+    钩子自动排除，另显式带 deleted_at 条件与口径对齐。"""
+    return (
+        db.query(*_VIRTUAL_COLS)
+        .filter(
+            em.MediaItem.library_id == lib.id,
+            em.MediaItem.is_hidden == False,  # noqa: E712
+            em.MediaItem.merged_into_id.is_(None),
+            em.MediaItem.deleted_at.is_(None),
+            em.MediaItem.item_type.in_(("movie", "series")),
+        )
+        .order_by(em.MediaItem.id.asc())
+        .all()
+    )
+
+
+def resolve_cms_library_cover(db, lib):
+    """CMS 库派生封面：返回形状与 resolve_virtual_library_cover 相同
+    （{"source", "tag", "item_id", "item_guid"}），Views 标记、出图口
+    与五件套共用。本函数不写库。"""
+    return _derive_cover_from_rows(_cms_member_rows(db, lib))
