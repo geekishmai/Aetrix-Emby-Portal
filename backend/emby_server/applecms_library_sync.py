@@ -489,12 +489,16 @@ def _find_series_row(db: Session, library, source, vod_id: str,
                 em.MediaItem.name == record.name)
         .all())
     for cand in candidates:
+        # PA-070：候选比对必须剥身份——入同步的记录恒无身份
+        # （cms_entry_to_record 置 tmdb_id/imdb_id=None），去重键恒为
+        # 标题+年份；已补身份的候选若带身份建键会得 tmdb:/imdb: 键，
+        # 与记录键失配致建第二棵树。本函数 docstring 原本就写
+        # 「去重键只在本库 series 行里比（标题+年份）」，此处使代码
+        # 与口径一致。电影版 _find_row 的同构问题属 PA-062，另单处理。
         cand_record = agg.UpstreamCatalogRecord(
             source_id=str(source.id), upstream_item_id=vod_id,
             name=cand.name or "", item_type="Series",
-            production_year=cand.production_year,
-            tmdb_id=cand.tmdb_id or None,
-            imdb_id=cand.imdb_id or None)
+            production_year=cand.production_year)
         if agg.aggregate_key_for(cand_record) == key:
             return cand
     return None

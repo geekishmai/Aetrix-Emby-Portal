@@ -35,6 +35,7 @@ from sqlalchemy.orm import sessionmaker
 from backend import models as base_models
 from backend.emby_server import applecms_library_sync as als
 from backend.emby_server import models as em
+from backend.emby_server import upstream_aggregation as agg
 from backend.emby_server import upstream_playback as up
 
 
@@ -308,6 +309,54 @@ def test_cross_source_dedupe_attaches_episode_mappings(db):
              for e in episodes for m in _maps_for(db, e.id)}
     assert pairs == ({(7, "202", i) for i in (1, 2, 3)}
                      | {(8, "777", i) for i in (1, 2, 3)})
+
+
+# ---------------------------------------------------------------------------
+# PA-070：已补身份的剧行在新源同剧到来时仍须去重
+# ---------------------------------------------------------------------------
+
+def test_enriched_series_row_still_dedupes_new_source(db):
+    """已补 tmdb 身份的剧行＋新源同标题+年份条目 → 只 1 棵树、新源只补集映射。
+
+    触发条件：同轮内 run_cache 命中会掩盖本 bug，故第二轮只喂新源
+    （老源条目不在本轮出现时，_find_series_row 的候选比对才真正跑到）。
+    """
+    lib = _seed(db, source_ids="7")
+    http = FakeHttpGet()
+    als.sync_library(db, lib, http_get=http, sleep_fn=lambda s: None)
+    assert len(_rows(db, lib, "series")) == 1
+    # 模拟 enrich 补身份：行上已有 tmdb_id
+    series = _rows(db, lib, "series")[0]
+    series.tmdb_id = "12345"
+    db.commit()
+    # 新源 8 单独一轮
+    lib.upstream_source_ids = "8"
+    db.commit()
+    stats2 = als.sync_library(db, lib, http_get=http,
+                              sleep_fn=lambda s: None)
+    assert stats2["added"] == 0
+    assert len(_rows(db, lib, "series")) == 1
+    assert len(_rows(db, lib, "episode")) == 3
+    pairs = {(m.source_id, m.upstream_item_id, m.episode_index)
+             for e in _rows(db, lib, "episode") for m in _maps_for(db, e.id)}
+    assert (8, "777", 1) in pairs and (8, "777", 3) in pairs
+
+
+def test_find_series_row_matches_imdb_enriched_candidate(db):
+    """直测：仅补 imdb 身份的候选行同样按标题+年份命中。"""
+    lib = _seed(db, source_ids="7")
+    source8 = db.query(em.UpstreamSource).filter_by(id=8).one()
+    row = em.MediaItem(guid="pa070-imdb-cand", library_id=lib.id,
+                       item_type="series", name="庆余年",
+                       production_year="2019", imdb_id="tt1234567")
+    db.add(row)
+    db.commit()
+    record = agg.UpstreamCatalogRecord(
+        source_id="8", upstream_item_id="777", name="庆余年",
+        item_type="Series", production_year="2019")
+    key = agg.aggregate_key_for(record)
+    found = als._find_series_row(db, lib, source8, "777", record, key)
+    assert found is not None and found.id == row.id
 
 
 # ---------------------------------------------------------------------------
