@@ -22,15 +22,28 @@ list_dir（分页列目录）、download_info/download_url（取下载直链，
 点播靠它＋Cookie/Referer/UA 三件套走服务端中继，绝不裸发 302）、
 mkdir、以及上传链 upload_pre → upload_hash（秒传判定）→
 逐片 upload_auth + OSS PUT → upload_commit → upload_finish，
-由 upload_file 编排。形态来源标注（诚实口径，无真实账号活体
-验证）：端点路径、信封与 pre/hash/finish 的请求字段以 OpenList
-drivers/quark_uc 公开实现为准（调研报告同上）；upload/auth 的
-请求/响应字段名与 auth_meta 构造为按阿里云 OSS V1 签名口径的
-推测，代码内逐处标注「未活体验证」，解析一律防御式（多候选
-字段名），字段对不上时响亮报错、绝不猜默认值蒙混。
+由 upload_file 编排。形态来源标注（诚实口径）：端点路径、信封
+与 pre/hash/finish 的请求字段以 OpenList drivers/quark_uc
+公开实现为准（调研报告同上）。
+
+2026-11-02 活体定案（站主本人绑定实测，报告
+reports/quark-final-push-20261102.md）：上传链三处形态与初版
+推测不符、已按活体改定——① pre 的上传主机字段名是
+``upload_url``（值形如 http://pds.quark.cn），不是
+upload_host/host/endpoint；② auth 规范串的 Date 行必须填真实
+GMT 日期（初版留空，上游 /file/upload/auth 回 HTTP 403
+code=43004「date is required」；填错位则回「date should be
+GMT format」），非秒传分片上传曾因此全灭；③ complete 的规范
+串须带 Content-MD5 行（XML 体 b64 md5）与 x-oss-callback 规
+范头行，POST 本体同步带这两个头。分片 2+ 不需要 x-oss-hash
+-ctx（活体两片直通）。解析仍防御式（多候选字段名），字段对
+不上时响亮报错、绝不猜默认值蒙混。
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import logging
 import mimetypes
 import time
@@ -81,27 +94,55 @@ def _oss_date() -> str:
 
 
 def _auth_meta(verb: str, bucket: str, obj_key: str, *,
-               content_type: str = "", query: str = ""):
-    """OSS V1 待签串（auth_meta）构造——**未活体验证（推测）**。
+               content_type: str = "", query: str = "",
+               content_md5: str = "", extra_headers=()):
+    """OSS V1 待签串（auth_meta）构造（2026-11-02 活体定案）。
 
-    形状按阿里云 OSS V1 签名口径：VERB\\n（Content-MD5 空）\\n
-    Content-Type\\n（Date 空，用 x-oss-date 头替代）\\nx-oss-date
-    + x-oss-user-agent 两条规范化头\\n/bucket/obj_key[?query]。
-    夸克服务端拿 auth_info + 本串回签 auth_key 的确切字段与串
-    格式没有真实账号可验：若活体对不上，失败会响亮落在
-    upload_auth/PUT 的错误里，不会静默错传。
-    返回 (auth_meta, x_oss_date)：PUT 时须把同一个 date 以
-    x-oss-date 头原样带上（签名串里写的是它）。
+    形状为标准 OSS V1 规范串：VERB\\nContent-MD5\\n
+    Content-Type\\nDate\\nx-oss-date + 其余规范化头（按传入
+    顺序）+ x-oss-user-agent\\n/bucket/obj_key[?query]。
+
+    Date 行**必须**填与 x-oss-date 同值的真实 GMT 日期：初版
+    按「x-oss-date 可替代 Date」的想当然留空，上游 auth 服务
+    按规范串位置解析日期，空 Date 行回 HTTP 403 code=43004
+    「The input parameter date is not valid. date is
+    required」、错位回「date should be GMT format」——非秒传
+    分片上传全灭（2026-11-02 活体复现并改定，见模块 docstring）。
+
+    content_md5：分片 PUT 留空；complete POST 填请求体 XML 的
+    base64 md5（活体验证组合）。extra_headers 为追加的规范化
+    头行（如 complete 的 x-oss-callback:<b64>），排在
+    x-oss-date 之后、x-oss-user-agent 之前，顺序与活体通过时
+    一致，不许随意重排。
+    返回 (auth_meta, x_oss_date)：PUT/POST 时须把同一个 date
+    以 x-oss-date 头原样带上（签名串里写的是它）。
     """
     date = _oss_date()
     resource = f"/{bucket}/{obj_key}"
     if query:
         resource = f"{resource}?{query}"
-    meta = (f"{verb}\n\n{content_type}\n\n"
-            f"x-oss-date:{date}\n"
-            f"x-oss-user-agent:{QUARK_UA}\n"
-            f"{resource}")
-    return meta, date
+    lines = [verb, content_md5, content_type, date,
+             f"x-oss-date:{date}"]
+    lines.extend(extra_headers)
+    lines.append(f"x-oss-user-agent:{QUARK_UA}")
+    lines.append(resource)
+    return "\n".join(lines), date
+
+
+def _oss_error_fields(text: str):
+    """OSS 错误体（XML）里的 Code/Message，取不到回 ("", "")。
+
+    OSS 错误体是公开错误码与说明、不含凭据；调用方仍会再过
+    一道脱敏截断才许进异常与日志。
+    """
+    import re
+
+    def _grab(tag):
+        match = re.search(rf"<{tag}>(.*?)</{tag}>", text or "",
+                          re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    return _grab("Code"), _grab("Message")
 
 
 def _finish_fid(data) -> str:
@@ -504,10 +545,12 @@ class QuarkClient:
         file_name / format_type / l_created_at / l_updated_at /
         pdir_fid / size）。响应字段防御解析：task_id / upload_id
         / obj_key / bucket 在 data 顶层取，part_size 顶层或
-        data.metadata 里都认；upload_host 在 upload_host / host
-        / endpoint / oss_host 里取——全缺失时响亮报错（不许
-        猜默认主机把字节打到错地方）。auth_info 原样透传给
-        upload_auth。**响应确切嵌套未经活体验证。**
+        data.metadata 里都认；上传主机在 upload_url（2026-11-02
+        活体确认的真实字段名，值形如 http://pds.quark.cn）/
+        upload_host / host / endpoint / oss_host 里取——全缺失
+        时响亮报错（不许猜默认主机把字节打到错地方）。auth_info
+        原样透传给 upload_auth；callback（complete 签名要用）
+        原样透传给 upload_commit。
         """
         self._step = "pre"
         now_ms = int(time.time() * 1000)
@@ -551,9 +594,12 @@ class QuarkClient:
         if size_int > 0:
             min_part = -(-size_int // _MAX_PARTS)
             part_size = max(part_size, min_part)
-        upload_host = _pick((data, "upload_host"), (data, "host"),
+        upload_host = _pick((data, "upload_url"),
+                            (data, "upload_host"), (data, "host"),
                             (data, "endpoint"), (data, "oss_host"),
+                            (meta, "upload_url"),
                             (meta, "upload_host"), (meta, "host"))
+        callback = _pick((data, "callback"), (meta, "callback"))
         return {
             "task_id": str(task_id),
             "upload_id": str(_pick((data, "upload_id"),
@@ -564,6 +610,8 @@ class QuarkClient:
             "auth_info": _pick((data, "auth_info"),
                                (meta, "auth_info")),
             "upload_host": str(upload_host or ""),
+            "callback": callback if isinstance(callback, dict)
+            else None,
         }
 
     def upload_hash(self, task_id, md5, sha1) -> bool:
@@ -579,8 +627,9 @@ class QuarkClient:
     def upload_auth(self, pre: dict, auth_meta: str) -> str:
         """取一次 OSS 操作的 Authorization：POST /file/upload/auth。
 
-        **未活体验证（推测）**：请求体按 {task_id, auth_info,
-        auth_meta} 构造，响应 auth 值在 data 本身（字符串）或
+        请求体 {task_id, auth_info, auth_meta} 与响应 data.auth_key
+        已于 2026-11-02 活体定案（auth_meta 的 Date 行是关键，
+        见 _auth_meta）；响应 auth 值在 data 本身（字符串）或
         data.auth_key / authorization / auth 里取，全对不上时
         响亮报错。
         """
@@ -604,8 +653,8 @@ class QuarkClient:
         host = (pre.get("upload_host") or "").strip()
         if not host:
             raise QuarkError(
-                "夸克预上传响应未带上传主机（upload_host/host/"
-                "endpoint 均缺）——该形态未经活体验证，拒绝猜测"
+                "夸克预上传响应未带上传主机（upload_url/"
+                "upload_host/host/endpoint 均缺），拒绝猜测"
                 "默认主机")
         host = host.replace("https://", "").replace("http://", "")
         url = f"https://{pre['bucket']}.{host}/{pre['obj_key']}"
@@ -614,14 +663,20 @@ class QuarkClient:
         return url
 
     def _oss_send(self, method, url, *, auth, date, content=None,
-                  content_type=None):
+                  content_type=None, extra_headers=None):
         """OSS 裸请求出口：只带 OSS Authorization（+ 与签名串同
         值的 x-oss-date），绝不带夸克 Cookie（字节面与会话面
-        分离）。非 2xx 响亮抛 QuarkError。"""
+        分离）。extra_headers 为已进规范串签名的附加头（如
+        complete 的 Content-MD5 / x-oss-callback），原样带上。
+        非 2xx 响亮抛 QuarkError，并把 OSS 错误体里的
+        Code/Message（脱敏截断后）带回——只报状态码时死因不
+        可考（43004 前车之鉴）。"""
         headers = {"Authorization": auth, "x-oss-date": date,
                    "x-oss-user-agent": QUARK_UA}
         if content_type:
             headers["Content-Type"] = content_type
+        if extra_headers:
+            headers.update(extra_headers)
         try:
             resp = _send(method, url, headers=headers, content=content,
                          timeout=_UPLOAD_TIMEOUT)
@@ -630,11 +685,20 @@ class QuarkClient:
                              step=self._step) from exc
         self._absorb_rotated_cookies(resp)
         if resp.status_code < 200 or resp.status_code >= 300:
-            # OSS 面的 401/403 多半是签名串对不上（auth 段形态
-            # 未活体验证），不定性为用户登录失效——绝不许因此
-            # 把用户绑定误判 expired。抛普通 QuarkError 走重试。
-            raise QuarkError(f"夸克 OSS 返回 HTTP {resp.status_code}",
-                             step=self._step)
+            # OSS 面的 401/403 多半是签名串对不上，不定性为用户
+            # 登录失效——绝不许因此把用户绑定误判 expired。抛
+            # 普通 QuarkError 走重试。
+            code, message = _oss_error_fields(
+                getattr(resp, "text", "") or "")
+            message = _sanitize_upstream_text(message, self.cookie)
+            text = f"夸克 OSS 返回 HTTP {resp.status_code}"
+            if code:
+                text += f"（{code}）"
+            if message:
+                text += f"：{message}"
+            raise QuarkError(text, step=self._step,
+                             upstream_code=code or None,
+                             upstream_message=message or None)
         return resp
 
     def upload_part(self, pre: dict, part_number: int, data: bytes,
@@ -662,12 +726,18 @@ class QuarkClient:
                 "无法组装 CompleteMultipartUpload")
         return etag
 
-    def upload_commit(self, pre: dict, parts: list, auth: str,
-                      date: str) -> None:
+    def upload_commit(self, pre: dict, parts: list) -> None:
         """CompleteMultipartUpload：POST OSS（body 为分片清单 XML）。
 
         parts 为 [(part_number, etag), ...]，按片号排序组装。
         OSS 对本操作可能回 200 + <Error> XML 体，须查体。
+
+        签名与请求头是 2026-11-02 活体定案的组合：规范串带
+        Content-MD5 行（本 XML 体的 base64 md5）与
+        x-oss-callback 规范头行（pre 回的 callback 紧凑 JSON
+        的 base64），POST 本体同步带 Content-MD5 与
+        x-oss-callback 头。pre 没回 callback 时两处一并省略
+        （该回退组合未活体验证，属如实未知项）。
         """
         items = "".join(
             "<Part><PartNumber>{}</PartNumber><ETag>\"{}\"</ETag>"
@@ -676,11 +746,29 @@ class QuarkClient:
         body = ('<?xml version="1.0" encoding="UTF-8"?>'
                 "<CompleteMultipartUpload>" + items
                 + "</CompleteMultipartUpload>").encode("utf-8")
-        self._step = "finish"
         query = f"uploadId={pre['upload_id']}"
+        content_md5 = base64.b64encode(
+            hashlib.md5(body).digest()).decode()
+        callback = pre.get("callback")
+        cb_b64 = ""
+        if isinstance(callback, dict) and callback:
+            cb_b64 = base64.b64encode(json.dumps(
+                callback, separators=(",", ":")).encode()).decode()
+        meta, date = _auth_meta(
+            "POST", pre["bucket"], pre["obj_key"],
+            content_type="application/xml", query=query,
+            content_md5=content_md5,
+            extra_headers=(f"x-oss-callback:{cb_b64}",)
+            if cb_b64 else ())
+        auth = self.upload_auth(pre, meta)
+        self._step = "finish"
+        extra = {"Content-MD5": content_md5}
+        if cb_b64:
+            extra["x-oss-callback"] = cb_b64
         resp = self._oss_send(
             "POST", self._oss_url(pre, query), auth=auth, date=date,
-            content=body, content_type="application/xml")
+            content=body, content_type="application/xml",
+            extra_headers=extra)
         text = ""
         try:
             text = resp.text or ""
@@ -741,11 +829,7 @@ class QuarkClient:
             number += 1
             if size == 0:
                 break
-        meta, date = _auth_meta(
-            "POST", pre["bucket"], pre["obj_key"],
-            query=f"uploadId={pre['upload_id']}")
-        auth = self.upload_auth(pre, meta)
-        self.upload_commit(pre, parts, auth, date)
+        self.upload_commit(pre, parts)
         data = self.upload_finish(pre["task_id"], pre["obj_key"])
         return {"outcome": "uploaded", "fid": _finish_fid(data)}
 
