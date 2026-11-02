@@ -941,3 +941,73 @@ def test_executor_115_source_to_quark(db, fake_exec, monkeypatch):
     variant = db.query(em.TransferVariant).first()
     assert variant.variant_drive_id == "quark:user-7"
     assert variant.variant_file_id == "qfid-up"
+
+
+# ---------------------------------------------------------------------------
+# 取链失败留痕（2026-11-02 深挖）：转 transient 时必须把步位/上游
+# code/message 落日志——此前静默吞掉，生产 5 次取链失败在台账里
+# 只剩 kind=transient、死因不可考。
+# ---------------------------------------------------------------------------
+
+import logging as _logging
+
+
+class _GoneQuarkClient:
+    """download 时上游明确应答信封错误（文件不存在）。"""
+
+    def __init__(self, cookie):
+        self.cookie = cookie
+
+    def download_url(self, fid):
+        raise quarkdrive.QuarkError(
+            "夸克返回 code=40401：文件不存在", step="download",
+            upstream_code=40401, upstream_message="文件不存在")
+
+
+class _AuthButAliveQuarkClient:
+    """download 单次鉴权失败，但验活三步全过（复核 alive）。"""
+
+    def __init__(self, cookie):
+        self.cookie = cookie
+
+    def download_url(self, fid):
+        raise quarkdrive.QuarkAuthError(
+            "夸克返回 HTTP 401（登录态失效）", step="download",
+            upstream_code=31001, upstream_message="require login")
+
+    def check(self):
+        return {"ok": True}
+
+    def list_root(self):
+        return []
+
+    def list_dir(self, pdir_fid, page_size=100):
+        return []
+
+
+def test_resolve_quark_envelope_error_logs_upstream(db, monkeypatch, caplog):
+    _binding(db, 7, "quark")
+    monkeypatch.setattr(quarkdrive, "QuarkClient", _GoneQuarkClient)
+    with caplog.at_level(_logging.WARNING,
+                         logger="backend.emby_server.user_bindings"):
+        with pytest.raises(ub.BindingError) as excinfo:
+            ub.resolve_user_quark_copy_url(db, 7, "qfid-gone")
+    assert excinfo.value.kind == "transient"
+    assert "upstream_code=40401" in caplog.text
+    assert "step=download" in caplog.text
+
+
+def test_resolve_quark_auth_recheck_alive_logs_verdict(db, monkeypatch,
+                                                       caplog):
+    binding = _binding(db, 7, "quark")
+    monkeypatch.setattr(quarkdrive, "QuarkClient",
+                        _AuthButAliveQuarkClient)
+    with caplog.at_level(_logging.WARNING,
+                         logger="backend.emby_server.user_bindings"):
+        with pytest.raises(ub.BindingError) as excinfo:
+            ub.resolve_user_quark_copy_url(db, 7, "qfid9")
+    assert excinfo.value.kind == "transient"
+    assert "verdict=alive" in caplog.text
+    assert "upstream_code=31001" in caplog.text
+    db.refresh(binding)
+    assert binding.status == "active"  # 复核未判死，绑定不许落 expired
