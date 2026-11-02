@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""苹果 CMS 集行结构回归（新媒体库类型一期·集行单，只预留结构）。
+"""苹果 CMS 集行结构回归（新媒体库类型·集行单）。
 
 口径（2026-11-02 定案）：
-- 一期只灌电影，剧集库不开、``sync_library`` 对 tvshows 库仍
-  blocked；本单只把「剧行＋合成单季行＋集行＋集映射」的构建函数
-  与行形约定先钉死，二期放行时直接接线，不许到时另起一套形状。
+- 本文件钉死「剧行＋合成单季行＋集行＋集映射」的构建函数与行形
+  约定；tvshows 库的同步接线由集行同步单放行（见
+  test_applecms_library_series_sync.py），这里只验构建函数本身
+  与行形，不许另起一套形状。
 - CMS 无季概念：一部剧合成一张季行（第 1 季），多季混排是已知
   局限（设计稿明示）；集序号 = 直链组内 1 起序号，与 mapped
   取流口的 episode_index 同一口径。
@@ -130,8 +131,17 @@ def test_ensure_series_tree_idempotent(db):
     assert db.query(em.MediaItem).count() == 5  # 剧+季+3集
 
 
-def test_tvshows_library_still_blocked_in_phase1(db):
+def test_tvshows_library_passes_collection_gate(db):
+    """集行同步单已放行 tvshows：空目录轮次不 blocked、无行落库。
+
+    （放行前这里断言 blocked=unsupported_collection；接线行为的
+    全量桩链覆盖在 test_applecms_library_series_sync.py。）
+    """
     lib = _seed(db)
-    stats = als.sync_library(db, lib, http_get=None)
-    assert stats["blocked"] == "unsupported_collection"
+
+    def empty_get(url, headers=None, timeout=None):
+        return 200, {"code": 1, "page": 1, "pagecount": 1, "list": []}
+
+    stats = als.sync_library(db, lib, http_get=empty_get)
+    assert stats["blocked"] is None
     assert db.query(em.MediaItem).count() == 0

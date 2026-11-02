@@ -7,18 +7,32 @@
 ``~/workspace/reports/applecms-library-type-design-20261102.md``。
 
 口径（全部 2026-11-02 定案）：
-- 只拉 provide ``ac=list`` 分页，**同步期不拉 detail**：播放地址绝不
-  落库（点播时由 mapped 取流口现取 302），年份/海报等元数据不靠
-  CMS 的残缺字段，由 TMDB 补全链补。
+- 播放地址绝不落库（点播时由 mapped 取流口现取 302），年份/海报
+  等元数据不靠 CMS 的残缺字段，由 TMDB 补全链补。电影库只拉
+  provide ``ac=list`` 分页、同步期不拉 detail；剧集库例外逐条
+  拉 detail，但只取集数与集名（见下剧集库条）。
 - 身份不豁免：行建成托管行后 ``enrich_status`` 保持 ``pending``，
   现有 enrich 工人对 ``upstream_source_id`` 非空的行自动走「只走
   TMDB」补身份分支；对不上身份的行按现行货架规矩不上架，本模块
   不做任何货架过滤。
 - 去重：标题+年份键（``aggregate_key_for``），一行多映射；行的
   ``upstream_source_id`` 是先到源（主来源），其余源只挂映射。
-- 一期只做电影：剧集形态（``vod_serial`` 解析出集数 > 1）跳过并
-  计数，集行结构由三单预留；本工人只处理 movies 库（series 库
-  一期不开，遇到直接 blocked=unsupported_collection）。
+- 电影库（movies）：剧集形态（``vod_serial`` 解析出集数 > 1）
+  跳过并计数，形态边界靠分类白名单（见下）。
+- 剧集库（tvshows，集行同步单放行）：白名单口径与电影库一致，
+  收进来的条目一律按剧处理——逐条拉 detail 现取集列表，调
+  ``applecms_series.ensure_series_tree`` 建「剧行＋合成单季行＋
+  集行＋逐集映射」；detail 只用来数集与取集名，地址绝不落库。
+  集序号 = 直链组内 1 起序号（与取流口 resolve_play 同口径）；
+  无直链组的整剧跳过计数（不建死行），detail 已消失跳过计数，
+  detail 请求失败只计 detail_errors、不回滚整源。集数增减
+  只增不删：新集靠增量轮重拉 detail 补行，源侧删集不删行，
+  存量由月度对账兜底。mixed 等其它呈现类型仍
+  blocked=unsupported_collection。
+- 库是配置层：一库一白名单，本工人不写死库数量与库名——按
+  地区细拆的多个剧集库（国产剧/欧美剧/日韩剧/动漫/综艺，
+  2026-11-02 定版）各配一份白名单即可承接；港台并入国产的
+  分类名清单由建库时逐源核定，不进代码。
 - 分类：``cms_type_map`` 按**顶级分类名**判定（子类沿 provide 的
   ``class`` 分类树回溯）。映射为空 = 全收；**非空 = 白名单**：
   只有标 ``"in"`` 的顶级分类收，其余（标 ``"out"`` 或没写到）
@@ -106,6 +120,11 @@ def _zero_stats(library_id: int) -> Dict[str, object]:
         "pages": 0, "skipped_category": 0, "skipped_series_shape": 0,
         "skipped_invalid": 0, "skipped_other_library": 0,
         "dedupe_hits": 0, "errors": [], "seen_by_source": {},
+        # 剧集路径计数（电影库恒 0）：集行增/存量、无直链组跳过、
+        # detail 已消失跳过、detail 请求失败（不回滚整源）。
+        "episodes_added": 0, "episodes_existing": 0,
+        "skipped_no_direct_group": 0, "skipped_detail_missing": 0,
+        "detail_errors": 0,
     }
 
 
@@ -185,7 +204,7 @@ def sync_library(db: Session, library, *, http_get=None, full: bool = False,
                  max_pages: Optional[int] = None,
                  sleep_fn: Optional[Callable[[float], None]] = None
                  ) -> Dict[str, object]:
-    """同步一个 CMS 库的全部配置源（一期仅电影）。返回统计 dict。
+    """同步一个 CMS 库的全部配置源（电影库/剧集库）。返回统计 dict。
 
     ``full=False`` 为增量轮（h=24 窗口）；``full=True`` 全量（对账
     单用，seen_by_source 才是完整的源目录清单）。本函数不查总开关
@@ -195,10 +214,12 @@ def sync_library(db: Session, library, *, http_get=None, full: bool = False,
     if not acl.is_applecms_library(library):
         stats["blocked"] = "not_applecms_library"
         return stats
-    if (getattr(library, "collection_type", "") or "") != "movies":
-        # 一期只做电影；剧集库不开，集行三单落地后再放行。
+    collection = getattr(library, "collection_type", "") or ""
+    if collection not in ("movies", "tvshows"):
+        # 呈现类型只放行电影/剧集：mixed 等无行形口径，继续 blocked。
         stats["blocked"] = "unsupported_collection"
         return stats
+    series_mode = collection == "tvshows"
     if not uim.mapping_enabled():
         stats["blocked"] = "mapping_off"
         return stats
@@ -214,14 +235,16 @@ def sync_library(db: Session, library, *, http_get=None, full: bool = False,
     for source_id in source_ids:
         _sync_source(db, library, source_id, stats, run_cache,
                      type_map=type_map, http_get=http_get, full=full,
-                     max_pages=max_pages, sleep_fn=sleep_fn)
+                     max_pages=max_pages, sleep_fn=sleep_fn,
+                     series_mode=series_mode)
     _write_progress(db, library, stats, started)
     return stats
 
 
 def _sync_source(db: Session, library, source_id: int, stats: dict,
                  run_cache: dict, *, type_map: dict, http_get,
-                 full: bool, max_pages, sleep_fn) -> None:
+                 full: bool, max_pages, sleep_fn,
+                 series_mode: bool = False) -> None:
     source = us.get_source(db, source_id)
     if source is None:
         stats["errors"].append(f"source_missing:{source_id}")
@@ -254,7 +277,9 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
             for entry in entries:
                 _process_entry(db, library, source, entry, stats,
                                run_cache, type_map=type_map, tops=tops,
-                               seen=seen)
+                               seen=seen, series_mode=series_mode,
+                               http_get=http_get, headers=headers,
+                               do_sleep=do_sleep, delay=delay)
             try:
                 pagecount = int(payload.get("pagecount") or 0)
             except (TypeError, ValueError):
@@ -282,7 +307,17 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
 
 def _process_entry(db: Session, library, source, entry: dict,
                    stats: dict, run_cache: dict, *, type_map: dict,
-                   tops: dict, seen: List[str]) -> None:
+                   tops: dict, seen: List[str],
+                   series_mode: bool = False, http_get=None,
+                   headers: Optional[dict] = None, do_sleep=None,
+                   delay: float = 0.0) -> None:
+    if series_mode:
+        # 剧集路径独立成段：电影路径逐字不动（回归口径）。
+        _process_series_entry(
+            db, library, source, entry, stats, run_cache,
+            type_map=type_map, tops=tops, seen=seen, http_get=http_get,
+            headers=headers, do_sleep=do_sleep, delay=delay)
+        return
     vod_id = str(entry.get("vod_id") or "").strip()
     if not vod_id:
         stats["skipped_invalid"] += 1
@@ -326,6 +361,133 @@ def _process_entry(db: Session, library, source, entry: dict,
         confidence=CMS_MAPPING_CONFIDENCE,
         evidence=CMS_MAPPING_EVIDENCE)
     stats["mapped"] += 1
+
+
+def _process_series_entry(db: Session, library, source, entry: dict,
+                          stats: dict, run_cache: dict, *,
+                          type_map: dict, tops: dict, seen: List[str],
+                          http_get, headers, do_sleep,
+                          delay: float) -> None:
+    """剧集库单条目：分类白名单 → 去重找剧行 → 拉 detail 建/补树。
+
+    集序号解析口径：detail 的首个全直链组内 1 起序号
+    （``applecms_series.plan_episodes``，与取流口同一选组逻辑）。
+    解析不了（无直链组）的整剧跳过并计数留痕——建了也是播不了
+    的死行；detail 已消失（源侧删条目）跳过计数；detail 请求
+    失败只计 detail_errors 继续下一条，不回滚整源（拉 detail
+    发生在任何写库之前，单条失败不污染事务）。源侧删集不删行：
+    已有集行只增不删，存量由月度对账兜底。
+    """
+    # 延迟导入：applecms_series 反向引用本模块的映射常量，顶层
+    # 互引会成环；接线只在剧集路径发生，电影路径不付这个成本。
+    from backend.emby_server import applecms_series as acser
+
+    vod_id = str(entry.get("vod_id") or "").strip()
+    if not vod_id:
+        stats["skipped_invalid"] += 1
+        return
+    seen.append(vod_id)
+    top = _entry_top_category(entry, tops)
+    if type_map and type_map.get(top) != "in":
+        # 与电影库同一白名单：一库一映射，只有标 in 的顶级分类收。
+        stats["skipped_category"] += 1
+        return
+    try:
+        record = acs.cms_entry_to_record(entry, source_id=str(source.id))
+    except ValueError:
+        stats["skipped_invalid"] += 1
+        return
+    key = agg.aggregate_key_for(record)
+    row = run_cache.get(key)
+    if row is None:
+        row = _find_series_row(db, library, source, vod_id, record, key)
+        if row is not None:
+            run_cache[key] = row
+    if row is _OTHER_LIBRARY:
+        stats["skipped_other_library"] += 1
+        return
+    if delay > 0 and do_sleep is not None:
+        do_sleep(delay)
+    try:
+        detail = acf.fetch_detail(source.base_url, vod_id,
+                                  http_get=http_get, headers=headers)
+    except acf.AppleCMSError as exc:
+        stats["detail_errors"] += 1
+        logger.warning(
+            "applecms 剧集 detail 失败 library_id=%s source_id=%s "
+            "vod_id=%s kind=%s",
+            library.id, source.id, vod_id, exc.kind)
+        return
+    if detail is None:
+        stats["skipped_detail_missing"] += 1
+        return
+    if not acser.plan_episodes(detail):
+        stats["skipped_no_direct_group"] += 1
+        logger.info(
+            "applecms 剧集无直链组跳过 library_id=%s source_id=%s "
+            "vod_id=%s", library.id, source.id, vod_id)
+        return
+    if row is None:
+        tree = acser.ensure_series_tree(db, library, source, record,
+                                        detail)
+        stats["added"] += 1
+        row = _find_series_row(db, library, source, vod_id, record, key)
+        if row is not None and row is not _OTHER_LIBRARY:
+            run_cache[key] = row
+    else:
+        if _refresh_row(row, record):
+            stats["updated"] += 1
+        else:
+            stats["existing"] += 1
+        if row.upstream_source_id != source.id:
+            stats["dedupe_hits"] += 1
+        tree = acser.ensure_series_tree(db, library, source, record,
+                                        detail, existing_series=row)
+    stats["episodes_added"] += tree["episodes_added"]
+    stats["episodes_existing"] += tree["episodes_existing"]
+    stats["mapped"] += tree["mapped"]
+
+
+def _find_series_row(db: Session, library, source, vod_id: str,
+                     record, key: str):
+    """剧集版找行：先按本源集映射 → 再按 guid → 再按去重键。
+
+    与电影版同序：映射命中说明本源喂过这部剧（集映射挂在集行上，
+    顺 series_id 回到剧行）；guid 命中别库同样回 _OTHER_LIBRARY
+    哨兵，不抢行；去重键只在本库 series 行里比（标题+年份）。
+    """
+    mapping = (
+        db.query(em.UpstreamItemMapping)
+        .filter(em.UpstreamItemMapping.source_id == source.id,
+                em.UpstreamItemMapping.upstream_item_id == vod_id,
+                em.UpstreamItemMapping.episode_index.isnot(None))
+        .order_by(em.UpstreamItemMapping.id)
+        .first())
+    if mapping is not None:
+        episode_row = db.get(em.MediaItem, mapping.local_item_id)
+        if episode_row is not None and episode_row.series_id:
+            row = db.get(em.MediaItem, episode_row.series_id)
+            if row is not None and row.library_id == library.id:
+                return row
+    row = uimp._usable_row_by_guid(db, uimp.hosted_guid(source.id, vod_id))
+    if row is not None:
+        return row if row.library_id == library.id else _OTHER_LIBRARY
+    candidates = (
+        db.query(em.MediaItem)
+        .filter(em.MediaItem.library_id == library.id,
+                em.MediaItem.item_type == "series",
+                em.MediaItem.name == record.name)
+        .all())
+    for cand in candidates:
+        cand_record = agg.UpstreamCatalogRecord(
+            source_id=str(source.id), upstream_item_id=vod_id,
+            name=cand.name or "", item_type="Series",
+            production_year=cand.production_year,
+            tmdb_id=cand.tmdb_id or None,
+            imdb_id=cand.imdb_id or None)
+        if agg.aggregate_key_for(cand_record) == key:
+            return cand
+    return None
 
 
 _OTHER_LIBRARY = object()
@@ -415,6 +577,11 @@ def _write_progress(db: Session, library, stats: dict,
         "skipped_invalid": stats["skipped_invalid"],
         "skipped_other_library": stats["skipped_other_library"],
         "dedupe_hits": stats["dedupe_hits"],
+        "episodes_added": stats["episodes_added"],
+        "episodes_existing": stats["episodes_existing"],
+        "skipped_no_direct_group": stats["skipped_no_direct_group"],
+        "skipped_detail_missing": stats["skipped_detail_missing"],
+        "detail_errors": stats["detail_errors"],
         "errors": list(stats["errors"]),
         "sources": list(stats["seen_by_source"].keys()),
     }
