@@ -215,10 +215,33 @@ def _audit(db, action: str, admin, target, detail: dict) -> None:
         detail=detail)
 
 
+def _manage_guard_refusal(db, admin, target, op: str) -> str | None:
+    """管理员目标守卫：网站端 update_user 同款口径（PA-056）。
+
+    - 目标是其他管理员且操作者非超管 → 拒绝（网站端 403 口径）；
+    - 封禁最后一名可登录超管 → 拒绝（网站端 400 口径）。
+    自禁不在此：ban 分支的自禁分支在先、口径保留；unban 自身不受影响。
+    """
+    from backend import admin_roles
+    from backend.api.admins_admin import _locked_loginable_super_count
+
+    if (bool(getattr(target, "is_staff", False))
+            and target.id != admin.id
+            and not admin_roles.is_super(admin)):
+        return "⛔ 目标账号是管理员：只有超级管理员能管理其他管理员。"
+    if (op == "ban"
+            and admin_roles.role_of(target) == admin_roles.ROLE_SUPER
+            and _locked_loginable_super_count(db) <= 1):
+        return ("⛔ 不能封禁最后一名可登录的超级管理员："
+                "请先给别的账号授予超级管理员。")
+    return None
+
+
 def execute(db, admin, target, op: str) -> str:
     """执行已确认的写操作，返回结果回显文案（面板 main 页展示）。
 
     全部走现行服务（见模块头注），本函数只做编排＋审计＋提交。
+    封禁/解封前先过管理员目标守卫（PA-056，见 _manage_guard_refusal）。
     """
     from backend.user_lifecycle import set_user_active
 
@@ -226,6 +249,9 @@ def execute(db, admin, target, op: str) -> str:
     if op == "ban":
         if target.id == admin.id:
             return "⛔ 不能封禁自己的账号（与网站管理端口径一致）。"
+        refusal = _manage_guard_refusal(db, admin, target, op)
+        if refusal:
+            return refusal
         changed = set_user_active(db, target, False)
         if changed:
             _audit(db, "whois_ban", admin, target, {"via": "tg_whois_panel"})
@@ -233,6 +259,9 @@ def execute(db, admin, target, op: str) -> str:
             return f"✅ 已封禁 <b>{name}</b>：账号已停用，Emby 令牌已全部吊销。"
         return f"ℹ️ <b>{name}</b> 已经是停用状态，未做变更。"
     if op == "unban":
+        refusal = _manage_guard_refusal(db, admin, target, op)
+        if refusal:
+            return refusal
         changed = set_user_active(db, target, True)
         if changed:
             _audit(db, "whois_unban", admin, target, {"via": "tg_whois_panel"})

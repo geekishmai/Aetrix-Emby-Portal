@@ -275,6 +275,76 @@ def test_pa057_missing_target_click_leaves_shared_panel_intact(db, monkeypatch):
         db, monkeypatch, "whois:bind:999999")
     assert edited == []  # 目标不存在也不改写共享面板
     assert "目标账号不存在" in answers
+# ---------- PA-056：面板封禁/解封须复用网站端管理员目标守卫 ----------
+
+def _admin(db, tg, name, role):
+    return _user(db, tg, name, staff=True, admin_role=role)
+
+
+def test_pa056_operator_cannot_ban_super(db, monkeypatch):
+    operator = _admin(db, 700011, "op", "operator")
+    target = _admin(db, 700012, "sup", "super")
+    edited = _click(db, monkeypatch, f"whois:do:{target.id}:ban", tg=700011)
+    assert edited
+    db.refresh(target)
+    assert target.is_active is True  # 拒绝，未封禁
+    assert "超级管理员" in edited[0][0]
+
+
+def test_pa056_operator_cannot_unban_super(db, monkeypatch):
+    operator = _admin(db, 700011, "op", "operator")
+    target = _admin(db, 700012, "sup", "super")
+    target.is_active = False
+    db.commit()
+    edited = _click(db, monkeypatch, f"whois:do:{target.id}:unban", tg=700011)
+    assert edited
+    db.refresh(target)
+    assert target.is_active is False  # 拒绝，未解封
+    assert "超级管理员" in edited[0][0]
+
+
+def test_pa056_operator_cannot_ban_other_admin(db, monkeypatch):
+    operator = _admin(db, 700011, "op", "operator")
+    target = _admin(db, 700013, "op2", "operator")
+    edited = _click(db, monkeypatch, f"whois:do:{target.id}:ban", tg=700011)
+    assert edited
+    db.refresh(target)
+    assert target.is_active is True
+    assert "超级管理员" in edited[0][0]
+
+
+def test_pa056_super_can_ban_operator(db, monkeypatch):
+    sup = _admin(db, 700011, "sup", "super")
+    target = _admin(db, 700013, "op2", "operator")
+    edited = _click(db, monkeypatch, f"whois:do:{target.id}:ban", tg=700011)
+    assert edited
+    db.refresh(target)
+    assert target.is_active is False  # 超管封普通管理员，口径不变
+    assert "已封禁" in edited[0][0]
+
+
+def test_pa056_last_loginable_super_cannot_be_banned(db, monkeypatch):
+    # 仅剩一名可登录超管时，连超管身份的操作者（自身已停用）也不能封他；
+    # 网站端同款口径（_locked_loginable_super_count <= 1 → 拒绝）。
+    actor = _admin(db, 700011, "sup_off", "super")
+    actor.is_active = False
+    target = _admin(db, 700012, "sup", "super")
+    db.commit()
+    edited = _click(db, monkeypatch, f"whois:do:{target.id}:ban", tg=700011)
+    assert edited
+    db.refresh(target)
+    assert target.is_active is True
+    assert "超级管理员" in edited[0][0]
+
+
+def test_pa056_super_ban_super_with_two_active_allowed(db, monkeypatch):
+    sup1 = _admin(db, 700011, "sup1", "super")
+    sup2 = _admin(db, 700012, "sup2", "super")
+    edited = _click(db, monkeypatch, f"whois:do:{sup2.id}:ban", tg=700011)
+    assert edited
+    db.refresh(sup2)
+    assert sup2.is_active is False  # 还有另一名可登录超管，允许
+    assert "已封禁" in edited[0][0]
 
 
 # ---------- 结构守卫：网站管理端与面板共用同一封禁服务 ----------
