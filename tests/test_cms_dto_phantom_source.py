@@ -153,12 +153,34 @@ def _auth_header():
 
 @pytest.fixture(scope="module")
 def token(client):
-    r = client.post(
-        "/emby/Users/AuthenticateByName",
-        json={"Username": USER, "Pw": PW},
-        headers={"X-Emby-Authorization": _auth_header()})
-    assert r.status_code == 200, r.text
-    return r.json()["AccessToken"]
+    # 全量套件共用登录面状态：本文件在套件里位置靠前，邻居文件的
+    # 登录突发可能让本次登录撞上窗口型拒绝（第二轮 CI 实证：401 空
+    # body，而稍后同套件 phase1 的登录为 200）。单进程套件在本夹具
+    # 等待期间不会有其它登录发生，等待即可让窗口排空；重试上限内
+    # 仍失败才报错，并附种子用户在 DB 侧的诊断供定性。
+    import time
+    last = None
+    for wait in (0, 5, 10, 15, 20, 25):
+        if wait:
+            time.sleep(wait)
+        r = client.post(
+            "/emby/Users/AuthenticateByName",
+            json={"Username": USER, "Pw": PW},
+            headers={"X-Emby-Authorization": _auth_header()})
+        if r.status_code == 200:
+            return r.json()["AccessToken"]
+        last = r
+    db = SessionLocal()
+    try:
+        u = db.query(models.WebUser).filter(
+            models.WebUser.username == USER).first()
+        diag = ("user row missing" if u is None else
+                f"user id={u.id} is_active={u.is_active}")
+    finally:
+        db.close()
+    raise AssertionError(
+        f"login failed after retries: status={last.status_code} "
+        f"body={last.text!r} seed_diag={diag}")
 
 
 def _detail(client, token, guid):
