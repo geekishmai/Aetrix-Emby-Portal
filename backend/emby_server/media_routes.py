@@ -18,6 +18,10 @@ from backend.database import SessionLocal, get_db
 from backend.emby_server import image_store
 from backend.emby_server import models as em
 from backend.emby_server.auth import get_emby_user, get_play_user, parse_emby_authorization, resolve_token
+from backend.emby_server.upstream_http import (
+    OutboundBlockedError,
+    verify_outbound_url,
+)
 from backend.emby_server.streaming import (
     serve_file,
     serve_image,
@@ -173,6 +177,40 @@ def _virtual_season_series(db: Session, item_id: str):
     )
 
 
+_IMAGE_PROXY_REDIRECTS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+def _proxy_remote_image(src: str, client=None):
+    """SSRF 守卫版远程图片代理（PA-076，取图层落点之二）。
+
+    首跳与每个重定向目标发请求前都走 ``verify_outbound_url``（解析复验，
+    拒绝回环/私网/链路本地/保留地址）；被拦截抛 ``OutboundBlockedError``，
+    调用方转 404，绝不把请求发进内网。重定向由本函数手动逐跳跟随：
+    共享客户端按次传 ``follow_redirects=False`` 覆盖其默认跟随，连接复用
+    不变；超过 ``_IMAGE_PROXY_REDIRECTS`` 跳抛 ``RuntimeError``（路由转 404）。
+    ``client`` 仅供测试注入假传输，生产调用不传（走 image_proxy 共享客户端）。
+    """
+    from urllib.parse import urljoin
+
+    from backend.emby_server import mounts as _mounts
+
+    if client is None:
+        client = _mounts._shared_http_client("image_proxy", timeout=10)
+    current = src
+    for hop in range(_IMAGE_PROXY_REDIRECTS + 1):
+        verify_outbound_url(current)
+        resp = client.get(current, follow_redirects=False)
+        location = (resp.headers or {}).get("location")
+        if resp.status_code in _REDIRECT_STATUSES and location:
+            if hop >= _IMAGE_PROXY_REDIRECTS:
+                raise RuntimeError("远程图片重定向过多")
+            current = urljoin(current, location)
+            continue
+        return resp
+    raise RuntimeError("远程图片重定向过多")
+
+
 @emby_router.get("/emby/Items/{item_id}/Images/{image_type}")
 @emby_router.get("/Items/{item_id}/Images/{image_type}")
 def item_image(item_id: str, image_type: str, request: Request,
@@ -274,13 +312,21 @@ def item_image(item_id: str, image_type: str, request: Request,
         if cached:
             _remember_local_image(db, item, kind, cached)
             return _serve_sized(cached, ew, eh)
-        # 仅允许代理 http(s) 远程图片（防 SSRF）
+        # 仅允许代理 http(s) 远程图片。注意：scheme 校验本身不是 SSRF 防护，
+        # 真正的私网/回环拦截在 _proxy_remote_image 的逐跳 verify_outbound_url。
         # 共享客户端复用连接：海报墙穿透时不用每次建连
-        from backend.emby_server import mounts as _mounts
-
         try:
-            r = _mounts._shared_http_client("image_proxy", timeout=10).get(src)
+            r = _proxy_remote_image(src)
             r.raise_for_status()
+        except OutboundBlockedError:
+            from urllib.parse import urlsplit as _urlsplit
+
+            logger.warning("远程图片被出站守卫拦截（主机已脱敏）: %s",
+                           _urlsplit(src).hostname or "?")
+            # 被拦截与其它取图失败同口径：同样排队修复（冒烟
+            # smoke_test_media_search 钉住“远程图失效时也排队修复”）。
+            _queue_image_repair(db, item, src)
+            raise HTTPException(status_code=404, detail="Image not found")
         except Exception as e:  # noqa: BLE001 — 远程图失效不能让图片接口 5xx
             logger.warning("远程图片获取失败 %s: %s", src, e)
             _queue_image_repair(db, item, src)
@@ -327,7 +373,8 @@ def person_image(name: str, request: Request,
     同名演员取第一条有头像的行（``ORDER BY id``，行为稳定）。图片来源是
     ``emby_people.image`` 存的 TMDB 远程 URL——与 ``item_image`` 同口径：
     先 ``image_store.localize`` 落本地（刮削时已在 IO 阶段预热，通常是一次
-    ``isfile``），落不下来就 404，不代理、不抛 5xx。只允许 http(s)（防 SSRF）。
+    ``isfile``），落不下来就 404，不代理、不抛 5xx。只允许 http(s)，且本地化
+    下载本身走 PA-076 的逐跳出站守卫（scheme 校验本身不是 SSRF 防护）。
     """
     ew, eh = image_store.pick_dim(maxWidth, w), image_store.pick_dim(maxHeight, h)
     return _serve_person_image(name, db, ew, eh)
