@@ -85,6 +85,11 @@ class Library(Base):
     # kind=applecms 时的分类映射（JSON 文本）：源分类名 → "in"/"out"，
     # 数据驱动、管理员配，不写死站名/分类名；空 = 全收。
     cms_type_map = Column(Text)
+    # kind=applecms 时的地区分流桶（抓详情分流，2026-11-02）：空/NULL
+    # = 不分地区（总库行为，与升级前逐字一致）；huayu/oumei/rihan =
+    # 只收该地区条目，地区由同步工人按 vod_area 归一化判定（唯一
+    # 实现在 applecms_library.area_bucket），判不出的不入地区库。
+    cms_area_bucket = Column(String(20))
     # 绑定 115 账号配置档（pan115_accounts.id）：不同媒体库可用不同 115 账号转存/下载。
     # 未绑定时回退到默认账号，再回退到服务器级 PAN115_COOKIE（兼容旧部署）。
     account_115_id = Column(Integer)
@@ -1215,6 +1220,39 @@ class UpstreamItemMapping(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
                         nullable=False)
+
+
+class AppleCMSDetailCache(Base):
+    """苹果 CMS detail 抓取缓存（抓详情分流，2026-11-02）。
+
+    一行 = 一个（源, vod）的 detail 提取结果：``area`` 是
+    ``vod_area`` 原文，``harvest`` 是多源填充用的源站字段 JSON
+    （海报/简介/评分/演员/导演/备注/分类名，键名与
+    ``UpstreamCatalogRecord`` 透传组一致）。为什么新表：detail
+    只许打一次是**跨库**不变式——同一个（源, vod）会被总库与
+    地区库各处理一遍，被某库按桶跳过的条目不建行、不记映射，
+    现有表（upstream_item_mappings / upstream_hosted_lifecycle）
+    都以 local_item_id 为键，挂不下「还没有本地行」的抓取结果。
+
+    只存提取后的字段，**绝不存 detail 原文**（vod_play_url 等
+    播放地址不落库的红线不变）。抓取失败不写行：下轮重试。
+    不加外键（照 UpstreamSource 先例），由 create_all 自动建表。
+    """
+
+    __tablename__ = "applecms_detail_cache"
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "upstream_item_id",
+                         name="uq_applecms_detail_cache_pair"),
+        Index("ix_applecms_detail_cache_source", "source_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_id = Column(Integer, nullable=False)  # upstream_sources.id，无外键
+    upstream_item_id = Column(String(100), nullable=False)  # 源站 vod_id
+    area = Column(String(200), nullable=False, default="")  # vod_area 原文
+    harvest = Column(Text, nullable=False, default="")  # 提取字段 JSON
+    fetched_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
 class UpstreamLibraryLink(Base):

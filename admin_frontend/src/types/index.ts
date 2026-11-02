@@ -1067,6 +1067,8 @@ export interface EmbyLibrary {
   upstream_source_ids?: number[]
   /** kind=applecms 时的分类映射：源分类名 → in/out；null = 全收 */
   cms_type_map?: Record<string, string> | null
+  /** kind=applecms 时的地区分流桶：huayu/oumei/rihan；null = 不分地区 */
+  cms_area_bucket?: string | null
   /** 绑定的 115 账号配置档（不填则回退默认账号 / 服务器级 PAN115_COOKIE） */
   account_115_id?: number | null
   /**

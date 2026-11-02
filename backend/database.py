@@ -1127,6 +1127,12 @@ def _auto_migrate():
             ("upstream_source_ids", "TEXT", "''"),
             ("cms_type_map", "TEXT", "NULL"),
         ]),
+        # 苹果 CMS 地区分流桶（2026-11-02 抓详情分流）：老库补列
+        # 后为 NULL（= 不分地区），与升级前行为逐字一致（见
+        # emby_server.applecms_library.area_bucket）。
+        ("emby_libraries", [
+            ("cms_area_bucket", "VARCHAR(20)", "NULL"),
+        ]),
     ]
 
     _newly_added_columns: list[tuple[str, str]] = []

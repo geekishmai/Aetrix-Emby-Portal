@@ -93,6 +93,13 @@ TMDB_TEXT_FILL_ONLY_CONFIG_KEY = "enrich_tmdb_text_fill_only"
 _TEXT_FILL_CACHE = {"at": 0.0, "value": True}
 _TEXT_FILL_TTL_SEC = 30.0
 
+# 苹果 CMS 源站填充的暂定出处标记（值与 applecms_library_sync 的
+# CMS_METADATA_SOURCE 相同，两处以注释锚定、防漂移测试兜底）：
+# 带此标记的行，文字/评分/类型/国家只是 CMS 源站自带资料，
+# TMDB 命中时**视为未填**——「只填空」保护对它不生效，落库后
+# 标记转正为 "tmdb"，保证 TMDB 优先于源站填充。
+PROVISIONAL_METADATA_SOURCE = "applecms"
+
 # ---------------------------------------------------------------------------
 # 请求级限流 / 超时 / 429 退避（v2.42.9）
 
@@ -2345,7 +2352,10 @@ class TmdbClient:
             return
         # 详情只补缺项（简介/评分/别名/类型/年份/首播日期），不覆盖 NFO 提供的文字。
         # 用 getattr 兜底：调用方（含测试里的轻量替身）未必带这个字段。
-        if not getattr(item, "metadata_source", None):
+        # 例外：源站暂定填充（PROVISIONAL）视为未填，TMDB 盖过后转正。
+        provisional = getattr(item, "metadata_source", None) == \
+            PROVISIONAL_METADATA_SOURCE
+        if not getattr(item, "metadata_source", None) or provisional:
             item.metadata_source = "tmdb"
         # 片长（元数据口径）：探测前客户端「媒体信息」不至于显示 0 秒
         apply_runtime(item, data)
@@ -2353,7 +2363,7 @@ class TmdbClient:
         # 这是「有 tmdb_id 却无类型」的主因：以前 apply_details 完全忽略它，
         # 凡走 tmdb_id → 详情分支的（NFO 自带 tmdb_id、别名匹配、已有 id 补缺）
         # 都永远拿不到类型，只有搜索命中走 apply() 的才有。
-        if not (getattr(item, "genres", None) or "").strip():
+        if provisional or not (getattr(item, "genres", None) or "").strip():
             gnames = _genres_from_details(data)
             if gnames:
                 item.genres = ",".join(gnames)
@@ -2367,7 +2377,8 @@ class TmdbClient:
         # 简介与评分也从详情补：搜索结果的 overview/vote_average 经常是空或 0，
         # 只靠 apply() 会让「有 tmdb_id 却缺简介/评分」的一大批永远补不上。
         # 批2：只填空、不覆盖——已有简介/评分时 TMDB 详情不再覆盖。
-        fill_only = tmdb_text_fill_only()
+        # 源站暂定填充豁免：那些值只是 CMS 自带资料，按未填处理。
+        fill_only = tmdb_text_fill_only() and not provisional
         overview = data.get("overview")
         if overview and (not fill_only or not (getattr(item, "overview", None) or "").strip()):
             item.overview = overview
@@ -2404,7 +2415,7 @@ class TmdbClient:
         # 只补缺项、不覆盖已有（与简介/评分同口径）；getattr 兜底轻量替身。
         countries = [str(c).strip() for c in (data.get("origin_country") or [])
                      if str(c).strip()]
-        if countries and not getattr(item, "countries", None):
+        if countries and (provisional or not getattr(item, "countries", None)):
             item.countries = ",".join(countries)[:500]
         spoken = data.get("spoken_languages") or []
         lang_names = [str(l.get("english_name") or l.get("name") or "").strip()
@@ -2457,6 +2468,9 @@ class TmdbClient:
         return bool(specs)
 
     def apply(self, item: emby_models.MediaItem, hit: dict, kind: str) -> None:
+        # 源站暂定填充在标记被改写前先记下：它不享受「只填空」保护。
+        provisional = getattr(item, "metadata_source", None) == \
+            PROVISIONAL_METADATA_SOURCE
         item.tmdb_id = str(hit.get("id"))
         item.last_scraped_at = datetime.now()
         # 文字与图片都来自 TMDB 搜索结果
@@ -2466,7 +2480,8 @@ class TmdbClient:
         # TMDB 对没有评分的条目返回 0.0，那是**合法数据**，判假值会让这类条目
         # 永远没有评分（生产实测 21天重养自己 就是 0.0）。已有评分时 TMDB 的
         # 0.0 不再覆盖（为将来 NFO/人工编辑让路）。
-        fill_only = tmdb_text_fill_only()
+        # 源站暂定填充豁免：那些值只是 CMS 自带资料，按未填处理。
+        fill_only = tmdb_text_fill_only() and not provisional
         if not fill_only or not (getattr(item, "overview", None) or "").strip():
             item.overview = hit.get("overview") or item.overview
         rating = hit.get("vote_average")

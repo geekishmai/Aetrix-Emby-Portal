@@ -188,6 +188,8 @@ interface LibFormState {
   upstream_source_ids: number[]
   /** kind=applecms 时的分类映射（JSON 文本，分类名 → in/out；空 = 全收） */
   cms_type_map_text: string
+  /** kind=applecms 时的地区分流桶：'' = 不分地区；huayu/oumei/rihan */
+  cms_area_bucket: string
 }
 
 function emptyLibForm(): LibFormState {
@@ -205,6 +207,7 @@ function emptyLibForm(): LibFormState {
     kind: 'local',
     upstream_source_ids: [],
     cms_type_map_text: '',
+    cms_area_bucket: '',
   }
 }
 
@@ -477,6 +480,7 @@ function formFingerprint(): string {
     kind: libForm.kind,
     upstream_source_ids: [...libForm.upstream_source_ids].sort((a, b) => a - b),
     cms_type_map_text: libForm.cms_type_map_text.trim(),
+    cms_area_bucket: libForm.cms_area_bucket,
   })
 }
 
@@ -534,6 +538,7 @@ coverAutoRegen.value = l.cover_auto_regen === true
     kind: l.kind || 'local',
     upstream_source_ids: [...(l.upstream_source_ids || [])],
     cms_type_map_text: l.cms_type_map ? JSON.stringify(l.cms_type_map, null, 2) : '',
+    cms_area_bucket: l.cms_area_bucket || '',
   })
   libFormVisible.value = true
   libFormFingerprintAtOpen.value = formFingerprint()
@@ -631,7 +636,7 @@ async function saveForm(thenScan = false) {
         fs_watch: fsWatch.value,
         kind: isCms ? 'applecms' : 'local',
         ...(isCms
-          ? { upstream_source_ids: [...libForm.upstream_source_ids], cms_type_map: cmsTypeMap }
+          ? { upstream_source_ids: [...libForm.upstream_source_ids], cms_type_map: cmsTypeMap, cms_area_bucket: libForm.cms_area_bucket || null }
           : {}),
       })
       savedId = res.id
@@ -654,7 +659,7 @@ async function saveForm(thenScan = false) {
           ? {}
           : { path_entries: pathEntries, node_id: libForm.node_id ?? null }),
         ...(isCms
-          ? { upstream_source_ids: [...libForm.upstream_source_ids], cms_type_map: cmsTypeMap }
+          ? { upstream_source_ids: [...libForm.upstream_source_ids], cms_type_map: cmsTypeMap, cms_area_bucket: libForm.cms_area_bucket || null }
           : {}),
         cover_template: coverTemplate.value || null,
         cover_title: coverTitle.value || null,
@@ -2797,6 +2802,22 @@ function typeLabel(t: string): string {
                 按源站的顶级分类名决定收不收：留空 = 全部收；一旦填写，
                 就只有标 <code>in</code> 的顶级分类会收（白名单），没写到的一律不收。
                 电影库就把该源的电影顶级分类标 in。只认分类名，不写死任何站的业务。
+              </p>
+            </el-form-item>
+
+            <el-form-item label="地区分流">
+              <el-select v-model="libForm.cms_area_bucket" style="width: 100%">
+                <el-option label="不分地区（全部收）" value="" />
+                <el-option label="华语" value="huayu" />
+                <el-option label="欧美" value="oumei" />
+                <el-option label="日韩" value="rihan" />
+              </el-select>
+              <p class="field-help">
+                按片子的出品地区拆库：同步工人按详情里的地区判定
+                （港台归华语、日韩合一桶、欧美国家归欧美），合拍与
+                判不出的不进地区库、留在「不分地区」的总库里。配了
+                桶的库同步时会为缺地区的条目多打一次详情请求（同
+                一条目只打一次、结果跨库复用）。
               </p>
             </el-form-item>
           </el-form>
