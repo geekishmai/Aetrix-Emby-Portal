@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("DATABASE_TYPE", "sqlite")
 os.environ.setdefault("REDIS_ENABLED", "false")
@@ -459,6 +460,22 @@ def _stub_text_get(url, headers=None, timeout=None):
     return 200, _MASTER
 
 
+def _wait_quality(mapping_id, key="label", timeout=5.0):
+    """等后台画质回填落缓存（回填已后台化，resolve 返回时可能未落袋）。
+
+    回填本体整包一次性 store：等到目标字段出现即可断言其余字段；
+    超时返回最后一次读数，调用方断言照常报错（不掩盖真失败）。
+    与 test_cms_play_quality_background 的 _wait_quality 同口径。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cached = up.read_cms_quality(mapping_id)
+        if cached and cached.get(key):
+            return cached
+        time.sleep(0.05)
+    return up.read_cms_quality(mapping_id)
+
+
 def test_directed_resolve_picks_selected_mapping(stub_db):
     item, map_a, map_b, _ = _stub_seed(stub_db)
     url = up.resolve_mapped_upstream_stream(
@@ -467,8 +484,9 @@ def test_directed_resolve_picks_selected_mapping(stub_db):
         http_get_text=_stub_text_get)
     # 选乙源就只出乙源的地址，不许回落最佳（甲源）
     assert url == "https://cdn-b.example/master.m3u8"
-    # 取流顺手回填画质缓存（m3u8 主清单真实数值）
-    cached = up.read_cms_quality(map_b.id)
+    # 取流顺手回填画质缓存（m3u8 主清单真实数值）；回填已后台化，
+    # 等落袋再断言，不许按旧同步契约立即读（与后台线程竞速必偶红）
+    cached = _wait_quality(map_b.id, key="width")
     assert cached["width"] == 1920 and cached["height"] == 1080
     assert cached["bandwidth"] == 8_000_000
     assert cached["label"] == "1080P"
@@ -477,7 +495,9 @@ def test_directed_resolve_picks_selected_mapping(stub_db):
         stub_db, item.id, http_get=_stub_detail_get,
         http_probe=lambda *a: (200, None))
     assert url_a == "https://cdn-a.example/movie.mp4"
-    assert up.read_cms_quality(map_a.id)["label"] == "1080P"
+    # 甲源 .mp4 的后台回填走默认有界跟随抓取（单跳 3 秒、至多 4 跳），
+    # 等落袋预算按其上限给足，断言仍是备注标签原文
+    assert _wait_quality(map_a.id, timeout=15.0)["label"] == "1080P"
 
 
 def test_directed_resolve_hard_errors_no_fallback(stub_db):

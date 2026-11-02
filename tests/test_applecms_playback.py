@@ -9,6 +9,7 @@
   夹具地址均为 example.com 占位域名。
 """
 import os
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -348,17 +349,33 @@ def _counting_text_get(calls):
         return 200, _MASTER_TEXT
     return http_get_text
 
+def _wait_quality(mapping_id, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cached = up.read_cms_quality(mapping_id)
+        if cached and cached.get("width"):
+            return cached
+        time.sleep(0.05)
+    return up.read_cms_quality(mapping_id)
+
 
 def test_quality_master_fetched_once_across_two_plays(
         monkeypatch, cms_source):
     _env_on(monkeypatch)
     calls = []
-    for _ in range(2):
-        url = up.resolve_upstream_stream(
-            None, 7, "205", quality_mapping_id=977001,
-            http_get=_detail_get(M3U8_DETAIL), http_probe=_probe_ok(),
-            http_get_text=_counting_text_get(calls))
-        assert url == "https://cdn.example.com/master.m3u8"
+    # 回填已改后台：第一发回来时抓取可能还在跑，先等落袋再发第二发，
+    # 否则第二发会在缓存补齐前重复抓取（异步语义，不是回退）。
+    url = up.resolve_upstream_stream(
+        None, 7, "205", quality_mapping_id=977001,
+        http_get=_detail_get(M3U8_DETAIL), http_probe=_probe_ok(),
+        http_get_text=_counting_text_get(calls))
+    assert url == "https://cdn.example.com/master.m3u8"
+    assert _wait_quality(977001)["width"] == 1920
+    url = up.resolve_upstream_stream(
+        None, 7, "205", quality_mapping_id=977001,
+        http_get=_detail_get(M3U8_DETAIL), http_probe=_probe_ok(),
+        http_get_text=_counting_text_get(calls))
+    assert url == "https://cdn.example.com/master.m3u8"
     # 第一发抓主清单回填，第二发命中完整缓存、零抓取
     assert len(calls) == 1
     cached = up.read_cms_quality(977001)
@@ -371,13 +388,21 @@ def test_quality_master_fetched_once_soft_pass_branch(
     """软探活分支（探活 403）同样受门禁约束：两次点播只抓一发。"""
     _env_on(monkeypatch)
     calls = []
-    for _ in range(2):
-        url = up.resolve_upstream_stream(
-            None, 7, "205", quality_mapping_id=977002,
-            http_get=_detail_get(M3U8_DETAIL),
-            http_probe=_probe_status(403),
-            http_get_text=_counting_text_get(calls))
-        assert url == "https://cdn.example.com/master.m3u8"
+    # 回填已改后台：第一发回来时抓取可能还在跑，先等落袋再发第二发，
+    # 否则第二发会在缓存补齐前重复抓取（异步语义，不是回退）。
+    url = up.resolve_upstream_stream(
+        None, 7, "205", quality_mapping_id=977002,
+        http_get=_detail_get(M3U8_DETAIL),
+        http_probe=_probe_status(403),
+        http_get_text=_counting_text_get(calls))
+    assert url == "https://cdn.example.com/master.m3u8"
+    assert _wait_quality(977002)["width"] == 1920
+    url = up.resolve_upstream_stream(
+        None, 7, "205", quality_mapping_id=977002,
+        http_get=_detail_get(M3U8_DETAIL),
+        http_probe=_probe_status(403),
+        http_get_text=_counting_text_get(calls))
+    assert url == "https://cdn.example.com/master.m3u8"
     assert len(calls) == 1
 
 
@@ -392,8 +417,8 @@ def test_quality_incomplete_cache_still_fetches(monkeypatch, cms_source):
         http_get=_detail_get(M3U8_DETAIL), http_probe=_probe_ok(),
         http_get_text=_counting_text_get(calls))
     assert url == "https://cdn.example.com/master.m3u8"
+    cached = _wait_quality(977003)
     assert len(calls) == 1
-    cached = up.read_cms_quality(977003)
     assert cached["width"] == 1920 and cached["height"] == 1080
 
 
@@ -407,8 +432,8 @@ def test_quality_no_cache_fetches_and_backfills(monkeypatch, cms_source):
         http_get=_detail_get(M3U8_DETAIL), http_probe=_probe_ok(),
         http_get_text=_counting_text_get(calls))
     assert url == "https://cdn.example.com/master.m3u8"
+    cached = _wait_quality(977004)
     assert calls == ["https://cdn.example.com/master.m3u8"]
-    cached = up.read_cms_quality(977004)
     assert cached["width"] == 1920 and cached["height"] == 1080
     assert cached["bandwidth"] == 8_000_000
     assert cached["label"] == "1080P"

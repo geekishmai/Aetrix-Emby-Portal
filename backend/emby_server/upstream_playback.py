@@ -105,6 +105,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -157,6 +158,12 @@ def cms_circuit_breaker_threshold() -> int:
 
 #: 上游探活/认证单次超时（秒，运维常量，见模块 docstring）。
 UPSTREAM_PROBE_TIMEOUT_SEC = 10.0
+
+#: CMS 播放 302 关键路径探活单跳超时（秒，运维常量）：302 下发前
+#: 的探活必须快，单跳 2.5 秒（最多 4 跳跟随，最坏 10 秒，原 40 秒）；
+#: 其余调用点（Emby 认证、Emby/Jellyfin 分支探活、媒体参数拉取）
+#: 仍用 UPSTREAM_PROBE_TIMEOUT_SEC，一字不动。
+CMS_PLAY_PROBE_TIMEOUT_SEC = 2.5
 
 #: 播放探活重定向跟随上限（跳，运维常量）：上游以 302 发流是常态
 #: （Emby stream → 网盘直链 → 对象存储签名链，生产实测两跳），
@@ -952,6 +959,27 @@ def _fetch_cms_detail_network(source, vod_id: str, *,
     return detail
 
 
+def _capture_cms_quality_async(source, mapping_id, detail, address, *,
+                               http_get_text=None) -> None:
+    """画质回填放后台线程：302 关键路径不等它。
+
+    回填本体已 fail-safe（全程吞异常、缓存门禁先行），线程 daemon
+    化、随进程退出丢弃——漏补的下次点播门禁未满时再补，不阻塞、
+    不改写 302 结果。测试可 monkeypatch 本函数改同步。
+    """
+    if mapping_id is None:
+        return
+    thread = threading.Thread(
+        target=_capture_cms_quality,
+        args=(source, mapping_id, detail, address),
+        kwargs={"http_get_text": http_get_text},
+        name="cms-quality-capture", daemon=True)
+    try:
+        thread.start()
+    except Exception:  # noqa: BLE001 — 后台回填失败不影响取流
+        pass
+
+
 def _play_from_cms_detail(source, detail, episode_index, *,
                           http_probe: Optional[Callable] = None,
                           http_get_text: Optional[Callable] = None,
@@ -965,7 +993,7 @@ def _play_from_cms_detail(source, detail, episode_index, *,
     为 True 时按既有软放行下发，为 False（detail 来自缓存）时抛
     ``_CmsEvictableFailure`` 让调用方淘汰重解析；探活 404 同样抛
     ``_CmsEvictableFailure``，其余探活状态走
-    ``_classify_probe_status`` 原样分类。成功时回填画质并返回地址。
+    ``_classify_probe_status`` 原样分类。成功时后台回填画质并返回地址（回填不等 302）。
     """
     from backend.emby_server import applecms_fetcher as acf
     try:
@@ -994,7 +1022,7 @@ def _play_from_cms_detail(source, detail, episode_index, *,
     _, _group_name, address = result
     probe = _default_http_range_probe if http_probe is None else http_probe
     probe_status, retry_after = probe(
-        address, _source_headers(source), UPSTREAM_PROBE_TIMEOUT_SEC)
+        address, _source_headers(source), CMS_PLAY_PROBE_TIMEOUT_SEC)
     if probe_status == 403:
         if not soft_pass_403:
             raise _CmsEvictableFailure(
@@ -1009,7 +1037,7 @@ def _play_from_cms_detail(source, detail, episode_index, *,
         # 统一分类（404 判死 / 401 凭据 / 429 额度 / 5xx 不可用）；
         # Emby/Jellyfin 分支不经这里，403 仍判 upstream_forbidden。
         logger.info("cms_probe_soft_pass source_id=%s", source.id)
-        _capture_cms_quality(source, quality_mapping_id, detail, address,
+        _capture_cms_quality_async(source, quality_mapping_id, detail, address,
                              http_get_text=http_get_text)
         return address
     try:
@@ -1022,7 +1050,7 @@ def _play_from_cms_detail(source, detail, episode_index, *,
                 retry_after=exc.retry_after) from exc
         raise
     logger.info("上游播放解析成功 source_id=%s", source.id)
-    _capture_cms_quality(source, quality_mapping_id, detail, address,
+    _capture_cms_quality_async(source, quality_mapping_id, detail, address,
                          http_get_text=http_get_text)
     return address
 

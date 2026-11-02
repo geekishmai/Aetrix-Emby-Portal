@@ -193,6 +193,22 @@ def _capture(mid, address):
     up._capture_cms_quality(_source(), mid, {}, address)
 
 
+def _wait_quality(mapping_id, key, timeout=5.0):
+    """等后台画质回填落缓存（resolve 全链路的回填已后台化）。
+
+    回填本体整包一次性 store：等到目标字段出现即可断言其余字段；
+    超时返回最后一次读数，调用方断言照常报错（不掩盖真失败）。
+    与 test_cms_play_quality_background 的 _wait_quality 同口径。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cached = up.read_cms_quality(mapping_id)
+        if cached and cached.get(key):
+            return cached
+        time.sleep(0.05)
+    return up.read_cms_quality(mapping_id)
+
+
 # ---------------------------------------------------------------- 跳转型地址
 
 
@@ -326,8 +342,10 @@ def test_media_playlist_duration_backfilled(monkeypatch, cms_source):
         http_get=_detail_get(MEDIA_DETAIL), http_probe=_probe_ok(),
         http_get_text=http_get_text)
     assert url == MEDIA_URL
+    # 回填已后台化：先等时长落袋再断言抓取次数与缓存内容，
+    # 不许按旧同步契约立即读（与后台线程竞速必偶红）
+    cached = _wait_quality(978006, "duration_sec")
     assert calls == [MEDIA_URL]
-    cached = up.read_cms_quality(978006)
     assert cached["duration_sec"] == _MEDIA_DURATION
     # media playlist 没有分辨率/带宽信号，不许编
     assert not cached.get("width") and not cached.get("bandwidth")
