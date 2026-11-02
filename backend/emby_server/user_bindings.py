@@ -53,6 +53,7 @@ import uuid
 import logging
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.emby_server import models as em
@@ -107,8 +108,9 @@ class BindingError(RuntimeError):
 
     kind 取值：auth_error / expired / throttled（落状态三档）、
     pan115_vip_required / quark_vip_required（非会员账号，落 invalid）、
-    validation（入参/上限/重名，400）、unsupported（P1 不支持的
-    provider，如 drive，400）、not_found（非本人或不存在，404）、
+    validation（入参/上限，400）、conflict（同名绑定且凭据不同，
+    409）、unsupported（P1 不支持的 provider，如 drive，400）、
+    not_found（非本人或不存在，404）、
     transient（一过性失败，不落状态，调用方按 502 处理）。
     """
 
@@ -497,6 +499,87 @@ def _cookie_field(cookie: str, name: str) -> str:
     return ""
 
 
+def _same_credential(submitted: str, stored: str) -> bool:
+    """两份 Cookie 是否同一凭据：轮换字段不计。
+
+    夸克验活会轮换 __puus/__pus 并回写库内凭据，因此“同一表单
+    重提”时提交值与库内值常只差轮换字段——必须忽略它们比较，
+    否则重试会被误判成不同账号。115 凭据无轮换字段，等价于
+    明文相等比较。无 '=' 的裸片段两边一致忽略。
+    """
+
+    def parts(cookie: str) -> tuple:
+        pairs = {}
+        bare = []
+        for chunk in (cookie or "").split(";"):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if "=" in chunk:
+                key, value = chunk.split("=", 1)
+                key = key.strip()
+                if key in _ROTATION_COOKIE_KEYS:
+                    continue
+                pairs[key] = value.strip()
+            else:
+                # 无 '=' 的裸片段（如桩里的 COOKIE-XYZ）也参与比较：
+                # 忽略它们会把不同裸凭据误判成同一凭据。
+                bare.append(chunk)
+        return pairs, sorted(bare)
+
+    return parts(submitted) == parts(stored)
+
+
+def _handle_existing_binding(db: Session,
+                             existing: em.UserStorageBinding,
+                             cookie: str) -> em.UserStorageBinding:
+    """已有同名绑定时的定性：同凭据幂等返回，不同凭据 409。
+
+    解不开库内凭据时无法确认身份，fail-closed 走 409，不静默
+    返回可能是别人账号的绑定行。
+    """
+    try:
+        cred = _credential_of(db, existing)
+        stored = unseal_secret(cred.sealed_credential or "")
+    except SealedSecretError:
+        raise BindingError(
+            "conflict", "这个名字已用过，换个名字再绑。") from None
+    if _same_credential(cookie, stored):
+        return existing
+    raise BindingError("conflict", "这个名字已用过，换个名字再绑。")
+
+
+def _insert_binding_row(db: Session, binding: em.UserStorageBinding,
+                        user_id: int, provider: str, label: str,
+                        cookie: str) -> tuple[em.UserStorageBinding, bool]:
+    """INSERT 绑定行；撞唯一约束时按重复标签口径解决，永不 500。
+
+    竞态：验活窗口约数秒内两次提交都会通过预检，第二行的 INSERT
+    撞 uq_user_storage_binding_label。此时回滚（含刚插的凭据行），
+    重查已有行后走与预检同一口径：同凭据返回已有行
+    （created=False，调用方直接返回、不再验活）；不同凭据 409；
+    重查不到行（理论上不应发生）按一过性失败处理。
+    返回 (binding, created)。
+    """
+    db.add(binding)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = (
+            db.query(em.UserStorageBinding)
+            .filter(em.UserStorageBinding.user_id == user_id,
+                    em.UserStorageBinding.provider == provider,
+                    em.UserStorageBinding.account_label == label)
+            .first()
+        )
+        if existing is None:
+            raise BindingError(
+                "transient", "提交冲突，请刷新列表后重试。") from None
+        return _handle_existing_binding(db, existing, cookie), False
+    return binding, True
+
+
 def absorb_quark_cookie_rotation(db: Session,
                                  binding: em.UserStorageBinding,
                                  original_cookie: str,
@@ -794,7 +877,9 @@ def create_binding(db: Session, user_id: int, provider: str,
 
     - provider 必须在 USER_STORAGE_PROVIDERS 内；drive 在 P1 拒绝
       （验证随 P2 OAuth 上线，不存验不活的行），错误明说 P2；
-    - label 去空白后 1–100 字；同用户同 provider 下重名拒绝；
+    - label 去空白后 1–100 字；同用户同 provider 下已有同名绑定时，
+      同凭据（轮换字段不计）幂等返回已有行、不同凭据 409 人话提示，
+      并发撞唯一约束的竞态分支走同一口径，永不 500；
     - 上限：该用户全部绑定行（含失败态）计入上限，超了拒绝
       （删掉死行即可腾位，不静默挤掉旧行）；
     - 验活通过：绑定 + 凭据行双双 active + last_verified_at；
@@ -830,8 +915,7 @@ def create_binding(db: Session, user_id: int, provider: str,
         .first()
     )
     if existing is not None:
-        raise BindingError(
-            "validation", f"同 provider 下已存在同名绑定「{label}」。")
+        return _handle_existing_binding(db, existing, cookie)
     count = (
         db.query(em.UserStorageBinding)
         .filter(em.UserStorageBinding.user_id == user_id)
@@ -854,8 +938,12 @@ def create_binding(db: Session, user_id: int, provider: str,
     binding = em.UserStorageBinding(
         user_id=user_id, provider=provider, account_label=label,
         credential_id=cred.id, status="invalid")
-    db.add(binding)
-    db.flush()
+    binding, created = _insert_binding_row(
+        db, binding, user_id, provider, label, cookie)
+    if not created:
+        # 竞态下已有行被幂等返回：凭据行已随回滚清理，直接返回，
+        # 不重验、不建第二行。
+        return binding
 
     verified_cookie = cookie
     try:
