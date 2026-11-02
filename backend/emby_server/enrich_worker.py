@@ -2315,6 +2315,24 @@ def _apply_douban_cast(db, item: Any, celebs: Optional[list]) -> None:
         logger.debug("豆瓣演员落库失败 %s: %s", getattr(item, "name", ""), exc)
 
 
+def _rename_from_known_tmdb(item, item_type: str, details: dict) -> None:
+    """已知 TMDB id（目录名 {tmdb-xxx}、绑定）的条目，片名换成 TMDB 标题。
+
+    这条路不调 ``TmdbClient.apply``，片名一直是文件名解析结果（「霸王花 The
+    Inspector Wears Skirts H 265 10 bit」）。只在覆盖模式
+    （``enrich_tmdb_text_fill_only=0``）下做，与 ``apply`` 的改名同口径；
+    只改电影和剧，单集名由 ``apply_episode`` 管。
+    """
+    from backend.emby_server.tmdb import clean_title, tmdb_text_fill_only
+    if item_type not in ("movie", "series") or not details or tmdb_text_fill_only():
+        return
+    _n = clean_title(details.get("name") if item_type == "series" else details.get("title"))
+    if _n and _n != (item.name or ""):
+        from backend.emby_server.pinyin_sort import make_sort_name
+        item.name = _n
+        item.sort_name = make_sort_name(_n)
+
+
 def _apply_cast(db, item: Any, details: Optional[dict]) -> None:
     """写库阶段：把 details 里的演员表写入 ``emby_people``（幂等）。
 
@@ -2764,6 +2782,7 @@ def _enrich_apply(db, item: Any, fetched: dict) -> None:
             if needs_repair or not (item.poster_path or item.primary_image_url):
                 tmdb_client.apply_images(item, details,
                                          images_lang=fetched.get("tmdb_images_lang"))
+            _rename_from_known_tmdb(item, item_type, details)
         if nfo_data:
             nfo_lib.apply_nfo(item, nfo_data, kind,
                                           skip_overview=_ep_skip_overview)
