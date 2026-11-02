@@ -1454,6 +1454,15 @@ def _fetch_episode_tmdb(item: Any, inherit_parent: Optional[dict],
             logger.debug("单集剧照预热失败: %s", exc)
 
 
+_PATH_TMDB_TAG_RE = re.compile(r"\{tmdb(?:id)?[-=](\d+)\}", re.IGNORECASE)
+
+
+def _path_tmdb_tag(item) -> Optional[str]:
+    """从条目路径取 {tmdb-N} / {tmdbid=N} 标签（取最后一个，离文件最近）"""
+    found = _PATH_TMDB_TAG_RE.findall(getattr(item, "file_path", None) or "")
+    return found[-1] if found else None
+
+
 def _tmdb_plan_for_item(item, nfo_data, kind, needs_repair):
     """根据 item 与 nfo 规划 TMDB 操作（纯函数，无网络调用）。
 
@@ -1492,6 +1501,14 @@ def _tmdb_plan_for_item(item, nfo_data, kind, needs_repair):
             return {"op": "details", "tmdb_id": tmdb_id, "why": "nfo", "kind": kind,
             "name": name or "", "year": production_year}
         return {"op": "none"}
+
+    # 1.5) 路径里的 {tmdb-N} 标签（MoviePilot 整理产物，目录名形如
+    # 「霸王花 (1988) {tmdb-12345}」）：直接按 id 拉详情。文件名带发布尾巴
+    # （「H 265 10 bit HD」）时按名称搜常常搜不中，还会把已知 id 判成未识别。
+    path_tag = _path_tmdb_tag(item)
+    if path_tag and tmdb_client.configured and kind in ("series", "movie"):
+        return {"op": "details", "tmdb_id": path_tag, "why": "path_tag", "kind": kind,
+                "name": name or "", "year": production_year}
 
     # 2) 影视类：先查别名映射，命中则直接拉详情，否则按名称搜索
     # （v2.56.0 起 TMDB 为主：不再跳过豆瓣命中的条目，豆瓣只在 TMDB 未命中时兜底）
@@ -1629,7 +1646,7 @@ def _apply_tmdb_plan_result(result, item, plan, out, kind):
     op = plan["op"]
     if op == "details" and plan.get("why") == "nfo":
         result["tmdb_details"] = out["details"]
-    elif op == "details" and plan.get("why") == "alias":
+    elif op == "details" and plan.get("why") in ("alias", "path_tag"):
         progress.note_stage("enrich_alias_hit")
         if out["details"] is not None:
             result["tmdb_id"] = plan["tmdb_id"]
