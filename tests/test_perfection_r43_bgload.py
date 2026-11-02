@@ -26,8 +26,14 @@ from backend.emby_server import tmdb_cache as _tmdb_cache  # noqa: E402
 
 
 @pytest.fixture()
-def mem_db(monkeypatch):
-    engine = create_engine("sqlite://")
+def mem_db(monkeypatch, tmp_path):
+    # 临时文件库，不用 :memory:：:memory: 的 SingletonThreadPool 在
+    # teardown 的 engine.dispose() 里遍历连接集合，其他测试泄漏的
+    # 后台线程若同时经被换绑的全局 SessionLocal 在本引擎上新建连接，
+    # 集合会在迭代中被改，间歇抛 RuntimeError: Set changed size
+    # during iteration（2026-11-02 CI tip 本体冒烟实证）。文件库走
+    # QueuePool，dispose 无此竞态。
+    engine = create_engine(f"sqlite:///{tmp_path}/r43_bgload.db")
     em.Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     # janitor_tick 在函数内 from backend.database import SessionLocal
