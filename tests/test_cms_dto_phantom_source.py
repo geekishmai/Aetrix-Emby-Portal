@@ -152,12 +152,11 @@ def _auth_header():
 
 
 @pytest.fixture(scope="module")
-def token(client):
-    # 全量套件共用登录面状态：本文件在套件里位置靠前，邻居文件的
-    # 登录突发可能让本次登录撞上窗口型拒绝（第二轮 CI 实证：401 空
-    # body，而稍后同套件 phase1 的登录为 200）。单进程套件在本夹具
-    # 等待期间不会有其它登录发生，等待即可让窗口排空；重试上限内
-    # 仍失败才报错，并附种子用户在 DB 侧的诊断供定性。
+def token(client, seed):
+    # 必须显式依赖 seed：不依赖时 pytest 对同级夹具的装配顺序不保证，
+    # 第二/三轮全量 CI 里 token 曾在 seed 落库前先跑，登录用户不存在
+    # → 裸 401（诊断 seed_diag=user row missing 实证）。下面的等待重
+    # 试只作兜底（登录面窗口型共享状态），正常路径一次即过。
     import time
     last = None
     for wait in (0, 5, 10, 15, 20, 25):
