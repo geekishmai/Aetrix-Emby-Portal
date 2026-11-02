@@ -214,7 +214,10 @@ class TestWiring:
             content = f.read()
         assert "def get_play_user" in content
         assert "expires_at=play_sign.token_expiry_default()" in content
-        assert content.count("play_sign.token_is_usable(row)") == 2
+        # token_is_usable 三个调用点：resolve_token / get_emby_user 的
+        # 令牌可用性校验 + PA-054 新增的 rotate_web_portal_token 图片
+        # key 复用校验（复用前同样过 token_is_usable，不另起第二套判据）
+        assert content.count("play_sign.token_is_usable(row)") == 3
 
     def test_model_has_expires_at(self):
         with open("backend/emby_server/models.py", encoding="utf-8") as f:
