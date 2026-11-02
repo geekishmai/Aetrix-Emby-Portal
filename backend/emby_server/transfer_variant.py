@@ -6829,6 +6829,85 @@ def _patrol_115_row(db, row, stats, now):
         row.last_checked_at = now
 
 
+def _patrol_quark_row(db, row, stats, now):
+    """夸克副本巡检：download_url(变体 fid) 验活（与 _patrol_115_row 同构）。
+
+    此前 patrol_once 没有夸克分流：quark: 行落进 Drive 分支，被拿去
+    调 Google Drive 的 files.get——夸克 fid 在谷歌侧必然 404，
+    每轮巡检记一次 strike、两轮置 stale，且 stale 的夸克行从不
+    纳入重验（只有 pan115: stale 行会被捞回）。生产实证（2026-11-02）：
+    全部 17 个被巡检过的夸克变体 stale_count=2/status=stale，
+    门禁又规定 stale_count>=1 的 ready 行不直接放行——新副本活
+    不过一轮巡检，用户永远撞「准备中」/重建（「第一次能播、
+    以后再也没成功过」的机制来源）。
+
+    口径与 115 巡检对齐：
+    - 成功 → strike 清零；stale 行复活为 ready（计 revived）；
+    - 认证错（QuarkAuthError，Cookie 失效）→ 不记 strike（不是
+      副本的错，绑定落态由播放/工人路径处理，巡检不改绑定）；
+    - 上游明确应答的拒绝（QuarkError 且 upstream_code 在场，如
+      文件不存在的信封错误）→ strike，满 2 次 stale；
+    - 其余（429/5xx/网络/响应形状异常，upstream_code 缺失）→
+      只记 errors、不记 strike（与 Drive 巡检同款：一过性不定性）；
+    - 绑定已无 / 凭据取用失败 → 跳过（不记 strike、不改行）。
+    验活请求吸收到的 Cookie 轮换照常 CAS 回写（absorb 口径，
+    失败不拖垮巡检）。
+    """
+    from backend.emby_server import quarkdrive
+    from backend.emby_server import transfer_quark
+    from backend.emby_server import user_bindings as ub
+    uid = (row.owner_ref or "").strip()
+    try:
+        user_id = int(uid)
+    except (TypeError, ValueError):
+        user_id = None
+    binding = _active_binding(db, user_id, "quark") if user_id else None
+    if binding is None:
+        return
+    try:
+        cookie = ub.binding_quark_cookie(db, user_id, binding.id)
+    except ub.BindingError:
+        return  # 凭据问题不记 strike（绑定落态已由 helper 处理）
+    client = transfer_quark._make_quark_client(cookie)
+    try:
+        client.download_url(row.variant_file_id)
+    except quarkdrive.QuarkAuthError:
+        ub.absorb_quark_cookie_rotation(db, binding, cookie,
+                                        client.cookie)
+        return  # 不记 strike
+    except quarkdrive.QuarkError as exc:
+        ub.absorb_quark_cookie_rotation(db, binding, cookie,
+                                        client.cookie)
+        if getattr(exc, "upstream_code", None) is None:
+            # 上游没给出明确应答（网络/429/5xx/形状异常）：一过性，
+            # 只记 errors、不记 strike。
+            stats["errors"] += 1
+            logger.warning(
+                "夸克副本巡检未定性失败 variant=%s step=%s（不记 strike）",
+                row.id, getattr(exc, "step", None))
+            return
+        row.last_checked_at = now
+        if row.status == "stale":
+            return  # 已是 stale，不重复记 strike
+        row.stale_count = (row.stale_count or 0) + 1
+        if row.stale_count >= STALE_STRIKES:
+            row.status = "stale"
+            stats["stale"] += 1
+    except Exception:
+        stats["errors"] += 1
+        logger.warning("夸克副本巡检异常 variant=%s（不记 strike）",
+                       row.id, exc_info=True)
+        return
+    else:
+        ub.absorb_quark_cookie_rotation(db, binding, cookie,
+                                        client.cookie)
+        if row.status == "stale":
+            row.status = "ready"
+            stats["revived"] = stats.get("revived", 0) + 1
+        row.stale_count = 0
+        row.last_checked_at = now
+
+
 # ---------------------------------------------------------------------------
 # 跨 provider 执行器（2026-10-30 重开恢复，机制照 FMBY 形状）
 #
@@ -9338,6 +9417,10 @@ def patrol_once(db, drive_api_factory, now=None):
       转存目录按 fid 核到）→ 复活为 ready（stale_count 清零，计
       revived）；核不到/认证错/通道限且目录核不到 → 保持 stale，
       不重复记 strike；Drive stale 行不在本单救回范围；
+    - 夸克行走 _patrol_quark_row（download_url 验活，口径同 115）：
+      此前无分流时 quark: 行落进 Drive get_file 分支必然 404 被
+      误记 strike/stale（2026-11-02 生产实证，见 _patrol_quark_row）；
+      stale 的夸克行与 115 行一样纳入重验、可复活；
     - 其它异常（429/5xx/网络）→ 只记日志，不记 strike。
     孤儿文件的自动删除不在 v1（删用户数据自动执行风险高，留复核）。
     """
@@ -9348,11 +9431,12 @@ def patrol_once(db, drive_api_factory, now=None):
     rows = db.query(em.TransferVariant).filter(
         em.TransferVariant.status == "ready").all()
     # 旧逻辑只查 ready，stale 永不重验——#1575 修通道后旧 stale 行
-    # 也回不来。本单只把 stale 的 115 行纳入重验（Drive stale 行
-    # 的 get_file 验活口径不同，不在本单范围，仍排除）。
+    # 也回不来。本单只把 stale 的 115/夸克行纳入重验（Drive stale
+    # 行的 get_file 验活口径不同，不在本单范围，仍排除）。
     rows += db.query(em.TransferVariant).filter(
         em.TransferVariant.status == "stale",
-        em.TransferVariant.variant_drive_id.startswith("pan115:")).all()
+        (em.TransferVariant.variant_drive_id.startswith("pan115:")
+         | em.TransferVariant.variant_drive_id.startswith("quark:"))).all()
     for row in rows:
         stats["checked"] += 1
         item = (db.query(em.MediaItem)
@@ -9366,6 +9450,10 @@ def patrol_once(db, drive_api_factory, now=None):
         if (row.variant_drive_id or "").startswith("pan115:"):
             # 115 副本不用 Drive get_file 验活（盘不同、凭据不同）。
             _patrol_115_row(db, row, stats, now)
+            continue
+        if (row.variant_drive_id or "").startswith("quark:"):
+            # 夸克副本同样不用 Drive get_file 验活（盘不同、凭据不同）。
+            _patrol_quark_row(db, row, stats, now)
             continue
         try:
             client.get_file(row.variant_drive_id or "", row.variant_file_id)
