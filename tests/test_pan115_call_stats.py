@@ -34,6 +34,7 @@ class _FakePipe:
 
 @pytest.fixture()
 def fake_redis(monkeypatch):
+    monkeypatch.setenv("PAN115_GUARD_ENABLED", "0")
     fake = _FakeRedis()
     monkeypatch.setattr(database, "get_redis", lambda: fake)
     return fake
@@ -67,6 +68,7 @@ def test_errors_counted_and_reraised(fake_redis, monkeypatch):
 
 
 def test_redis_unavailable_does_not_break_calls(monkeypatch):
+    monkeypatch.setenv("PAN115_GUARD_ENABLED", "0")
     monkeypatch.setattr(database, "get_redis", lambda: None)
     client = _client(monkeypatch)
     assert client._call("GET", f"{transfer115.PAN115_WEBAPI_BASE}/files") == {"state": True}
