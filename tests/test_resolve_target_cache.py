@@ -432,3 +432,48 @@ def test_scanner_evict_call_point_also_clears_resolve_cache(counting, monkeypatc
     scanner._evict_gone_drive_files(
         db, SimpleNamespace(id=1), [("mount://7/电影/a.mkv", "fid-gone")])
     assert mnt.resolve_cache_stats()["entries"] == 0
+
+
+# ---------------- 单飞：同一文件并发未命中只换一次链 ----------------
+
+def test_concurrent_misses_resolve_once(counting, monkeypatch):
+    """播放器起播会对同一文件并行发多个 Range：并发未命中只许真换链一次。"""
+    gate = threading.Event()
+    original = _CountingProvider.resolve_play_target
+
+    def slow(self, rel):
+        gate.wait(2)                 # 让所有线程都撞进未命中路径
+        return original(self, rel)
+
+    monkeypatch.setattr(_CountingProvider, "resolve_play_target", slow)
+    mount = _mount()
+    db = _FakeDB([mount])
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(
+        mnt.resolve_play_target("mount://7/电影/a.mkv", db))) for _ in range(8)]
+    for t in threads:
+        t.start()
+    time.sleep(0.2)
+    gate.set()
+    for t in threads:
+        t.join(5)
+    assert len(results) == 8
+    assert counting.calls == 1, "并发未命中必须单飞，只换一次链"
+    assert {r.value for r in results} == {counting.url}
+    assert mnt._RESOLVE_LOCKS == {}, "单飞锁用完必须清掉，不许随文件数增长"
+
+
+def test_single_flight_failure_does_not_wedge(counting, monkeypatch):
+    """换链失败不进缓存、不留锁：下一次解析照常重试。"""
+    def boom(self, rel):
+        type(self).calls += 1
+        raise mnt.MountError("上游挂了")
+
+    monkeypatch.setattr(_CountingProvider, "resolve_play_target", boom)
+    mount = _mount()
+    db = _FakeDB([mount])
+    for _ in range(2):
+        with pytest.raises(mnt.MountError):
+            mnt.resolve_play_target("mount://7/电影/a.mkv", db)
+    assert counting.calls == 2
+    assert mnt._RESOLVE_LOCKS == {}

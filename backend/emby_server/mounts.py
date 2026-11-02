@@ -2275,6 +2275,19 @@ _RESOLVE_CACHE_LOCK = threading.Lock()
 _RESOLVE_CACHE_STATS = {"hits": 0, "misses": 0, "expired": 0, "evictions": 0}
 
 
+#: 解析单飞锁（键同解析缓存）：同一文件并发未命中只让一个线程真去换链。
+_RESOLVE_LOCKS: dict = {}
+
+
+def _resolve_single_flight_lock(key: tuple) -> threading.Lock:
+    with _RESOLVE_CACHE_LOCK:
+        lock = _RESOLVE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _RESOLVE_LOCKS[key] = lock
+        return lock
+
+
 def resolve_cache_stats() -> dict:
     """解析缓存命中情况（健康检查 / 测试用）"""
     with _RESOLVE_CACHE_LOCK:
@@ -2457,11 +2470,23 @@ def resolve_play_target(file_path: Optional[str], db: Session, library=None, *,
     stored = _resolve_cache_get(cache_key)
     if stored is not None:
         return _reattach_cached_target(provider, stored, rel)
-    target = provider.resolve_final(rel)
-    if target.kind == "url":
-        target.value = validate_remote_url(target.value)
-        _resolve_cache_put(cache_key, _stored_play_target(provider, target, rel))
-    return target
+    # 未命中走单飞：播放器起播/拖动会对同一文件并行发 3-4 个 Range 请求，
+    # 不单飞就各自换一次链（115 换链是接口调用，正是风控盯的频率面）。
+    lock = _resolve_single_flight_lock(cache_key)
+    try:
+        with lock:
+            stored = _resolve_cache_get(cache_key)   # 等锁期间别人可能已经解析完
+            if stored is not None:
+                return _reattach_cached_target(provider, stored, rel)
+            target = provider.resolve_final(rel)
+            if target.kind == "url":
+                target.value = validate_remote_url(target.value)
+                _resolve_cache_put(cache_key, _stored_play_target(provider, target, rel))
+            return target
+    finally:
+        with _RESOLVE_CACHE_LOCK:
+            if _RESOLVE_LOCKS.get(cache_key) is lock:
+                _RESOLVE_LOCKS.pop(cache_key, None)
 
 
 def media_exists(file_path: str, db: Session, library=None) -> bool:
