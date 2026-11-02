@@ -271,3 +271,49 @@ def test_error_body_contains_no_playback_url(monkeypatch, cms_source):
     assert "cdn.example.com" not in str(body)
     assert "playtoken" not in str(body)
     assert set(body) <= {"code", "message", "source_id", "retry_after"}
+
+
+# ==================== 探活 403 软放行（CMS 库类型一期·播放单） ====================
+# 口径（2026-11-02 定案，只改 CMS 分支）：多家 CMS 播放 CDN 对数据
+# 中心 IP 一律 403——探活 403 只证明「服务器这个 IP 被拒」，不证明
+# 链死；detail 刚刚现取成功（源活着、条目在、直链组在）才是可用性
+# 信号。故 CMS 分支探活 403 不判死：记 soft-pass 结构化日志（只记
+# source_id、不记地址），照常下发 302，播放器在用户家里自拉。
+# 404/401/429/5xx 维持原判；Emby/Jellyfin 分支逐字不动（其 403 仍
+# 是 upstream_forbidden，见 test_upstream_playback 的同名回归）。
+
+def test_probe_403_soft_pass_returns_address(monkeypatch, cms_source, caplog):
+    import logging
+
+    _env_on(monkeypatch)
+    with caplog.at_level(logging.INFO,
+                         logger="backend.emby_server.upstream_playback"):
+        url = up.resolve_upstream_stream(
+            None, 7, "202",
+            http_get=_detail_get(SERIES_DETAIL),
+            http_probe=_probe_status(403))
+    assert url == "https://cdn.example.com/ep1.mp4"
+    soft = [r for r in caplog.records if "cms_probe_soft_pass" in r.message]
+    assert soft and "source_id=7" in soft[0].message
+    # 日志纪律：只记 id，绝不记播放地址
+    assert all("cdn.example.com" not in r.message for r in caplog.records)
+
+
+def test_probe_403_soft_pass_episode_two(monkeypatch, cms_source):
+    _env_on(monkeypatch)
+    url = up.resolve_upstream_stream(
+        None, 7, "202", episode_index=2,
+        http_get=_detail_get(SERIES_DETAIL),
+        http_probe=_probe_status(403))
+    assert url.startswith("https://cdn.example.com/ep2.mp4")
+
+
+def test_probe_401_still_credential_invalid_on_cms(monkeypatch, cms_source):
+    _env_on(monkeypatch)
+    with pytest.raises(up.UpstreamPlaybackError) as exc:
+        up.resolve_upstream_stream(
+            None, 7, "202",
+            http_get=_detail_get(SERIES_DETAIL),
+            http_probe=_probe_status(401))
+    assert (exc.value.status, exc.value.code) == (
+        409, "upstream_credential_invalid")
