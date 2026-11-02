@@ -376,16 +376,6 @@ def binding_provider(db: Session, binding: em.UserStorageBinding,
     if binding.provider in ub.REMOVED_PROVIDERS:
         # 已下线 provider 的存量绑定不许再扫描入库（2026-11-02 删除单）。
         raise BindingScanError("unsupported", ub.REMOVED_PROVIDER_MESSAGE)
-    if binding.provider == ub.PROVIDER_PAN115:
-        try:
-            cookie = ub.binding_115_cookie(db, binding.user_id, binding.id)
-        except ub.BindingError as exc:
-            raise BindingScanError(exc.kind, exc.message) from exc
-        # 桩挂载行：Pan115Mount 只读其 config（cid，缺省根目录 "0"）；
-        # 凭据全靠 cookie_override，不读挂载配置/账号档/服务器级 Cookie。
-        stub_mount = SimpleNamespace(config="{}")
-        return mount_lib.Pan115Mount(stub_mount, db=None,
-                                     cookie_override=cookie)
     raise BindingScanError(
         "unsupported", f"该 provider 不支持绑定扫描：{binding.provider}")
 

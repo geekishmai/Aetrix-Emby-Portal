@@ -207,9 +207,6 @@ class _FakeUser115:
 
 
 def _patch_user115(monkeypatch, fake):
-    monkeypatch.setattr(
-        ub, "binding_115_cookie",
-        lambda db_arg, user_id, binding_id: "CK-1")
     monkeypatch.setattr(tv, "_make_pan115_client", lambda cookie: fake)
 
 
@@ -275,25 +272,17 @@ def test_series_preheat_adds_no_env_key():
     assert "transfer_series_preheat" not in text
 
 
-# ---------- 播完触发：探针命中落 ready ----------
 
 
 
 
 
-# ---------- 探针未命中：删单、无墓碑、可重建 ----------
 
 
 
-def test_probe_error_deletes_probe_job_no_residue(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    _episode(db, series.id, 2)
-    fake = _FakeUser115(rapid="error")
-    _preheat(db, monkeypatch, anchor, fake)
-    assert _jobs(db) == []
+
+
+
 
 
 # ---------- 强信号才升搬字节：日帽 2 ----------

@@ -1252,31 +1252,6 @@ def _is_user_drive_copy_variant(variant) -> bool:
     return drive_id.startswith("userdrive:")
 
 
-def _variant_copy_scheme(variant) -> str:
-    """本人 ready 副本行的落盘方案前缀（取流 provider 分流口径）。
-
-    只认选路（交付计划 / resolve_play_file_id）会采用的行：归属
-    本人（owner_scope=user）、状态 ready、未吃过死链 strike
-    （与门禁 _newest_ready 对 stale 行的口径一致：吃过 strike
-    的行不再直用，走门禁任务逻辑重建）。命中回 ``quark:`` /
-    ``pan115:`` / ``userdrive:``；其余（无变体、服主行、未就绪、
-    认不出）回 ""——不参与分流，原流程逐字不变。
-    """
-    if variant is None:
-        return ""
-    if getattr(variant, "owner_scope", None) != "user":
-        return ""
-    if getattr(variant, "status", None) != "ready":
-        return ""
-    if (getattr(variant, "stale_count", 0) or 0) >= 1:
-        return ""
-    drive_id = str(getattr(variant, "variant_drive_id", "") or "")
-    for scheme in ("quark:", "pan115:", "userdrive:"):
-        if drive_id.startswith(scheme):
-            return scheme
-    return ""
-
-
 def _is_non_drive_variant(variant) -> bool:
     """变体行是否为非 Drive 落盘（夸克 / 115 副本）。
 
@@ -5456,37 +5431,6 @@ def _note_play_start_safe(item: em.MediaItem, **kwargs) -> None:
         pass
 
 
-def _note_115_probe_hop(item: em.MediaItem, *, user_id, method: str,
-                        verdict: str, status, probe_ms: int,
-                        size, req_ua: str, sign_ua: str, path: str) -> None:
-    """115 出流探测跳留痕：结构化日志一行 + 起播台账一行（同口径）。
-
-    背景（2026-11-02 取证 §6）：115 台账此前只记到「取链成功 +
-    302」，链发出之后的探测结果没有结构化落账，逐跳日志又会被
-    部署重启销毁——下次出问题还是瞎。本跳与解析行同 method /
-    variant，error_kind 记 ``alive_probe_<结论>``、resolve_ms 记
-    本跳（探测）耗时，与解析行按时间先后拼出「取链 → 探测 →
-    302/409」完整时间线；结构化日志侧记文件大小、探测状态码与
-    请求/签名 UA 指纹（只记指纹，见 user_bindings.ua_fingerprint）。
-    两处落点各自已有静默兜底，这里再套一层：留痕失败绝不影响出流。
-    """
-    try:
-        from backend.emby_server import user_bindings as _ub_trace
-
-        _ub_trace.log_115_alive_probe(
-            item_id=getattr(item, "id", None), user_id=user_id,
-            size=size, verdict=verdict, status=status,
-            req_ua=req_ua, sign_ua=sign_ua, path=path)
-    except Exception:  # noqa: BLE001 — 留痕不许打断出流
-        pass
-    _note_play_start_safe(
-        item, user_id=user_id, method=method,
-        variant=play_variants.BYOS115_DIRECT,
-        result="error" if verdict == "dead" else "ok",
-        error_kind=f"alive_probe_{verdict}",
-        resolve_ms=probe_ms)
-
-
 def _note_upstream_play_start_safe(user_id, resolve_ms) -> None:
     """上游播放口的起播打点安全口（#25-4 补记）。
 
@@ -6211,8 +6155,7 @@ async def playback_info(
                                     _ub_alt.get_active_binding,
                                     db, user.id, _ub_alt.PROVIDER_DRIVE) \
                                     is not None
-                            _v115 = await run_db(_tv_alt.ready_user115_variant,
-                                                 db, item.id, user.id)
+                            _v115 = None  # 115 绑盘线已删；ready_user115_variant 一期已恒 None
                             if _v115 is None and not _keep_stream_q:
                                 for _s in sources:
                                     for _k in ("DirectPlayUrl", "DirectStreamUrl",
@@ -6539,8 +6482,8 @@ async def video_stream(
     # 首播转存门禁（2026-10-26 用户亲定“先转存再播”）：绑定用户只走
     # 自己绑定盘里的副本，无副本先转存、转完再播，绝不静默回落共享
     # SA 中继。门禁在选路之后、阶段 6 换线之前：Drive 就绪副本已由
-    # 选路解析到（proceed 直接走副本）；115 就绪副本走用户 Cookie
-    # 现签 302（serve_115_copy）；准备中/失败报 409/503，不改走别的路。
+    # 选路解析到（proceed 直接走副本）；准备中/失败报 409/503，
+    # 不改走别的路。
     # 显式 byos 变体（用户已显式选自己盘）跳过门禁，不二次拦；
     # 已下发链接消费不追溯（与 #1341 绑定门禁同一口径）。
     # 绑定用户正在啃共享原件时，Quota 额度页不换下一个 SA。
@@ -6555,31 +6498,6 @@ async def video_stream(
             _tv.ensure_user_copy_gate, db, item, user,
             play_sign_consume=_play_sign_consume)
         _gate_verdict = (_transfer_gate or {}).get("verdict")
-        # 取流 provider 分流（2026-11-02 夸克副本串线修复）：选路
-        # （交付计划 plan_ready_leg / resolve_play_file_id）已采用
-        # 本人 ready 的非 Drive 副本时，取流路按副本落盘定，与
-        # 门禁本次为何 proceed 无关——尤其 play_sign 已下发链接
-        # 消费时门禁按口径直接 proceed、根本不看变体，此前夸克
-        # fid 就这样落进 Drive 快路被喂给 Google files.get，
-        # 404 原样出门（user 829 播 696679 实锤：转存单 done、
-        # 变体 ready、EA 侧 quark.cn 请求数为 0）。改判到与门禁
-        # 自报时完全相同的 serve 分支（下方整段复用，含出流端
-        # 开关复核与打点）；Drive 副本（userdrive:）不进这里，
-        # 行为逐字不变。
-        if _gate_verdict == "proceed":
-            _selected_scheme = _variant_copy_scheme(_play_variant)
-            if _selected_scheme == "quark:":
-                _transfer_gate = {
-                    "verdict": "serve_quark_copy",
-                    "reason": "selected_variant",
-                    "variant": _play_variant}
-                _gate_verdict = "serve_quark_copy"
-            elif _selected_scheme == "pan115:":
-                _transfer_gate = {
-                    "verdict": "serve_115_copy",
-                    "reason": "selected_variant",
-                    "variant": _play_variant}
-                _gate_verdict = "serve_115_copy"
         # 准备中态等流（2026-10-27 极限优化）：准备中不再直接 409
         # 让播放器拿无签地址连探 404、等它自己再查 PlaybackInfo
         # （实测约 24 秒感知等待）。流请求本身在这里等：每 0.2 秒
@@ -6603,151 +6521,6 @@ async def video_stream(
             _transfer_gate = await _tv.wait_for_transfer_ready(
                 _transfer_gate, _re_gate)
             _gate_verdict = (_transfer_gate or {}).get("verdict")
-        if _gate_verdict == "serve_115_copy":
-            _variant115 = (_transfer_gate or {}).get("variant")
-            _pickcode115 = (getattr(_variant115, "pickcode", "")
-                            or "").strip()
-            if not _pickcode115:
-                raise HTTPException(
-                    status_code=409,
-                    detail="115 用户副本已就绪但无 pickcode，无法取下载地址")
-            from backend.emby_server import user_bindings as _ub115
-            _byos_t0 = time.perf_counter()
-            try:
-                _url115 = await run_db(
-                    _ub115.resolve_user115_copy_url, db,
-                    getattr(user, "id", None), _pickcode115,
-                    request.headers.get("user-agent") or "")
-            except _ub115.BindingError as exc:
-                _note_play_start_safe(
-                    item, user_id=getattr(user, "id", None),
-                    method="transfer115_copy",
-                    variant=play_variants.BYOS115_DIRECT,
-                    result="error", error_kind=exc.kind,
-                    resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-                _detail = exc.message if exc.kind in (
-                    "auth_error", "expired", "throttled", "size_limit") else \
-                    "播放变体当前不可用：transfer115_copy"
-                raise HTTPException(status_code=409, detail=_detail) from exc
-            _note_play_start_safe(
-                item, user_id=getattr(user, "id", None),
-                method="transfer115_copy",
-                variant=play_variants.BYOS115_DIRECT,
-                result="ok",
-                resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-            # 探测 UA 用实际签名 UA（Signed115Url 透传）：请求 UA
-            # 非空时两者恒一致；请求没带 UA 时签名回服务器级
-            # PAN115_UA，探测再用空 UA 就恒 403/unknown、信号失真。
-            # 探测结果逐跳留痕（结构化日志 + 台账一行，见
-            # _note_115_probe_hop）。
-            _sign_ua115 = (getattr(_url115, "sign_ua", "") or "").strip() \
-                or (request.headers.get("user-agent") or "")
-            _probe_t0 = time.perf_counter()
-            _alive115 = await run_db(
-                _ub115.check_115_download_alive, _url115, _sign_ua115)
-            _note_115_probe_hop(
-                item, user_id=getattr(user, "id", None),
-                method="transfer115_copy",
-                verdict=str(_alive115),
-                status=getattr(_alive115, "status", None),
-                probe_ms=int((time.perf_counter() - _probe_t0) * 1000),
-                size=getattr(_variant115, "size_bytes", None),
-                req_ua=request.headers.get("user-agent") or "",
-                sign_ua=_sign_ua115, path="transfer115_copy")
-            if _alive115 == "dead":
-                # 死链不 302：播放器跟随 302 只会撞 404。记一 strike、
-                # 预算内重建一单，409 明示正在重新转存；预算耗尽时
-                # 明示上限，不谎称正在转存。
-                await run_db(_tv.mark_variant_stale_once, db,
-                             getattr(_variant115, "id", None))
-                _rebuilt115 = await run_db(
-                    _tv.rebuild_dead_user115_copy, db, item,
-                    getattr(user, "id", None))
-                _note_play_start_safe(
-                    item, user_id=getattr(user, "id", None),
-                    method="transfer115_copy",
-                    variant=play_variants.BYOS115_DIRECT,
-                    result="error", error_kind="115_copy_dead")
-                if (_rebuilt115 or {}).get("reason") == "throttled":
-                    raise HTTPException(
-                        status_code=409,
-                        detail="115 副本已失效，重新转存已达 24 小时上限，"
-                               "请稍后重试")
-                raise HTTPException(
-                    status_code=409,
-                    detail="115 副本已失效，正在重新转存")
-            return _observe_traffic(
-                RedirectResponse(_url115, status_code=302,
-                                 headers=_strategy.DIRECT_REDIRECT_HEADERS))
-        if _gate_verdict == "serve_quark_copy":
-            _variantq = (_transfer_gate or {}).get("variant")
-            _fidq = (getattr(_variantq, "variant_file_id", "")
-                     or "").strip()
-            if not _fidq:
-                raise HTTPException(
-                    status_code=409,
-                    detail="夸克用户副本已就绪但缺少文件标识，无法取流")
-            # 开关在出流端再复核一遍：门禁判 ready 之后管理员关掉
-            # 开关，本次也不许放行夸克副本（更不许回落共享）。
-            if not await run_db(_tv.quark_play_enabled, db):
-                raise HTTPException(
-                    status_code=503,
-                    detail="夸克点播已被管理员关闭，不走共享播放")
-            from backend.emby_server import user_bindings as _ubq
-            from backend.emby_server import quarkdrive as _qd
-            from backend.emby_server.streaming import \
-                serve_mount_relay_async as _relay_async
-            _byos_t0q = time.perf_counter()
-            try:
-                _urlq, _cookieq = await run_db(
-                    _ubq.resolve_user_quark_copy_url, db,
-                    getattr(user, "id", None), _fidq)
-            except _ubq.BindingError as exc:
-                _note_play_start_safe(
-                    item, user_id=getattr(user, "id", None),
-                    method="transfer_quark_relay",
-                    variant=play_variants.BYOS_QUARK_RELAY,
-                    result="error", error_kind=exc.kind,
-                    resolve_ms=int(
-                        (time.perf_counter() - _byos_t0q) * 1000))
-                _detail = exc.message if exc.kind in (
-                    "auth_error", "expired", "throttled") else \
-                    "播放变体当前不可用：transfer_quark_relay"
-                raise HTTPException(status_code=409,
-                                    detail=_detail) from exc
-            _note_play_start_safe(
-                item, user_id=getattr(user, "id", None),
-                method="transfer_quark_relay",
-                variant=play_variants.BYOS_QUARK_RELAY,
-                result="ok",
-                resolve_ms=int((time.perf_counter() - _byos_t0q) * 1000))
-            # 夸克 CDN 取流校验 Cookie/Referer/UA 三件套：直链
-            # 只许在服务端中继里用（头只在服务端组装、绝不下
-            # 发），绝不 302 裸发给播放器——与 115 副本的 302
-            # 形态区别正在于此。
-            try:
-                _relay_resp = await _relay_async(
-                    _urlq, request,
-                    headers={"Cookie": _cookieq,
-                             "Referer": _qd.QUARK_REFERER,
-                             "User-Agent": _qd.QUARK_UA},
-                    media_type=media_type, pt=_pt)
-            except HTTPException as _relay_exc:
-                # 中继段留痕（2026-11-02 深挖）：此前的 ok 打点记
-                # 在取链成功时、中继在那之后，上游 403/404 等中继
-                # 失败在台账里完全不可见（台账会显示这次起播
-                # 「ok」而用户实际没播出来）。与 115 死链段同款：
-                # ok 之后再补一条 error，kind 带上游状态码。
-                _note_play_start_safe(
-                    item, user_id=getattr(user, "id", None),
-                    method="transfer_quark_relay",
-                    variant=play_variants.BYOS_QUARK_RELAY,
-                    result="error",
-                    error_kind=f"relay_upstream_{_relay_exc.status_code}",
-                    total_ms=int(
-                        (time.perf_counter() - _byos_t0q) * 1000))
-                raise
-            return _observe_traffic(_relay_resp)
         _gate.raise_for_transfer_gate(_transfer_gate)
         _play_fid, _play_variant = _tv.prefer_user_variant(
             _play_fid, _play_variant, _transfer_gate)
@@ -6820,76 +6593,11 @@ async def video_stream(
                     media_type=media_type, pt=_pt)
                 if _quota_relay_resp is not None:
                     return _observe_traffic(_quota_relay_resp)
-                _v115q = await run_db(_tv.ready_user115_variant, db,
-                                      getattr(item, "id", None),
-                                      getattr(user, "id", None))
-                _pc115q = (getattr(_v115q, "pickcode", "") or "").strip() \
-                    if _v115q is not None else ""
-                if not _pc115q:
-                    _note_play_start_safe(
-                        item, user_id=getattr(user, "id", None),
-                        method="direct_302", variant=play_variants.DRIVE_DIRECT,
-                        result="error", error_kind=_block_kind)
-                    raise HTTPException(status_code=409,
-                                        detail=_block_detail)
-                from backend.emby_server import user_bindings as _ub115q
-                _byos_t0q = time.perf_counter()
-                try:
-                    _url115 = await run_db(
-                        _ub115q.resolve_user115_copy_url, db,
-                        getattr(user, "id", None), _pc115q,
-                        request.headers.get("user-agent") or "")
-                except _ub115q.BindingError as exc:
-                    _note_play_start_safe(
-                        item, user_id=getattr(user, "id", None),
-                        method="transfer115_copy",
-                        variant=play_variants.BYOS115_DIRECT,
-                        result="error", error_kind=exc.kind,
-                        resolve_ms=int((time.perf_counter() - _byos_t0q) * 1000))
-                    raise HTTPException(
-                        status_code=409,
-                        detail=_block_detail) from exc
                 _note_play_start_safe(
                     item, user_id=getattr(user, "id", None),
-                    method="transfer115_copy",
-                    variant=play_variants.BYOS115_DIRECT, result="ok",
-                    resolve_ms=int((time.perf_counter() - _byos_t0q) * 1000))
-                # 探测 UA 与留痕口径与 serve_115_copy 主路径一致
-                # （实际签名 UA + 逐跳落账，见 _note_115_probe_hop）。
-                _sign_ua115q = (
-                    getattr(_url115, "sign_ua", "") or "").strip() \
-                    or (request.headers.get("user-agent") or "")
-                _probe_t0q = time.perf_counter()
-                _alive115q = await run_db(
-                    _ub115q.check_115_download_alive, _url115, _sign_ua115q)
-                _note_115_probe_hop(
-                    item, user_id=getattr(user, "id", None),
-                    method="transfer115_copy",
-                    verdict=str(_alive115q),
-                    status=getattr(_alive115q, "status", None),
-                    probe_ms=int(
-                        (time.perf_counter() - _probe_t0q) * 1000),
-                    size=getattr(_v115q, "size_bytes", None),
-                    req_ua=request.headers.get("user-agent") or "",
-                    sign_ua=_sign_ua115q, path="transfer115_copy_quota")
-                if _alive115q == "dead":
-                    # 115 回落链也是死链：不 302，记 strike 并预算内重建；
-                    # 仍报额度 409（主因是 Drive 副本额度满），重建后台跑。
-                    await run_db(_tv.mark_variant_stale_once, db,
-                                 getattr(_v115q, "id", None))
-                    await run_db(_tv.rebuild_dead_user115_copy, db, item,
-                                 getattr(user, "id", None))
-                    _note_play_start_safe(
-                        item, user_id=getattr(user, "id", None),
-                        method="transfer115_copy",
-                        variant=play_variants.BYOS115_DIRECT,
-                        result="error", error_kind="115_copy_dead")
-                    raise HTTPException(
-                        status_code=409,
-                        detail=_block_detail)
-                return _observe_traffic(
-                    RedirectResponse(_url115, status_code=302,
-                                     headers=_strategy.DIRECT_REDIRECT_HEADERS))
+                    method="direct_302", variant=play_variants.DRIVE_DIRECT,
+                    result="error", error_kind=_block_kind)
+                raise HTTPException(status_code=409, detail=_block_detail)
         elif _probe_detail.get("shape") == "get" and _probe_detail.get("page"):
             # Range 健康但 GET 腿探到插页（scan / html）：只打
             # 信号、仍发直链（page=quota 已在上面改道分支处理，
@@ -7483,71 +7191,6 @@ async def video_stream(
         from backend.emby_server.drive_auth import drive_usercontent_download_url
         return _observe_traffic(
             RedirectResponse(drive_usercontent_download_url(_play_fid), status_code=302,
-                             headers=_strategy.DIRECT_REDIRECT_HEADERS))
-    if _requested_variant == play_variants.BYOS115_DIRECT:
-        # BYOS P1：绑定用户自己的 115 直链——按绑定凭据现签现发 302，
-        # 播放器自拉，字节不过服务器。签名验签 / 来路检查 / 限流闸门
-        # 已在上面走过；起播打点与 302 观测与直链分支同口径。
-        from backend.emby_server import user_bindings as _ub
-        _byos_t0 = time.perf_counter()
-        try:
-            _byos_url = await run_db(
-                _ub.resolve_user115_direct_url, db,
-                getattr(user, "id", None), item,
-                request.headers.get("user-agent") or "")
-        except _ub.BindingError as exc:
-            # 凭据失效三档：resolver 已落失败态，这里只报 409 + 文案，
-            # 不静默回落共享中继；一过性/无绑定按通用句报 409。
-            _note_play_start_safe(
-                item, user_id=getattr(user, "id", None),
-                method="byos115_direct",
-                variant=play_variants.BYOS115_DIRECT,
-                result="error", error_kind=exc.kind,
-                resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-            _detail = exc.message if exc.kind in (
-                "auth_error", "expired", "throttled", "size_limit",
-                "unsupported") else \
-                "播放变体当前不可用：byos115_direct"
-            raise HTTPException(status_code=409, detail=_detail) from exc
-        _pt.mark("byos115_direct")
-        _pt.done()
-        _note_play_start_safe(
-            item, user_id=getattr(user, "id", None),
-            method="byos115_direct", variant=play_variants.BYOS115_DIRECT,
-            result="ok",
-            resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-        # 存活探测（2026-11-02 补，与 serve_115_copy 主路径同口径）：
-        # 此前本路径取链成功即 302，死链服务端零感知、台账零痕迹
-        # （本变体上线至今台账 0 条）。探测用实际签名 UA、结果逐跳
-        # 留痕；dead 时不发必撞 404 的 302，记 error 行并 409 明示。
-        # 与副本路径的区别只在善后：本路径播的是挂载原件、没有
-        # 用户副本可重建，只明示不重建；unknown 沿旧行为放行 302。
-        _sign_ua_byos = (getattr(_byos_url, "sign_ua", "") or "").strip() \
-            or (request.headers.get("user-agent") or "")
-        _probe_t0b = time.perf_counter()
-        _alive_byos = await run_db(
-            _ub.check_115_download_alive, _byos_url, _sign_ua_byos)
-        _note_115_probe_hop(
-            item, user_id=getattr(user, "id", None),
-            method="byos115_direct",
-            verdict=str(_alive_byos),
-            status=getattr(_alive_byos, "status", None),
-            probe_ms=int((time.perf_counter() - _probe_t0b) * 1000),
-            size=getattr(_byos_url, "size", None)
-            or getattr(item, "size", None),
-            req_ua=request.headers.get("user-agent") or "",
-            sign_ua=_sign_ua_byos, path="byos115_direct")
-        if _alive_byos == "dead":
-            _note_play_start_safe(
-                item, user_id=getattr(user, "id", None),
-                method="byos115_direct",
-                variant=play_variants.BYOS115_DIRECT,
-                result="error", error_kind="115_direct_dead")
-            raise HTTPException(
-                status_code=409,
-                detail="115 直链已失效（文件可能已被移动或删除），请稍后重试")
-        return _observe_traffic(
-            RedirectResponse(_byos_url, status_code=302,
                              headers=_strategy.DIRECT_REDIRECT_HEADERS))
     if _requested_variant is not None:
         target = await run_db(_play_target, db, item,

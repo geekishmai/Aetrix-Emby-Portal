@@ -2,26 +2,16 @@
 """取流 provider 分流回归（2026-11-02 夸克副本串线实锤）。
 
 现场：user 829 播条目 696679《Running Man 第690集》，跨 provider
-转存单 done、变体 ready（variant_drive_id=quark:user-829、
-variant_file_id 是夸克 fid）；客户端走通用签名地址 stream.mkv，
+转存单 done、变体 ready；客户端走通用签名地址 stream.mkv，
 play_sign 已下发链接消费让门禁直接 proceed（不看变体），选路
-（交付计划 / resolve_play_file_id）已采用夸克变体行，但
-video_stream 后段只认 Drive：夸克 fid 落进 Drive 快路 302 分支
-被喂给 Google files.get，404 原样出门，播放器显示自家文案
-「资源类型无效」。EA 24h 内 quark.cn 请求数为 0——夸克取流
-分支从没被进过。
+已采用夸克变体行，但 video_stream 后段只认 Drive：夸克 fid 落进
+Drive 快路 302 分支被喂给 Google files.get，404 原样出门。
 
-本文件钉死：
-- quark ready 变体 + play_sign 消费请求 → 必须走夸克中继
-  （resolve_user_quark_copy_url + serve_mount_relay_async），
-  全程零次 Drive files.get（_ensure_drive_file_playable）、
-  零次 Drive 中继、零次 usercontent 302。
-- pan115 ready 变体 + play_sign 消费请求 → 必须走 serve_115_copy
-  现签 302，同款零 Drive 断言（防串线）。
-- 吃过死链 strike 的夸克变体不许被分流直用，也不许落进 Drive
-  分支喂 Google：响亮 409（护栏）。
-- userdrive ready 变体（正常 Drive 副本）行为不变：仍走 Drive
-  直链 302（防误伤哨兵）。
+本文件现只留 userdrive ready 变体哨兵（正常 Drive 副本行为不变：
+仍走 Drive 直链 302，防误伤）。夸克/115 ready 变体分流测试已随
+2026-11-02 夸克/115 绑盘线删除（二期）一并删除——serve_115_copy /
+serve_quark_copy 分支与 resolve_user115/quark_copy_url 均已删，
+前提场景已不存在。
 
 全部离线：内存 SQLite + 模块边界桩；monkeypatch 一律 patch
 类/模块属性（仓库纪律）。门禁本体走真实实现（play_sign 消费
@@ -53,8 +43,6 @@ from backend.emby_server import streaming as streaming_mod
 from backend.emby_server import drive_auth
 
 ORIG_FID = "1eXUpWksxfCCrIZUye8lo24JGXyr_2ZQO"
-QUARK_FID = "quarkfid-696679-ep690"
-PAN115_FID = "115fid-696679-ep690"
 
 
 @pytest.fixture(autouse=True)
@@ -199,123 +187,6 @@ def _call(db, user, item):
 
 
 # ---------------------------------------------------------------------------
-# 夸克 ready 变体 + 签名消费 → 夸克中继，零 Drive 调用
-# ---------------------------------------------------------------------------
-
-def test_quark_ready_variant_sign_consume_goes_quark_relay(
-        db, monkeypatch):
-    item = _item()
-    user = SimpleNamespace(id=829, is_staff=False)
-    row = _variant(item.id, 829, "quark:user-829", QUARK_FID)
-    probes = _Probes()
-    _stub_common(monkeypatch, item, probes)
-    # 选路走交付计划口（生产热路径）：采用夸克变体行。
-    monkeypatch.setattr(
-        "backend.emby_server.delivery_plan.plan_ready_leg",
-        lambda db_, it, u_: (QUARK_FID, row))
-    monkeypatch.setattr(
-        tv, "resolve_play_file_id",
-        lambda db_, it, u_: (ORIG_FID, None))
-
-    quark_calls = {}
-
-    def fake_resolve_quark(db_, user_id, fid):
-        quark_calls["args"] = (user_id, fid)
-        return "https://quark.test/dl/RunningMan690.mkv", "cookie-xyz"
-
-    monkeypatch.setattr(ub, "resolve_user_quark_copy_url",
-                        fake_resolve_quark)
-
-    relay_calls = []
-
-    async def fake_mount_relay(url, request, headers=None, media_type=None,
-                               pt=None, **kwargs):
-        relay_calls.append((url, headers))
-        return Response(content=b"quark-bytes", status_code=206)
-
-    monkeypatch.setattr(streaming_mod, "serve_mount_relay_async",
-                        fake_mount_relay)
-
-    resp = _call(db, user, item)
-    assert resp.status_code == 206
-    assert quark_calls["args"] == (829, QUARK_FID)
-    assert len(relay_calls) == 1
-    assert relay_calls[0][0] == "https://quark.test/dl/RunningMan690.mkv"
-    assert relay_calls[0][1]["Cookie"] == "cookie-xyz"
-    # 防串线核心断言：别家 fid 全程没喂过 Google 任一出口。
-    assert probes.ensure_calls == []
-    assert probes.drive_relay_calls == []
-    assert probes.usercontent_calls == []
-
-
-# ---------------------------------------------------------------------------
-# 115 ready 变体 + 签名消费 → serve_115_copy 现签 302，零 Drive 调用
-# ---------------------------------------------------------------------------
-
-def test_pan115_ready_variant_sign_consume_goes_115_copy(
-        db, monkeypatch):
-    item = _item()
-    user = SimpleNamespace(id=7, is_staff=False)
-    row = _variant(item.id, 7, "pan115:user-7", PAN115_FID,
-                   pickcode="PC999")
-    probes = _Probes()
-    _stub_common(monkeypatch, item, probes)
-    # 选路走 resolve 口（无交付计划时）：采用 115 变体行。
-    monkeypatch.setattr(
-        "backend.emby_server.delivery_plan.plan_ready_leg",
-        lambda db_, it, u_: None)
-    monkeypatch.setattr(
-        tv, "resolve_play_file_id",
-        lambda db_, it, u_: (PAN115_FID, row))
-
-    seen = {}
-
-    def fake_resolve_115(db_, user_id, pickcode, ua=""):
-        seen["pickcode"] = pickcode
-        return "https://115.test/dl/RunningMan690.mkv"
-
-    monkeypatch.setattr(ub, "resolve_user115_copy_url", fake_resolve_115)
-    monkeypatch.setattr(ub, "check_115_download_alive",
-                        lambda url, ua="": "alive")
-
-    resp = _call(db, user, item)
-    assert resp.status_code == 302
-    assert resp.headers["location"] == \
-        "https://115.test/dl/RunningMan690.mkv"
-    assert seen["pickcode"] == "PC999"
-    assert probes.ensure_calls == []
-    assert probes.drive_relay_calls == []
-    assert probes.usercontent_calls == []
-
-
-# ---------------------------------------------------------------------------
-# 护栏：吃过 strike 的夸克变体——不直用、不喂 Google，响亮 409
-# ---------------------------------------------------------------------------
-
-def test_stale_quark_variant_blocked_not_fed_to_google(
-        db, monkeypatch):
-    item = _item()
-    user = SimpleNamespace(id=829, is_staff=False)
-    row = _variant(item.id, 829, "quark:user-829", QUARK_FID,
-                   stale_count=1)
-    probes = _Probes()
-    _stub_common(monkeypatch, item, probes)
-    monkeypatch.setattr(
-        "backend.emby_server.delivery_plan.plan_ready_leg",
-        lambda db_, it, u_: (QUARK_FID, row))
-    monkeypatch.setattr(
-        tv, "resolve_play_file_id",
-        lambda db_, it, u_: (ORIG_FID, None))
-
-    with pytest.raises(HTTPException) as excinfo:
-        _call(db, user, item)
-    assert excinfo.value.status_code == 409
-    assert probes.ensure_calls == []
-    assert probes.drive_relay_calls == []
-    assert probes.usercontent_calls == []
-
-
-# ---------------------------------------------------------------------------
 # 哨兵：userdrive ready 变体仍走 Drive 直链（行为不变）
 # ---------------------------------------------------------------------------
 
@@ -348,46 +219,3 @@ def test_userdrive_ready_variant_still_goes_drive_direct(
     assert probes.ensure_calls == [copy_fid]
 
 
-# ---------------------------------------------------------------------------
-# 夸克中继段失败必须在台账留痕（2026-11-02 深挖）：ok 打点在取链
-# 成功时就记下，中继上游 403/404 此前不补记——台账显示 ok、
-# 用户实际没播出来，死因不可考。
-# ---------------------------------------------------------------------------
-
-def test_quark_relay_upstream_error_notes_play_start(db, monkeypatch):
-    item = _item()
-    user = SimpleNamespace(id=829, is_staff=False)
-    row = _variant(item.id, 829, "quark:user-829", QUARK_FID)
-    probes = _Probes()
-    _stub_common(monkeypatch, item, probes)
-    monkeypatch.setattr(
-        "backend.emby_server.delivery_plan.plan_ready_leg",
-        lambda db_, it, u_: (QUARK_FID, row))
-    monkeypatch.setattr(
-        tv, "resolve_play_file_id",
-        lambda db_, it, u_: (ORIG_FID, None))
-    monkeypatch.setattr(
-        ub, "resolve_user_quark_copy_url",
-        lambda db_, user_id, fid: (
-            "https://quark.test/dl/RunningMan690.mkv", "cookie-xyz"))
-
-    async def fake_mount_relay(url, request, headers=None, media_type=None,
-                               pt=None, **kwargs):
-        raise HTTPException(status_code=403, detail="源站返回 403")
-
-    monkeypatch.setattr(streaming_mod, "serve_mount_relay_async",
-                        fake_mount_relay)
-
-    noted = []
-    monkeypatch.setattr(
-        api, "_note_play_start_safe",
-        lambda item_, **kw: noted.append(kw))
-
-    with pytest.raises(HTTPException) as excinfo:
-        _call(db, user, item)
-    assert excinfo.value.status_code == 403
-    relay_errors = [kw for kw in noted
-                    if kw.get("error_kind") == "relay_upstream_403"]
-    assert len(relay_errors) == 1
-    assert relay_errors[0]["result"] == "error"
-    assert relay_errors[0]["variant"] == "byos_quark_relay"

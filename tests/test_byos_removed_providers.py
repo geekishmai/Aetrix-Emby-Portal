@@ -227,7 +227,6 @@ def test_ready_variant_only_removed_rows_returns_none(db):
     item = _item(db)
     _variant(db, item.id, 7, "pan115:user-7")
     assert tv.get_ready_variant_for_user(db, item.id, 7) is None
-    assert tv.ready_user115_variant(db, item.id, 7) is None
 
 
 def test_delivery_plan_probe_skips_removed_rows(db):

@@ -319,32 +319,16 @@ ITEMS_CACHE_CONFIG_SCHEMA: dict[str, tuple] = {
 }
 
 # 转存调度（2026-10-30）：跨 provider 总开关 + 跨单在途上限 +
-# 跨单 aging 提权阈值 + 执行道并发 + 单用户在飞上限 + 115 秒传/
-# 分片上传开关 + 换绑豁免限频两键。读取唯一实现 transfer_variant
+# 跨单 aging 提权阈值 + 执行道并发 + 单用户在飞上限 +
+# 换绑豁免限频两键。读取唯一实现 transfer_variant
 # 的 cross_provider_enabled
 # / cross_lane_concurrency / cross_aging_sec / lane_concurrency /
 # per_owner_inflight /
-# pan115_rapid_upload_enabled / pan115_multipart_upload_enabled /
 # rebind_waiver_window_days / rebind_waiver_max_uses，
-# 范围与读取侧钳制同口径。探针道五键（2026-11-01）读取实现
-# 同在 transfer_variant（probe_enabled / probe_priority_enabled
-# / probe_lane_concurrency / probe_recheck_sec /
-# play_inline_probe_budget_sec）。
+# 范围与读取侧钳制同口径。
 TRANSFER_CONFIG_SCHEMA: dict[str, tuple] = {
     "cross_provider_transfer_enabled": ("bool",),
     "transfer_cross_lane_concurrency": ("int", 1, 8),
-    # 探针道（2026-11-01 转存等待压缩 期一＋期二）：探针道总
-    # 开关 + 期一优先排序开关默认开（读取默认兜底在
-    # transfer_variant.probe_enabled / probe_priority_enabled，
-    # 无行=True）；探针单轮认领上限默认 4、钳 [1, 16]（管理端
-    # 字段同名，见 Settings 转存卡片）；探针节流默认 300、钳
-    # [30, 3600]；点播当场探针预算默认 15、钳 [1, 60]。范围与
-    # 读取侧钳制同口径。纯 SystemConfig 键，不进 env.example。
-    "transfer_probe_enabled": ("bool",),
-    "transfer_probe_priority_enabled": ("bool",),
-    "transfer_probe_lane_concurrency": ("int", 1, 16),
-    "transfer_probe_recheck_sec": ("int", 30, 3600),
-    "play_inline_probe_budget_sec": ("int", 1, 60),
     # 剧集预热（2026-11-01 转存等待压缩 期四）：总开关默认开
     # （站里没用户口径；读取默认兜底在 transfer_variant.
     # series_preheat_enabled，无行=True）；搬字节预热独立日帽
@@ -357,18 +341,8 @@ TRANSFER_CONFIG_SCHEMA: dict[str, tuple] = {
     "transfer_cross_aging_sec": ("int", 60, 86400),
     "transfer_fast_lane_concurrency": ("int", 1, 32),
     "transfer_per_owner_inflight": ("int", 1, 16),
-    "pan115_rapid_upload_enabled": ("bool",),
-    "pan115_multipart_upload_enabled": ("bool",),
     "transfer_rebind_waiver_window_days": ("int", 1, 365),
     "transfer_rebind_waiver_max_uses": ("int", 1, 20),
-    # 形态 B 云下载（2026-10-30 立项，用户亲批默认关）：开关默认
-    # 关由 transfer_variant.cross_cloudpull_enabled 的读取默认
-    # 兜底（无行=False）；TTL 默认 43200 覆盖 115 排队调度＋
-    # GB 级慢拉＋其内置重试，钳 [1800, 86400]；轮询超时默认
-    # 3600，钳 [60, 21600]。纯 SystemConfig 键，不进 env.example。
-    "transfer_cross_cloudpull_enabled": ("bool",),
-    "transfer_cross_cloudpull_ttl_sec": ("int", 1800, 86400),
-    "transfer_cross_cloudpull_timeout_sec": ("int", 60, 21600),
     # 换代线地基记账开关（2026-11-01）：交付状态落盘＋块哈希
     # 清单记账，纯记账 fail-open；默认开由 transfer_variant
     # .manifest_accounting_enabled 的读取默认兜底（无行=True），
@@ -381,11 +355,6 @@ TRANSFER_CONFIG_SCHEMA: dict[str, tuple] = {
     # 本开关无数据可依、整步回落）。默认开由 transfer_variant
     # .manifest_takeover_enabled 的读取默认兜底。
     "transfer_manifest_takeover_enabled": ("bool",),
-    # 夸克二期（转存 + 点播中继）开关（2026-11-01）：默认开由
-    # transfer_variant.quark_play_enabled 的读取默认兜底（无行
-    # =True）；关 = 只绑夸克的用户点播在门禁 failed 明示、不
-    # 回落共享。纯 SystemConfig 键，不进 env.example。
-    "quark_play_enabled": ("bool",),
     # 类别级熔断（2026-11-01 预见层 v2 第一层）：JSON 规则数组
     # [{provider, error_kind}] 的 canonical 文本。结构校验在
     # transfer_variant.coerce_paused_categories（保存侧 strict、

@@ -9,10 +9,10 @@ text/html “Google Drive - Quota exceeded”，播放器拿到额度页黑屏�
   非 2xx → error；ok/quota 缓存，error 不缓存；开关关恒 ok；第一腿请求
   必须带 ``Range: bytes=0-`` 且不带任何凭据。整拉第二腿与其事故形态
   见 test_usercopy_probe_get_shape.py。
-- video_stream：本人 Drive 副本额度满 → 有本人 115 副本走 115 现签 302，
-  无 115 / 115 签发失败 → 409 明示；探测 error → 照常 302 本人副本。
+- video_stream：本人 Drive 副本额度满 → 409 明示（115 回落已随
+  2026-11-02 绑盘线删除而移除）；探测 error → 照常 302 本人副本。
   任何分支 Location 都不含共享原件 fid，且不取 SA 令牌。
-- PlaybackInfo：额度满且无 115 → 清掉直链、带 ErrorCode；任何分支
+- PlaybackInfo：额度满且无可保留后路 → 清掉直链、带 ErrorCode；任何分支
   清单 URL 都不含共享原件 fid、RequiredHttpHeaders 无 Authorization，
   且不取 SA 令牌。
 全部离线。
@@ -99,11 +99,7 @@ def _copy_variant():
                            pickcode=None)
 
 
-def _v115(pickcode="pc115"):
-    return SimpleNamespace(id=10, owner_scope="user", owner_ref="7",
-                           variant_drive_id="pan115:user-7",
-                           variant_file_id="115fid", status="ready",
-                           pickcode=pickcode)
+
 
 
 def _gate_proceed(monkeypatch):
@@ -320,50 +316,21 @@ def test_stream_probe_error_still_302_user_copy(db, monkeypatch):
     assert resp.headers["location"] == f"https://usercontent.test/{COPY_FID}"
 
 
-def test_stream_quota_with_115_copy_redirects_115(db, monkeypatch):
-    monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: _v115())
-    monkeypatch.setattr(user_bindings, "resolve_user115_copy_url",
-                        lambda db_, uid, pc, ua="": f"https://cdn.115.test/{pc}")
-    resp = _stream(monkeypatch, db)
-    assert resp.status_code == 302
-    assert resp.headers["location"] == "https://cdn.115.test/pc115"
-    _assert_not_shared(resp.headers["location"])
+
 
 
 def test_stream_quota_no_115_is_409(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     with pytest.raises(HTTPException) as excinfo:
         _stream(monkeypatch, db)
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail == tv.USERCOPY_QUOTA_DETAIL
 
 
-def test_stream_quota_115_no_pickcode_is_409(db, monkeypatch):
-    monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: _v115(pickcode=""))
-    with pytest.raises(HTTPException) as excinfo:
-        _stream(monkeypatch, db)
-    assert excinfo.value.status_code == 409
 
 
-def test_stream_quota_115_sign_fails_is_409(db, monkeypatch):
-    monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: _v115())
 
-    def fail(db_, uid, pc, ua=""):
-        raise user_bindings.BindingError("expired", "115 登录已失效")
 
-    monkeypatch.setattr(user_bindings, "resolve_user115_copy_url", fail)
-    with pytest.raises(HTTPException) as excinfo:
-        _stream(monkeypatch, db)
-    assert excinfo.value.status_code == 409
-    assert excinfo.value.detail == tv.USERCOPY_QUOTA_DETAIL
 
 
 # ---------------------------------------------------------------------------
@@ -438,8 +405,6 @@ def test_pi_probe_error_issues_user_copy(db, monkeypatch):
 
 def test_pi_quota_no_115_errors_and_strips_urls(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     resp = _pi(monkeypatch, db)
     _assert_pi_safe(resp)
     assert resp["ErrorMessage"] == tv.USERCOPY_QUOTA_DETAIL
@@ -449,13 +414,4 @@ def test_pi_quota_no_115_errors_and_strips_urls(db, monkeypatch):
         assert not src.get("DirectStreamUrl")
 
 
-def test_pi_quota_with_115_keeps_stream_url(db, monkeypatch):
-    monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: _v115())
-    resp = _pi(monkeypatch, db)
-    _assert_pi_safe(resp)
-    assert "ErrorCode" not in resp
-    src = resp["MediaSources"][0]
-    # 清单不指向用户 Drive 副本，交给本站 /stream 走 115 现签 302。
-    assert COPY_FID not in str(src.get("DirectStreamUrl") or "")
+

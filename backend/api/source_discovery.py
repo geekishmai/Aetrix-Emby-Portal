@@ -234,11 +234,7 @@ def confirm_source(
         # 不许用「先绑定」文案把用户引进死循环（115 已绑不了）。
         return _failed(local_item_id, source_id, upstream_item_id,
                        "该片源所在网盘（115）已下线，找源转存暂不支持。")
-    has_binding = (
-        tv.has_active_drive_binding(db, user.id)
-        if provider == "drive"
-        else tv.has_active_pan115_binding(db, user.id)
-    )
+    has_binding = tv.has_active_drive_binding(db, user.id)
     if not has_binding:
         return _failed(local_item_id, source_id, upstream_item_id,
                        NO_BINDING_MESSAGE)

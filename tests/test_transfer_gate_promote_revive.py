@@ -235,24 +235,9 @@ def test_gate_pending_quota_not_promoted(db, monkeypatch):
     assert job.trigger == "quota"
 
 
-# ---------- ③ unsupported 签名自愈 ----------
 
 
 
-def test_gate_same_failed_unsupported_retired_signature_revives(
-        db, monkeypatch):
-    item = _same_setup(db, monkeypatch)
-    _job(db, item.id, 7, dest="userdrive:7", status="failed",
-         trigger="prefetch", error_kind="unsupported",
-         error_detail=RETIRED_DETAIL)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_retriggered"
-    assert db.query(em.TransferJob).count() == 2
-    new_job = db.query(em.TransferJob).order_by(
-        em.TransferJob.id.desc()).first()
-    assert new_job.status == "pending" and new_job.trigger == "playback"
-    assert new_job.dest_drive_id == "userdrive:7"
 
 
 # ---------- ④⑤⑥ 锚：不复活的情形 ----------
@@ -272,7 +257,6 @@ def test_gate_failed_unsupported_unknown_signature_stays_failed(
 
 def test_gate_failed_unsupported_switch_off_stays_failed(db, monkeypatch):
     item = _same_setup(db, monkeypatch)
-    _set_sysconfig(db, "pan115_multipart_upload_enabled", "false")
     job = _job(db, item.id, 7, dest="userdrive:7", status="failed",
                trigger="prefetch",
                error_kind="unsupported", error_detail=RETIRED_DETAIL)

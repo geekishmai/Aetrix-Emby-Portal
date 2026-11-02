@@ -718,21 +718,14 @@ async function saveItemsDedupCacheCore(): Promise<boolean> {
 const transfer = reactive({
   cross_provider_transfer_enabled: true,
   transfer_cross_lane_concurrency: 2,
-  transfer_probe_lane_concurrency: 4,
   transfer_series_preheat_enabled: true,
   transfer_series_preheat_daily_max: 2,
   transfer_series_preheat_next_count: 3,
   transfer_cross_aging_sec: 1800,
   transfer_fast_lane_concurrency: 8,
   transfer_per_owner_inflight: 2,
-  pan115_rapid_upload_enabled: true,
-  pan115_multipart_upload_enabled: true,
   transfer_rebind_waiver_window_days: 7,
   transfer_rebind_waiver_max_uses: 1,
-  transfer_cross_cloudpull_enabled: false,
-  transfer_cross_cloudpull_ttl_sec: 43200,
-  transfer_cross_cloudpull_timeout_sec: 3600,
-  quark_play_enabled: true,
   transfer_paused_categories: '[]',
   transfer_sediment_enabled: true,
   transfer_sediment_tier_demand_enabled: true,
@@ -752,21 +745,14 @@ const transferLoading = ref(false)
 function applyTransfer(data: TransferConfig) {
   transfer.cross_provider_transfer_enabled = data.cross_provider_transfer_enabled !== false
   transfer.transfer_cross_lane_concurrency = Number(data.transfer_cross_lane_concurrency) || 2
-  transfer.transfer_probe_lane_concurrency = Number(data.transfer_probe_lane_concurrency) || 4
   transfer.transfer_series_preheat_enabled = data.transfer_series_preheat_enabled !== false
   transfer.transfer_series_preheat_daily_max = Number(data.transfer_series_preheat_daily_max) || 2
   transfer.transfer_series_preheat_next_count = Number(data.transfer_series_preheat_next_count) || 3
   transfer.transfer_cross_aging_sec = Number(data.transfer_cross_aging_sec) || 1800
   transfer.transfer_fast_lane_concurrency = Number(data.transfer_fast_lane_concurrency) || 8
   transfer.transfer_per_owner_inflight = Number(data.transfer_per_owner_inflight) || 2
-  transfer.pan115_rapid_upload_enabled = data.pan115_rapid_upload_enabled !== false
-  transfer.pan115_multipart_upload_enabled = data.pan115_multipart_upload_enabled !== false
   transfer.transfer_rebind_waiver_window_days = Number(data.transfer_rebind_waiver_window_days) || 7
   transfer.transfer_rebind_waiver_max_uses = Number(data.transfer_rebind_waiver_max_uses) || 1
-  transfer.transfer_cross_cloudpull_enabled = data.transfer_cross_cloudpull_enabled === true
-  transfer.transfer_cross_cloudpull_ttl_sec = Number(data.transfer_cross_cloudpull_ttl_sec) || 43200
-  transfer.transfer_cross_cloudpull_timeout_sec = Number(data.transfer_cross_cloudpull_timeout_sec) || 3600
-  transfer.quark_play_enabled = data.quark_play_enabled !== false
   transfer.transfer_paused_categories = typeof data.transfer_paused_categories === 'string'
     ? data.transfer_paused_categories : '[]'
   transfer.transfer_sediment_enabled = data.transfer_sediment_enabled !== false
@@ -797,21 +783,14 @@ async function loadTransfer() {
 const transferDirty = computed(() =>
 transfer.cross_provider_transfer_enabled !== transferOriginal.cross_provider_transfer_enabled
   || transfer.transfer_cross_lane_concurrency !== transferOriginal.transfer_cross_lane_concurrency
-  || transfer.transfer_probe_lane_concurrency !== transferOriginal.transfer_probe_lane_concurrency
   || transfer.transfer_series_preheat_enabled !== transferOriginal.transfer_series_preheat_enabled
   || transfer.transfer_series_preheat_daily_max !== transferOriginal.transfer_series_preheat_daily_max
   || transfer.transfer_series_preheat_next_count !== transferOriginal.transfer_series_preheat_next_count
   || transfer.transfer_cross_aging_sec !== transferOriginal.transfer_cross_aging_sec
   || transfer.transfer_fast_lane_concurrency !== transferOriginal.transfer_fast_lane_concurrency
   || transfer.transfer_per_owner_inflight !== transferOriginal.transfer_per_owner_inflight
-  || transfer.pan115_rapid_upload_enabled !== transferOriginal.pan115_rapid_upload_enabled
-  || transfer.pan115_multipart_upload_enabled !== transferOriginal.pan115_multipart_upload_enabled
   || transfer.transfer_rebind_waiver_window_days !== transferOriginal.transfer_rebind_waiver_window_days
   || transfer.transfer_rebind_waiver_max_uses !== transferOriginal.transfer_rebind_waiver_max_uses
-  || transfer.transfer_cross_cloudpull_enabled !== transferOriginal.transfer_cross_cloudpull_enabled
-  || transfer.transfer_cross_cloudpull_ttl_sec !== transferOriginal.transfer_cross_cloudpull_ttl_sec
-  || transfer.transfer_cross_cloudpull_timeout_sec !== transferOriginal.transfer_cross_cloudpull_timeout_sec
-  || transfer.quark_play_enabled !== transferOriginal.quark_play_enabled
   || transfer.transfer_paused_categories !== transferOriginal.transfer_paused_categories
   || transfer.transfer_sediment_enabled !== transferOriginal.transfer_sediment_enabled
   || transfer.transfer_sediment_tier_demand_enabled !== transferOriginal.transfer_sediment_tier_demand_enabled
@@ -832,11 +811,6 @@ async function saveTransferCore(): Promise<boolean> {
   if (!Number.isInteger(transfer.transfer_cross_lane_concurrency)
     || transfer.transfer_cross_lane_concurrency < 1 || transfer.transfer_cross_lane_concurrency > 8) {
     ElMessage.error('跨 provider 并发上限需在 1~8 之间')
-    return false
-  }
-  if (!Number.isInteger(transfer.transfer_probe_lane_concurrency)
-    || transfer.transfer_probe_lane_concurrency < 1 || transfer.transfer_probe_lane_concurrency > 16) {
-    ElMessage.error('探针道单轮上限需在 1~16 之间')
     return false
   }
   if (!Number.isInteger(transfer.transfer_series_preheat_daily_max)
@@ -872,16 +846,6 @@ async function saveTransferCore(): Promise<boolean> {
   if (!Number.isInteger(transfer.transfer_rebind_waiver_max_uses)
     || transfer.transfer_rebind_waiver_max_uses < 1 || transfer.transfer_rebind_waiver_max_uses > 20) {
     ElMessage.error('换绑放行次数需在 1~20 之间')
-    return false
-  }
-  if (!Number.isInteger(transfer.transfer_cross_cloudpull_ttl_sec)
-    || transfer.transfer_cross_cloudpull_ttl_sec < 1800 || transfer.transfer_cross_cloudpull_ttl_sec > 86400) {
-    ElMessage.error('云下载签名有效期需在 1800~86400 秒之间')
-    return false
-  }
-  if (!Number.isInteger(transfer.transfer_cross_cloudpull_timeout_sec)
-    || transfer.transfer_cross_cloudpull_timeout_sec < 60 || transfer.transfer_cross_cloudpull_timeout_sec > 21600) {
-    ElMessage.error('云下载轮询超时需在 60~21600 秒之间')
     return false
   }
   try {
@@ -1805,22 +1769,6 @@ watch(
                   <span class="field-hint">同时搬字节的跨单最多几条，其余道宽留给同 provider 的点播转存，默认 2</span>
                 </div>
               </el-form-item>
-              <el-form-item label="探针道单轮上限">
-                <div class="field-stack">
-                  <div class="field-control">
-                    <el-input-number
-                      v-model="transfer.transfer_probe_lane_concurrency"
-                      :min="1"
-                      :max="16"
-                      :step="1"
-                      controls-position="right"
-                      class="num-input"
-                    />
-                    <span class="field-suffix">条</span>
-                  </div>
-                  <span class="field-hint">指纹已登记的跨单先走探针道只试秒传（命中秒成），工人每轮最多探几条；探针不占上面的搬字节在途上限，默认 4</span>
-                </div>
-              </el-form-item>
               <el-form-item label="剧集预热">
                 <div class="field-stack">
                   <div class="field-control">
@@ -1911,42 +1859,6 @@ watch(
                     <span class="field-suffix">条</span>
                   </div>
                   <span class="field-hint">同一用户同时在飞的转存任务上限，防一人灌单饿死别人，默认 2</span>
-                </div>
-              </el-form-item>
-              <el-form-item label="115 秒传">
-                <div class="field-stack">
-                  <div class="field-control">
-                    <el-switch
-                      v-model="transfer.pan115_rapid_upload_enabled"
-                      active-text="开"
-                      inactive-text="关"
-                    />
-                  </div>
-                  <span class="field-hint">开：转存到 115 时先按哈希试秒传，命中免传；关：不试秒传、一律走全量上传（哈希沉淀照常）。默认开</span>
-                </div>
-              </el-form-item>
-              <el-form-item label="115 分片上传">
-                <div class="field-stack">
-                  <div class="field-control">
-                    <el-switch
-                      v-model="transfer.pan115_multipart_upload_enabled"
-                      active-text="开"
-                      inactive-text="关"
-                    />
-                  </div>
-                  <span class="field-hint">开：转存到 115 的文件超过 5 GiB 且秒传未命中时走分片上传；关：这类大文件直接判不支持。默认开</span>
-                </div>
-              </el-form-item>
-              <el-form-item label="夸克转存/点播">
-                <div class="field-stack">
-                  <div class="field-control">
-                    <el-switch
-                      v-model="transfer.quark_play_enabled"
-                      active-text="开"
-                      inactive-text="关"
-                    />
-                  </div>
-                  <span class="field-hint">开：只绑夸克的用户点播时先转存到本人夸克盘（aetrix-transfer 目录）再经服务器中继播放；关：这类点播直接明示挡下、不回落共享。默认开</span>
                 </div>
               </el-form-item>
               <el-form-item label="类别级熔断（停派）">
@@ -2106,50 +2018,6 @@ watch(
                     />
                   </div>
                   <span class="field-hint">转化率熔断触发后这里自动变成「已熔断」、沉淀停摆；核查选片信号没问题后手动切回「正常」恢复</span>
-                </div>
-              </el-form-item>
-              <el-form-item label="115 云下载（形态 B）">
-                <div class="field-stack">
-                  <div class="field-control">
-                    <el-switch
-                      v-model="transfer.transfer_cross_cloudpull_enabled"
-                      active-text="开"
-                      inactive-text="关"
-                    />
-                  </div>
-                  <span class="field-hint">开：秒传未命中时，先让点播用户本人的 115 自己拉本站现铸的签名取流地址（字节不过服务器搬运），失败自动回落搬字节；关：完全不走这条路。默认关</span>
-                </div>
-              </el-form-item>
-              <el-form-item label="云下载签名有效期">
-                <div class="field-stack">
-                  <div class="field-control">
-                    <el-input-number
-                      v-model="transfer.transfer_cross_cloudpull_ttl_sec"
-                      :min="1800"
-                      :max="86400"
-                      :step="60"
-                      controls-position="right"
-                      class="num-input"
-                    />
-                    <span class="field-suffix">秒</span>
-                  </div>
-                  <span class="field-hint">给 115 抓取用的转存专用签名有效期，要覆盖 115 排队调度与大文件慢拉，与播放签名口径分开，默认 43200（12 小时）</span>
-                </div>
-              </el-form-item>
-              <el-form-item label="云下载轮询超时">
-                <div class="field-stack">
-                  <div class="field-control">
-                    <el-input-number
-                      v-model="transfer.transfer_cross_cloudpull_timeout_sec"
-                      :min="60"
-                      :max="21600"
-                      :step="60"
-                      controls-position="right"
-                      class="num-input"
-                    />
-                    <span class="field-suffix">秒</span>
-                  </div>
-                  <span class="field-hint">等 115 云下载任务完成的最长秒数，到点未完成就回落搬字节老路，不无限等，默认 3600</span>
                 </div>
               </el-form-item>
               <el-form-item label="换绑放行窗口">
