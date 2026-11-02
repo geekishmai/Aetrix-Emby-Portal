@@ -266,3 +266,33 @@ def test_copy_url_channel_limit_no_binding_state_change(db, monkeypatch):
     assert excinfo.value.kind == "size_limit"
     db.refresh(binding)
     assert binding.status == "active"
+
+
+def test_download_url_app_first_app_error_no_web_fallback(monkeypatch):
+    """播放器场景 app 通道失败：不许回落网页端。
+
+    网页端用播放器 UA 签出的地址拉流会被 CDN 拒（2026-10-31 探针
+    实证 403「no cookie」），回落等于把死地址当成功发出去。必须
+    如实抛错，让上层按 transient 定性。
+    """
+    seen = []
+    app_err = {"state": False, "errno": 9999, "msg": "app 通道故障"}
+    _install_http(monkeypatch, {"state": True, "file_url": WEB_URL},
+                  app_err, seen)
+    client = transfer115.Pan115Client(AUTH, ua="Lavf/60.16.100")
+    with pytest.raises(transfer115.Pan115Error):
+        client.download_url("PC-BIG", app_first=True)
+    assert not any("webapi.115.com" in s["url"] for s in seen)
+
+
+def test_download_url_app_first_app_limit_no_web_fallback(monkeypatch):
+    """播放器场景 app 通道回 50028：直接按 size_limit 抛，不绕网页端
+    （网页端同文件必然同样 50028，绕一圈只多一次上游请求）。"""
+    seen = []
+    app_limit = {"state": False, "errno": 50028, "msg": "文件大小超出限制"}
+    _install_http(monkeypatch, {"state": True, "file_url": WEB_URL},
+                  app_limit, seen)
+    client = transfer115.Pan115Client(AUTH, ua="Lavf/60.16.100")
+    with pytest.raises(transfer115.Pan115ChannelLimitError):
+        client.download_url("PC-BIG", app_first=True)
+    assert not any("webapi.115.com" in s["url"] for s in seen)

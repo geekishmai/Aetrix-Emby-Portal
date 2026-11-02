@@ -109,21 +109,21 @@ def _enable(monkeypatch):
 # ---------- 115 地址存在性校验定性 ----------
 
 def test_check_115_download_alive_classifies(monkeypatch):
-    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url: 200)
+    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url, ua="": 200)
     assert ub.check_115_download_alive("https://115.example/dl") == "alive"
-    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url: 206)
+    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url, ua="": 206)
     assert ub.check_115_download_alive("https://115.example/dl") == "alive"
-    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url: 404)
+    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url, ua="": 404)
     assert ub.check_115_download_alive("https://115.example/dl") == "dead"
-    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url: 410)
+    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url, ua="": 410)
     assert ub.check_115_download_alive("https://115.example/dl") == "dead"
     # 403/5xx 定性不清：不拦播放（unknown），绝不因探测抖动多造失败。
-    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url: 403)
+    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url, ua="": 403)
     assert ub.check_115_download_alive("https://115.example/dl") == "unknown"
-    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url: 500)
+    monkeypatch.setattr(ub, "_pan115_probe_http", lambda url, ua="": 500)
     assert ub.check_115_download_alive("https://115.example/dl") == "unknown"
 
-    def _boom(url):
+    def _boom(url, ua=""):
         raise RuntimeError("net down")
 
     monkeypatch.setattr(ub, "_pan115_probe_http", _boom)
@@ -288,7 +288,8 @@ class _FakeDB:
         return _FakeQuery()
 
 
-def _stream_setup(monkeypatch, gate_verdict, alive="alive"):
+def _stream_setup(monkeypatch, gate_verdict, alive="alive",
+                  seen=None, request_ua=None):
     """桩通 video_stream 前置链路，停在 serve_115_copy 分支门口。"""
     from starlette.requests import Request
 
@@ -323,12 +324,19 @@ def _stream_setup(monkeypatch, gate_verdict, alive="alive"):
     monkeypatch.setattr(ub, "resolve_user115_copy_url",
                         lambda db, user_id, pickcode, ua="":
                         "https://115.example/dl")
-    monkeypatch.setattr(ub, "check_115_download_alive", lambda url: alive)
+    def _fake_alive(url, ua=""):
+        if seen is not None:
+            seen["probe_ua"] = ua
+        return alive
 
+    monkeypatch.setattr(ub, "check_115_download_alive", _fake_alive)
+
+    headers = [(b"user-agent", request_ua.encode())] if request_ua else []
     scope = {"type": "http", "method": "GET", "path": "/Videos/item/stream",
              "raw_path": b"/Videos/item/stream",
              "query_string": b"",
-             "headers": [], "scheme": "http", "server": ("testserver", 80),
+             "headers": headers, "scheme": "http",
+             "server": ("testserver", 80),
              "client": ("testclient", 50000), "root_path": ""}
     return api, Request(scope), SimpleNamespace(id=7), _FakeDB()
 
@@ -431,3 +439,67 @@ def test_video_stream_quota_409_logs_structured(monkeypatch, caplog):
     assert "item=321" in caplog.text
     assert "fid=copyfid" in caplog.text
     assert "cached=True" in caplog.text
+
+
+def test_check_115_download_alive_passes_signing_ua(monkeypatch):
+    """探测必须带签名 UA：115 现签地址绑签名 UA，用别的 UA 探测恒
+    403（2026-11-02 生产实证 3/3），alive/dead 信号全失真。"""
+    seen = {}
+
+    def _probe(url, ua=""):
+        seen["url"] = url
+        seen["ua"] = ua
+        return 206
+
+    monkeypatch.setattr(ub, "_pan115_probe_http", _probe)
+    assert ub.check_115_download_alive(
+        "https://115.example/dl", ua="SenPlayer/1.0") == "alive"
+    assert seen["ua"] == "SenPlayer/1.0"
+
+
+def test_pan115_probe_http_sends_ua_header(monkeypatch):
+    """真实探测入口：给了 UA 就必须把 User-Agent 头带上；不给时
+    保持旧形态（不显式设置 UA）。"""
+    import httpx
+
+    captured = {}
+
+    class _Resp:
+        status_code = 206
+
+        def iter_bytes(self):
+            yield b"x"
+
+    class _Ctx:
+        def __enter__(self):
+            return _Resp()
+
+        def __exit__(self, *args):
+            return False
+
+    def _stream(method, url, **kwargs):
+        captured.update(kwargs)
+        return _Ctx()
+
+    monkeypatch.setattr(httpx, "stream", _stream)
+    assert ub._pan115_probe_http(
+        "https://115.example/dl", ua="SenPlayer/1.0") == 206
+    assert captured["headers"]["User-Agent"] == "SenPlayer/1.0"
+    assert captured["headers"]["Range"] == "bytes=0-"
+    captured.clear()
+    assert ub._pan115_probe_http("https://115.example/dl") == 206
+    assert "User-Agent" not in captured["headers"]
+
+
+def test_video_stream_115_copy_probe_uses_player_ua(monkeypatch):
+    """serve_115_copy 的存活探测必须用签名时同一个播放器 UA：
+    地址绑 UA，探测不带 UA 恒 403、死链永远测不出来。"""
+    seen = {}
+    api, req, user, db = _stream_setup(
+        monkeypatch,
+        {"verdict": "serve_115_copy",
+         "variant": SimpleNamespace(pickcode="PC123", id=99)},
+        seen=seen, request_ua="SenPlayer/1.0")
+    resp = _run(api.video_stream("item", req, user, db))
+    assert resp.status_code == 302
+    assert seen["probe_ua"] == "SenPlayer/1.0"
