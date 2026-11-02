@@ -96,6 +96,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -104,8 +105,10 @@ from typing import Callable, Optional
 from sqlalchemy.orm import Session
 
 from backend.emby_server import upstream_sources as us
+from backend.emby_server import upstream_health as uh
 from backend.emby_server import upstream_http
 from backend.emby_server import upstream_item_mappings as uim
+from backend.emby_server.env_util import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +131,20 @@ APPLECMS_TIER_GATE_ENV = "APPLECMS_TIER_GATE"
 #: 没有同步工人；本键是未来同步工人复用的门，本模块只定义读取
 #: 口，不消费它写任何东西。
 APPLECMS_SYNC_ENV = "UPSTREAM_SYNC_ENABLED"
+
+#: 苹果 CMS 坏源自动熔断阈值 env 键：真实点播路径上某 CMS 源连续
+#: 失败达到该值时，自动经 upstream_sources.disable_source 停用该源
+#: （只对 applecms 型源生效）。默认值与健康状态机翻 Unavailable 的
+#: 阈值（UPSTREAM_HEALTH_FAILURE_THRESHOLD，默认 3）对齐——同一份
+#: 连续失败计数（SourceHealthRecord）喂两处消费：先翻 Unavailable
+#: 沉底排序，再达熔断阈值停用；两个阈值默认同值、各自可调。
+APPLECMS_CIRCUIT_BREAKER_THRESHOLD_ENV = "APPLECMS_CIRCUIT_BREAKER_THRESHOLD"
+
+
+def cms_circuit_breaker_threshold() -> int:
+    """CMS 坏源自动熔断的连续失败阈值（默认与健康状态机阈值同值）。"""
+    return env_int(APPLECMS_CIRCUIT_BREAKER_THRESHOLD_ENV,
+                   uh.failure_threshold(), 1, 100)
 
 #: 上游探活/认证单次超时（秒，运维常量，见模块 docstring）。
 UPSTREAM_PROBE_TIMEOUT_SEC = 10.0
@@ -683,6 +700,145 @@ def _resolve_applecms_stream(source, vod_id: str, *,
     return address
 
 
+# ---------------------------------------------------------------------------
+# CMS 取流留痕、线路择优与坏源熔断（播放优化 B 件，2026-11-02）
+#
+# 数据来源钉死在真实点播路径上：生产探活工人三守护默认关，健康分
+# 若只等探活喂数就是空中楼阁。取流收口（resolve_upstream_stream 的
+# CMS 分支）逐次把成败/延迟写进既有健康记录（源级 SourceHealthRecord
+# + 线路级 LineHealthRecord，同一份 Redis 存储、同一套状态机），
+# PlaybackInfo 组装（get_displayable_mappings）按这份记录择优排序，
+# 连续失败达阈值时经唯一启停写口 disable_source 自动停用坏源。
+# ---------------------------------------------------------------------------
+
+def _get_health_store():
+    """健康记录存储口（生产 Redis 实现；测试替换本函数注入内存实现）。"""
+    return uh.RedisHealthStore()
+
+
+def _cms_line_key(source_id, quality_mapping_id) -> str:
+    """线路健康键：有映射按映射 id（一条映射 = 一条下发线路），
+    显式源口无映射时按源 id 兜底。"""
+    if quality_mapping_id is not None:
+        return f"mapping:{quality_mapping_id}"
+    return f"source:{source_id}"
+
+
+#: 取流失败的结构化错误码 → 健康状态机的 failure_kind。未列出的码
+#: 不写健康结论——那是本地状态，不是源的可用性证据：
+#: upstream_playback_disabled 是本地总闸；upstream_forbidden 在 CMS
+#: 分支有两个来源（本地分级门控未配置、源站接口 403），按码无法
+#: 区分，且 403 与探活软放行同哲学（只证明服务器 IP 被拒或本地
+#: 未配，不证明源坏了），一律不记失败，免得把好源误熔断。
+_CMS_FAILURE_KINDS = {
+    "upstream_quota_exhausted": "rate_limited",
+    "upstream_credential_invalid": "unauthorized",
+    "upstream_unavailable": "server_error",
+}
+
+
+def _record_cms_stream_outcome(db, source, *, error_code=None,
+                               latency_ms=None,
+                               quality_mapping_id=None) -> None:
+    """把一次 CMS 取流结论写进既有健康记录（源级 + 线路级）。
+
+    - 源级：复用 upstream_health.apply_source_result 与
+      SourceHealthRecord（键 = str(source.id)，与 CMS 轻探活同
+      口径）——点播结论与探活结论共用同一份连续失败计数，健康分
+      不另起第二套统计。
+    - 线路级：复用 LineHealthRecord / apply_line_result（状态翻转
+      仍守「源级已确认才摘线」口径），并补记线路连续失败数、失败
+      原因与最近一次成功延迟，供择优排序消费。
+    - 熔断：失败累计达到 cms_circuit_breaker_threshold() 且源仍
+      启用时，经唯一启停写口 us.disable_source 停用并落一条审计
+      日志；只对 applecms 型源生效。恢复只走手动 enable_source
+      （管理端现成启停，「最大」源人工停用即先例）——生产探活
+      工人默认关，不存在可靠的自动复活信号，不许假装能自动恢复。
+    - 条目不存在（upstream_item_not_found）按 unknown 记：只推进
+      last_checked_at。源站明明应答了、是条目没了，不许拿它给源
+      记失败、更不许触发熔断。
+    全程 fail-open：留痕/熔断的任何异常只记 warning，绝不打断
+    取流主路径（成功照常下发、失败照常抛原结构化错误）。
+    """
+    try:
+        if getattr(source, "source_type", None) != "applecms":
+            return
+        if error_code is None:
+            outcome = uh.ProbeOutcome(uh.OUTCOME_SUCCESS)
+        elif error_code == "upstream_item_not_found":
+            outcome = uh.ProbeOutcome(uh.OUTCOME_UNKNOWN)
+        elif error_code in _CMS_FAILURE_KINDS:
+            outcome = uh.ProbeOutcome(
+                uh.OUTCOME_FAILURE, _CMS_FAILURE_KINDS[error_code])
+        else:
+            return
+        store = _get_health_store()
+        now = time.time()
+        source_key = str(source.id)
+        record = store.get_source(source_key) or uh.SourceHealthRecord(
+            source_key=source_key)
+        uh.apply_source_result(record, outcome,
+                               threshold=uh.failure_threshold(), now=now)
+        store.set_source(record)
+        line_key = _cms_line_key(source.id, quality_mapping_id)
+        line = store.get_line(line_key) or uh.LineHealthRecord(
+            line_key=line_key)
+        uh.apply_line_result(
+            line, outcome,
+            confirmed=record.availability_state == uh.STATE_UNAVAILABLE,
+            now=now)
+        if outcome.kind == uh.OUTCOME_SUCCESS:
+            line.consecutive_failures = 0
+            line.last_success_at = now
+            if latency_ms is not None:
+                line.last_latency_ms = float(latency_ms)
+        elif outcome.kind == uh.OUTCOME_FAILURE:
+            line.consecutive_failures += 1
+            line.last_failure_kind = outcome.failure_kind
+            line.last_failure_at = now
+        store.set_line(line)
+        if (outcome.kind == uh.OUTCOME_FAILURE and db is not None
+                and getattr(source, "enabled", False)
+                and record.consecutive_unavailable_failures
+                >= cms_circuit_breaker_threshold()):
+            us.disable_source(db, source)
+            db.commit()
+            logger.error(
+                "cms_circuit_breaker_open source_id=%s failures=%s "
+                "threshold=%s trigger=resolve_upstream_stream",
+                source.id, record.consecutive_unavailable_failures,
+                cms_circuit_breaker_threshold())
+    except Exception:  # noqa: BLE001 — 留痕/熔断不许打断取流，见 docstring
+        logger.warning("CMS 取流留痕/熔断异常，已忽略 source_id=%s",
+                       getattr(source, "id", None), exc_info=True)
+
+
+def _mapping_health_sort_key(store, mapping, source):
+    """线路择优排序键（越小越靠前；同键靠稳定排序保持映射偏好序）。
+
+    分层：源健康已判不可用（含过期等效不可用）沉底；源有连续失败
+    或本线路已翻 unavailable 的次之；健康线路在前。层内先按连续
+    失败数升序、再按最近成功延迟升序。无记录 = 没有坏过的证据，
+    按健康计（与 is_source_available 的无记录当 Active 同口径）。
+    """
+    record = store.get_source(str(source.id))
+    line = store.get_line(_cms_line_key(source.id, mapping.id))
+    if record is not None and not uh.is_source_available(record):
+        tier = 2
+    elif ((record is not None
+           and record.consecutive_unavailable_failures > 0)
+          or (line is not None and not uh.is_line_available(line))):
+        tier = 1
+    else:
+        tier = 0
+    failures = record.consecutive_unavailable_failures if record else 0
+    if line is not None and line.consecutive_failures > failures:
+        failures = line.consecutive_failures
+    latency = line.last_latency_ms if line is not None else None
+    return (tier, failures,
+            latency if latency is not None else float("inf"))
+
+
 def resolve_upstream_stream(db: Session, source_id: int,
                             upstream_item_id: str, *,
                             media_source_id: Optional[str] = None,
@@ -719,12 +875,28 @@ def resolve_upstream_stream(db: Session, source_id: int,
             409, "upstream_source_disabled",
             "该上游源未启用", source_id=source_id)
     if getattr(source, "source_type", None) == "applecms":
-        return _resolve_applecms_stream(
-            source, item_id, episode_index=episode_index,
-            http_get=http_get, http_probe=http_probe,
-            http_get_text=http_get_text,
-            quality_mapping_id=quality_mapping_id,
-            parse_resolver=parse_resolver)
+        # CMS 取流留痕/熔断接线（播放优化 B 件）：逐次结论写既有
+        # 健康记录，失败达阈值自动停用坏源；留痕全程 fail-open，
+        # 原结构化错误与成功地址逐字不变（见 _record_cms_stream_outcome）。
+        _cms_t0 = time.perf_counter()
+        try:
+            _cms_url = _resolve_applecms_stream(
+                source, item_id, episode_index=episode_index,
+                http_get=http_get, http_probe=http_probe,
+                http_get_text=http_get_text,
+                quality_mapping_id=quality_mapping_id,
+                parse_resolver=parse_resolver)
+        except UpstreamPlaybackError as exc:
+            _record_cms_stream_outcome(
+                db, source, error_code=exc.code,
+                latency_ms=int((time.perf_counter() - _cms_t0) * 1000),
+                quality_mapping_id=quality_mapping_id)
+            raise
+        _record_cms_stream_outcome(
+            db, source,
+            latency_ms=int((time.perf_counter() - _cms_t0) * 1000),
+            quality_mapping_id=quality_mapping_id)
+        return _cms_url
     try:
         token = _auth_token_for_source(source, http_post=http_post)
     except us.SealedSecretError as exc:
@@ -806,6 +978,12 @@ def get_displayable_mappings(db, local_item_id):
     MediaSource、点选哪条定向解析哪条）需要的全量读口。有效性口径
     与 get_displayable_mapping 逐字一致（映射层 O-10 校验先行，
     再逐条验源存在且启用），偏好序即列表展示序（最佳在前）。
+
+    择优排序（播放优化 B 件）：返回前按既有健康记录稳定排序——
+    不可用/连续失败的线路沉底、延迟低且成功率高的排前面、最优线
+    成为默认首位，其余线保留可手选；同分保持映射偏好序。健康
+    记录读不到（Redis 故障等）时 fail-open 回偏好序原样，绝不
+    因为择优把线路弄丢或把 PlaybackInfo 组装打挂。
     """
     out = []
     for mapping in uim.get_all_mappings(db, local_item_id):
@@ -813,6 +991,14 @@ def get_displayable_mappings(db, local_item_id):
         if source is None or not source.enabled:
             continue
         out.append((mapping, source))
+    if len(out) > 1:
+        try:
+            store = _get_health_store()
+            out.sort(key=lambda pair: _mapping_health_sort_key(
+                store, pair[0], pair[1]))
+        except Exception:  # noqa: BLE001 — 择优是补强，故障回偏好序
+            logger.warning("上游线路择优排序异常，按映射偏好序下发",
+                           exc_info=True)
     return out
 
 
