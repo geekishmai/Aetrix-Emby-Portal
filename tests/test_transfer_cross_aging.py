@@ -68,8 +68,10 @@ def _clean_state():
 def _job(db, item_id=1, trigger="playback", owner_ref="u1", status="pending",
          cross=False, created_ago_sec=None, lease_sec=None, **kw):
     if cross:
-        kw.setdefault("provider", "drive")
-        kw.setdefault("dest_drive_id", f"pan115:user-{owner_ref}")
+        # 跨盘样本用现存方向：115 源 → 用户 Drive 落点（drive→pan115
+        # 用户落点已于 2026-11-02 下线）。
+        kw.setdefault("provider", "pan115")
+        kw.setdefault("dest_drive_id", f"userdrive:{owner_ref}")
     row = em.TransferJob(item_id=item_id, trigger=trigger, drive_id="drive1",
                          owner_scope="user", owner_ref=owner_ref,
                          status=status, **kw)
@@ -91,7 +93,7 @@ def _finish(db, row):
     db.commit()
 
 
-def _binding(db, user_id, provider="pan115", status="active"):
+def _binding(db, user_id, provider="drive", status="active"):
     cred = em.MountCredential(scope="user", owner_user_id=user_id,
                               status="active")
     db.add(cred)

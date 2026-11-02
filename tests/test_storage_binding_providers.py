@@ -42,24 +42,26 @@ def test_no_mounts_returns_empty(db):
     assert ub.list_binding_providers(db) == []
 
 
-def test_drive_and_115_mapped_and_others_skipped(db):
+def test_drive_mapped_115_removed_and_others_skipped(db):
+    # 夸克/115 用户绑定线已下线（2026-11-02 删除单）：115 型挂载
+    # 仍可作共享库来源，但不再映射出用户绑定入口。
     _mount(db, "m-drive", "drive")
     _mount(db, "m-115", "115")
     _mount(db, "m-local", "local")
     _mount(db, "m-rclone", "rclone")
-    assert ub.list_binding_providers(db) == ["drive", "pan115"]
+    assert ub.list_binding_providers(db) == ["drive"]
 
 
 def test_alias_mount_types_mapped(db):
     _mount(db, "m-gdrive", "gdrive")
     _mount(db, "m-pan115", "pan115")
-    assert ub.list_binding_providers(db) == ["drive", "pan115"]
+    assert ub.list_binding_providers(db) == ["drive"]
 
 
 def test_disabled_mounts_not_counted(db):
     _mount(db, "m-drive-off", "drive", is_enabled=False)
     _mount(db, "m-115-on", "115", is_enabled=True)
-    assert ub.list_binding_providers(db) == ["pan115"]
+    assert ub.list_binding_providers(db) == []
 
 
 def test_result_contains_only_provider_names(db):

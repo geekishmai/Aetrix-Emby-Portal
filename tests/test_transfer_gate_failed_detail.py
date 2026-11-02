@@ -273,21 +273,6 @@ def test_gate_same_failed_terminal_kind_carries_detail(db, monkeypatch):
 
 # ---------- ④ 115 同 provider 同款 ----------
 
-def test_gate_same115_failed_insufficient_space_failed_with_detail(
-        db, monkeypatch):
-    item = _same115_setup(db, monkeypatch)
-    job = _job(db, item.id, 7, provider="pan115", dest="pan115:user-7",
-               status="failed", error_kind="insufficient_space",
-               error_detail=SPACE_DETAIL,
-               created_at=datetime.now() - timedelta(minutes=5))
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "failed"
-    assert gate["reason"] == "insufficient_space"
-    assert gate["job_id"] == job.id
-    assert gate["detail"] == f"转存到你的115 网盘失败：{SPACE_DETAIL}"
-    exc = _raise(gate)
-    assert exc.status_code == 409
-    assert "空间不足" in exc.detail
 
 
 # ---------- ⑤ 锚：在途单仍 preparing 通用句 ----------
@@ -328,24 +313,6 @@ def test_gate_same_failed_retriable_retriggers_preparing(db, monkeypatch):
 
 # ---------- ⑧ PA-004：跨 provider no_binding（认领前复核） ----------
 
-def test_gate_cross_failed_no_binding_precheck_failed_with_rebind_detail(
-        db, monkeypatch):
-    item = _cross_setup(db, monkeypatch)
-    job = _job(db, item.id, 7, status="failed", trigger="playback",
-               error_kind="no_binding",
-               error_detail=NO_BINDING_PRECHECK_DETAIL,
-               created_at=datetime.now() - timedelta(minutes=5))
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "failed"
-    assert gate["reason"] == "no_binding"
-    assert gate["job_id"] == job.id
-    assert gate["detail"] == (
-        f"转存到你的115 网盘失败：{NO_BINDING_PRECHECK_DETAIL}")
-    assert "重绑" in gate["detail"]
-    assert db.query(em.TransferJob).count() == 1  # 不重复建单
-    exc = _raise(gate)
-    assert exc.status_code == 409
-    assert "重绑" in exc.detail
 
 
 # ---------- ⑨ PA-004：跨 provider no_binding（115→Drive 执行器） ----------
@@ -371,58 +338,9 @@ def test_gate_cross_failed_no_binding_executor_failed_with_rebind_detail(
 
 # ---------- ⑩ PA-004：跨 provider 空间不足 ----------
 
-def test_gate_cross_failed_insufficient_space_failed_with_detail(
-        db, monkeypatch):
-    item = _cross_setup(db, monkeypatch)
-    job = _job(db, item.id, 7, status="failed", trigger="prefetch",
-               error_kind="insufficient_space", error_detail=SPACE_DETAIL,
-               created_at=datetime.now() - timedelta(minutes=5))
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "failed"
-    assert gate["reason"] == "insufficient_space"
-    assert gate["job_id"] == job.id
-    assert gate["detail"] == f"转存到你的115 网盘失败：{SPACE_DETAIL}"
-    assert db.query(em.TransferJob).count() == 1
-    exc = _raise(gate)
-    assert exc.status_code == 409
-    assert "空间不足" in exc.detail
-    assert "16491976779" in exc.detail
 
 
 # ---------- ⑪ 锚：跨 provider 终态 / retriable 行为不变 ----------
 
-def test_gate_cross_failed_terminal_kinds_still_failed_with_detail(
-        db, monkeypatch):
-    _enable(monkeypatch)
-    _mount(db, 3, "drive", "drive:drive1")
-    _binding(db, 7, provider="pan115")
-    for kind, detail in (("auth_error", "115 Cookie 已失效"),
-                         ("dead", DEAD_DETAIL)):
-        item = _item(db)
-        job = _job(db, item.id, 7, status="failed", trigger="playback",
-                   error_kind=kind, error_detail=detail,
-                   created_at=datetime.now() - timedelta(minutes=5))
-        gate = tv.ensure_user_copy_gate(db, item, _user())
-        assert gate["verdict"] == "failed"
-        assert gate["reason"] == kind
-        assert gate["job_id"] == job.id
-        assert gate["detail"] == f"转存到你的115 网盘失败：{detail}"
-        exc = _raise(gate)
-        assert exc.status_code == 409
-        assert detail in exc.detail
 
 
-def test_gate_cross_failed_retriable_retriggers_preparing(
-        db, monkeypatch):
-    item = _cross_setup(db, monkeypatch)
-    old = _job(db, item.id, 7, status="failed", trigger="prefetch",
-               error_kind="retriable", error_detail="Drive API 503 临时失败",
-               created_at=datetime.now() - timedelta(minutes=5))
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_retriggered"
-    assert gate["job_id"] != old.id
-    assert db.query(em.TransferJob).count() == 2
-    new_job = db.query(em.TransferJob).order_by(
-        em.TransferJob.id.desc()).first()
-    assert new_job.status == "pending" and new_job.trigger == "playback"

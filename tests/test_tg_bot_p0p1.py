@@ -124,8 +124,10 @@ def test_bindings_lists_own_only_and_no_credential_leak(db):
     _binding(db, other.id, label="别人的盘", provider="drive", status="active")
     text = handlers.handle_bindings(db, _tg(), 900001, "")
     assert "我的谷歌" in text and "谷歌网盘" in text and "正常" in text
-    assert "我的115" in text and "已失效" in text
-    assert "账号凭据不对" in text
+    # 夸克/115 已下线（2026-11-02 删除单）：存量行不再列出，
+    # 只在卡尾提醒改绑 Drive。
+    assert "我的115" not in text
+    assert "已下线" in text and "改绑 Google Drive" in text
     assert "别人的盘" not in text
     assert "999999" not in text  # credential_id 绝不进回复
 
@@ -212,16 +214,19 @@ def test_whyplay_no_binding(db):
     u = _user(db)
     _item(db, 51, "单片", path="115:/a.mkv")
     text = handlers.handle_whyplay(db, _tg(), 900001, "单片")
-    assert "还没有绑定网盘" in text
+    # 115 已下线：无 Drive 绑定时明示改绑 Drive。
+    assert "已下线" in text and "绑定 Google Drive" in text
 
 
-def test_whyplay_cross_provider(db, monkeypatch):
+def test_whyplay_removed_provider_binding(db, monkeypatch):
+    # Drive 片源 + 只剩已下线 provider 的存量绑定：不再讲「绑哪
+    # 播哪」，明示改绑 Drive（2026-11-02 删除单）。
     u = _user(db)
     _binding(db, u.id, label="我的115", provider="pan115", status="active")
     _item(db, 52, "单片", path="mount://3/a.mkv")
     monkeypatch.setattr(queries, "_item_provider", lambda db_, item: "drive")
     text = handlers.handle_whyplay(db, _tg(), 900001, "单片")
-    assert "绑哪播哪" in text
+    assert "已下线" in text and "改绑 Google Drive" in text
 
 
 def test_whyplay_binding_invalid(db, monkeypatch):
@@ -230,12 +235,13 @@ def test_whyplay_binding_invalid(db, monkeypatch):
              kind="auth_error")
     _item(db, 53, "单片", path="115:/a.mkv")
     text = handlers.handle_whyplay(db, _tg(), 900001, "单片")
-    assert "已失效" in text
+    # 存量 115 绑定视为不存在：不再报「已失效请重绑 115」。
+    assert "已下线" in text
 
 
 def test_whyplay_job_in_flight(db):
     u = _user(db)
-    _binding(db, u.id, label="我的115", provider="pan115", status="active")
+    _binding(db, u.id, label="我的谷歌", provider="drive", status="active")
     _item(db, 54, "单片", path="115:/a.mkv")
     _job(db, 54, u.id, status="running")
     text = handlers.handle_whyplay(db, _tg(), 900001, "单片")
@@ -244,7 +250,7 @@ def test_whyplay_job_in_flight(db):
 
 def test_whyplay_failed_job(db):
     u = _user(db)
-    _binding(db, u.id, label="我的115", provider="pan115", status="active")
+    _binding(db, u.id, label="我的谷歌", provider="drive", status="active")
     _item(db, 55, "单片", path="115:/a.mkv")
     _job(db, 55, u.id, status="failed", kind="dead")
     text = handlers.handle_whyplay(db, _tg(), 900001, "单片")
@@ -253,7 +259,7 @@ def test_whyplay_failed_job(db):
 
 def test_whyplay_ready_variant(db):
     u = _user(db)
-    _binding(db, u.id, label="我的115", provider="pan115", status="active")
+    _binding(db, u.id, label="我的谷歌", provider="drive", status="active")
     _item(db, 56, "单片", path="115:/a.mkv")
     _variant(db, 56, u.id, status="ready")
     text = handlers.handle_whyplay(db, _tg(), 900001, "单片")
@@ -264,7 +270,7 @@ def test_whyplay_ready_variant(db):
 
 def test_whyplay_revoked_variant(db):
     u = _user(db)
-    _binding(db, u.id, label="我的115", provider="pan115", status="active")
+    _binding(db, u.id, label="我的谷歌", provider="drive", status="active")
     _item(db, 57, "单片", path="115:/a.mkv")
     _variant(db, 57, u.id, status="ready", revoked=True)
     text = handlers.handle_whyplay(db, _tg(), 900001, "单片")
@@ -280,7 +286,7 @@ def test_whyplay_byos(db):
 
 def test_whyplay_no_job_yet(db):
     u = _user(db)
-    _binding(db, u.id, label="我的115", provider="pan115", status="active")
+    _binding(db, u.id, label="我的谷歌", provider="drive", status="active")
     _item(db, 59, "单片", path="115:/a.mkv")
     text = handlers.handle_whyplay(db, _tg(), 900001, "单片")
     assert "还没有转存" in text

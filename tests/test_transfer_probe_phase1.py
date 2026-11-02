@@ -81,7 +81,7 @@ def _item(db, sha1=_PAYLOAD_SHA1, **kw):
     return row
 
 
-def _binding(db, user_id, provider="pan115", status="active"):
+def _binding(db, user_id, provider="drive", status="active"):
     cred = em.MountCredential(scope="user", owner_user_id=user_id,
                               status="active")
     db.add(cred)
@@ -97,9 +97,9 @@ def _binding(db, user_id, provider="pan115", status="active"):
 def _cross_job(db, item_id, user_id, **kw):
     kw.setdefault("status", "pending")
     row = em.TransferJob(item_id=item_id, trigger="playback",
-                         drive_id="shared1", provider="drive",
+                         drive_id="shared1", provider="pan115",
                          owner_scope="user", owner_ref=str(user_id),
-                         dest_drive_id=f"pan115:user-{user_id}", **kw)
+                         dest_drive_id=f"userdrive:{user_id}", **kw)
     db.add(row)
     db.commit()
     return row
@@ -185,7 +185,7 @@ def test_create_cross_job_logs_sha1_present(db, monkeypatch, caplog):
     item = _item(db)
     _binding(db, 7)
     with caplog.at_level(logging.INFO, logger=_TV_LOGGER):
-        job = tv.create_cross_provider_job(db, item, 7, "drive")
+        job = tv.create_cross_provider_job(db, item, 7, "pan115")
     assert "sha1_present=1" in caplog.text
     assert f"job={job.id}" in caplog.text
 
@@ -197,5 +197,5 @@ def test_create_cross_job_logs_sha1_absent(db, monkeypatch, caplog):
     item = _item(db, sha1=None)
     _binding(db, 7)
     with caplog.at_level(logging.INFO, logger=_TV_LOGGER):
-        tv.create_cross_provider_job(db, item, 7, "drive")
+        tv.create_cross_provider_job(db, item, 7, "pan115")
     assert "sha1_present=0" in caplog.text

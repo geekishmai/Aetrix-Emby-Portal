@@ -92,7 +92,7 @@ _SIZE_LIMIT_MESSAGE = (
 #: 失效三档 → 用户端文案（照抄定稿 BYOS-4 暂定三句，非 FMBY 原文）。
 BINDING_ERROR_MESSAGES = {
     "auth_error": "账号凭据不对，请重新绑定。",
-    "expired": "115 登录已过期，请重新绑定。",
+    "expired": "登录已过期，请重新绑定。",
     "throttled": "账号被限制，请稍后再试或更换账号绑定。",
     "pan115_vip_required": "该 115 账号不是 VIP，115 绑定需要 VIP 账号，请开通后重新绑定。",
     "quark_vip_required": "该夸克账号不是会员，夸克绑定需要会员账号（免费账号下载限速、容量有限，无法正常使用），请开通会员后重新绑定。",
@@ -102,6 +102,12 @@ BINDING_ERROR_MESSAGES = {
 PROVIDER_PAN115 = "pan115"
 PROVIDER_DRIVE = "drive"
 PROVIDER_QUARK = "quark"
+
+#: 已下线的用户绑定 provider（2026-11-02 站主亲定：夸克与 115 的
+#: 用户绑定线整体删除）。建绑/重验/取流一律拒绝，名单不再返回，
+#: 存量绑定行代码层视为不存在；存量数据本身一期不删（二期清理）。
+REMOVED_PROVIDERS = (PROVIDER_PAN115, PROVIDER_QUARK)
+REMOVED_PROVIDER_MESSAGE = "该网盘已下线，请改绑 Google Drive。"
 
 
 class BindingError(RuntimeError):
@@ -264,6 +270,10 @@ def list_binding_providers(db: Session) -> list[str]:
     if not quark_bind_enabled(db):
         # 夸克绑定开关关：名单里也不出（与 create_binding 拒绝同口径）
         found.discard(PROVIDER_QUARK)
+    # 已下线 provider 永不出现在名单里（挂载映射与 env 额外名单
+    # 两侧都过滤，前端据此整块不渲染这两家）。
+    for removed in REMOVED_PROVIDERS:
+        found.discard(removed)
     # 固定顺序输出；前端只做 includes 判断，不依赖顺序
     return [p for p in ("drive", "pan115", "quark") if p in found]
 
@@ -314,7 +324,10 @@ def get_active_binding(db: Session, user_id: int,
     多个 active 绑定时取最早建的一个（P1 口径，写进文档；P3 按绑定
     扫描入库后，条目与绑定的归属由扫描线定，不再靠“最早”）。
     只返回本用户自己的行，绝不跨用户。
+    已下线 provider（REMOVED_PROVIDERS）恒回 None：存量行视为不存在。
     """
+    if provider in REMOVED_PROVIDERS:
+        return None
     return (
         db.query(em.UserStorageBinding)
         .filter(em.UserStorageBinding.user_id == user_id,
@@ -892,14 +905,17 @@ def create_binding(db: Session, user_id: int, provider: str,
     provider = (provider or "").strip()
     if provider not in em.USER_STORAGE_PROVIDERS:
         raise BindingError("validation", f"不支持的 provider：{provider}")
+    if provider in REMOVED_PROVIDERS:
+        # 已下线（2026-11-02 删除单）：在任何凭据处理之前拒绝，
+        # 不落行、不验活。
+        raise BindingError("unsupported", REMOVED_PROVIDER_MESSAGE)
     if provider == PROVIDER_DRIVE:
         # Drive 不收明文凭据：唯一建绑口是 OAuth start/callback
         # （见 drive_oauth），存一个验不活的 Drive 凭据行会违反
         # “绑完先验活”，故明确拒绝、不落行。
         raise BindingError(
             "unsupported",
-            "Drive 绑定请走 OAuth 授权：POST /storage-bindings/drive/oauth/start，"
-            "本口只接受 115 / 夸克绑定。")
+            "Drive 绑定请走 OAuth 授权：POST /storage-bindings/drive/oauth/start。")
     if provider == PROVIDER_QUARK and not quark_bind_enabled(db):
         raise BindingError("unsupported", "夸克绑定暂未开启。")
     label = (account_label or "").strip()
@@ -1015,6 +1031,9 @@ def verify_binding(db: Session, user_id: int,
     )
     if binding is None:
         raise BindingError("not_found", "绑定不存在或不属于当前用户。")
+    if binding.provider in REMOVED_PROVIDERS:
+        # 已下线 provider 的存量行不许重验复活（2026-11-02 删除单）。
+        raise BindingError("unsupported", REMOVED_PROVIDER_MESSAGE)
     if binding.provider == PROVIDER_DRIVE:
         # P2：Drive 重验 = 强制刷新 + 验活（drive_oauth，局部导入
         # 防循环：drive_oauth 顶层导入本模块）。
@@ -1231,6 +1250,9 @@ def resolve_user115_direct_url(db: Session, user_id: int,
     不是这个绑定用户的；挂载侧在凭据覆盖时同理回默认 UA
     （mounts.Pan115Mount._ua）。返回 Signed115Url，带实际签名 UA。
     """
+    # 115 用户绑定线已下线（2026-11-02 删除单）：防御性关死，
+    # 任何残留调用方都只拿到明确拒绝，绝不现签用户 115 直链。
+    raise BindingError("unsupported", REMOVED_PROVIDER_MESSAGE)
     from backend.emby_server import mounts as mount_lib
 
     parsed = mount_lib.parse_mount_path(getattr(item, "file_path", "") or "")
@@ -1310,6 +1332,8 @@ def resolve_user115_copy_url(db: Session, user_id: int,
     不出的根因（2026-10-31 生产实证）；两通道都撞限制时抛
     kind=size_limit，不落绑定失败态（文件与凭据都没问题）。
     """
+    # 115 用户绑定线已下线（2026-11-02 删除单）：防御性关死。
+    raise BindingError("unsupported", REMOVED_PROVIDER_MESSAGE)
     binding = get_active_binding(db, user_id, PROVIDER_PAN115)
     if binding is None:
         raise BindingError("not_found", "当前用户没有可用的 115 绑定。")
@@ -1364,6 +1388,8 @@ def resolve_user_quark_copy_url(db: Session, user_id: int,
     凭据失效 → BindingError（expired/auth_error），调用方按 409
     处理，不静默回落共享中继；一过性失败 → transient。
     """
+    # 夸克用户绑定线已下线（2026-11-02 删除单）：防御性关死。
+    raise BindingError("unsupported", REMOVED_PROVIDER_MESSAGE)
     binding = get_active_binding(db, user_id, PROVIDER_QUARK)
     if binding is None:
         raise BindingError("not_found", "当前用户没有可用的夸克绑定。")

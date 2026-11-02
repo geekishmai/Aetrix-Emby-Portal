@@ -95,9 +95,12 @@ def _binding(db, user_id, provider="pan115"):
 
 
 def _job(db, item_id, user_id=7, cross=True, status="pending", **kw):
-    dest = f"pan115:user-{user_id}" if cross else f"userdrive:{user_id}"
+    # 跨盘样本用现存方向：115 源 → 用户 Drive 落点（drive→pan115
+    # 用户落点已于 2026-11-02 下线）。
+    dest = f"userdrive:{user_id}"
+    provider = "pan115" if cross else "drive"
     row = em.TransferJob(item_id=item_id, trigger="playback",
-                         drive_id="shared1", provider="drive",
+                         drive_id="shared1", provider=provider,
                          owner_scope="user", owner_ref=str(user_id),
                          dest_drive_id=dest, status=status, **kw)
     db.add(row)
@@ -166,7 +169,7 @@ def test_claim_proceeds_when_stage_under_limit(db, monkeypatch, tmp_path):
     monkeypatch.setenv("TRANSFER_STAGE_MAX_TOTAL_BYTES", "100000")
     (stage_dir / ("st-" + "f" * 64 + ".bin")).write_bytes(b"x" * 1500)
 
-    _binding(db, 7, "pan115")
+    _binding(db, 7, "drive")
     item = _item(db)
     cross = _job(db, item.id, cross=True)
     claimed = tv.claim_due_jobs(db, limit=4)
@@ -180,7 +183,7 @@ def test_sweep_keeps_live_job_stage_files(db, tmp_path):
     stage_dir = tmp_path / "stage"
     item = _item(db, fid="livefid", size=2000)
     _job(db, item.id, cross=True, status="pending")
-    key = tv._stage_key("drive", "shared1", "livefid", 2000)
+    key = tv._stage_key("pan115", "", "livefid", 2000)
     bin_path, meta_path = _stage_pair(stage_dir, key, 2000)
     stats = tv.sweep_stage_orphans(db, directory=str(stage_dir))
     assert bin_path.exists() and meta_path.exists()
@@ -194,7 +197,7 @@ def test_sweep_keeps_running_job_sidecar_and_stage(db, tmp_path):
     stage_dir.mkdir(parents=True)
     item = _item(db, fid="runfid", size=2000)
     job = _job(db, item.id, cross=True, status="running")
-    key = tv._stage_key("drive", "shared1", "runfid", 2000)
+    key = tv._stage_key("pan115", "", "runfid", 2000)
     bin_path, meta_path = _stage_pair(stage_dir, key, 2000)
     sidecar = stage_dir / f"mp-{job.id}.json"
     sidecar.write_text("{}", encoding="utf-8")
@@ -211,7 +214,7 @@ def test_sweep_keeps_live_stage_despite_size_drift(db, tmp_path):
     stage_dir = tmp_path / "stage"
     item = _item(db, fid="driftfid", size=2000)
     _job(db, item.id, cross=True, status="pending")
-    drift_key = tv._stage_key("drive", "shared1", "driftfid", 3000)
+    drift_key = tv._stage_key("pan115", "", "driftfid", 3000)
     bin_path, meta_path = _stage_pair(stage_dir, drift_key, 3000)
     stats = tv.sweep_stage_orphans(db, directory=str(stage_dir))
     assert bin_path.exists() and meta_path.exists()

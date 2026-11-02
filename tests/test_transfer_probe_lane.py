@@ -106,7 +106,7 @@ def _item(db, sha1=_PAYLOAD_SHA1, **kw):
     return row
 
 
-def _binding(db, user_id, provider="pan115", status="active"):
+def _binding(db, user_id, provider="drive", status="active"):
     cred = em.MountCredential(scope="user", owner_user_id=user_id,
                               status="active")
     db.add(cred)
@@ -122,9 +122,9 @@ def _binding(db, user_id, provider="pan115", status="active"):
 def _cross_job(db, item_id, user_id, **kw):
     kw.setdefault("status", "pending")
     row = em.TransferJob(item_id=item_id, trigger="playback",
-                         drive_id="shared1", provider="drive",
+                         drive_id="shared1", provider="pan115",
                          owner_scope="user", owner_ref=str(user_id),
-                         dest_drive_id=f"pan115:user-{user_id}", **kw)
+                         dest_drive_id=f"userdrive:{user_id}", **kw)
     db.add(row)
     db.commit()
     return row
@@ -295,7 +295,7 @@ def test_create_cross_job_logs_sha1_present(db, monkeypatch, caplog):
     item = _item(db)
     _binding(db, 7)
     with caplog.at_level(logging.INFO, logger=_TV_LOGGER):
-        job = tv.create_cross_provider_job(db, item, 7, "drive")
+        job = tv.create_cross_provider_job(db, item, 7, "pan115")
     assert "sha1_present=1" in caplog.text
     assert f"job={job.id}" in caplog.text
 
@@ -307,73 +307,18 @@ def test_create_cross_job_logs_sha1_absent(db, monkeypatch, caplog):
     item = _item(db, sha1=None)
     _binding(db, 7)
     with caplog.at_level(logging.INFO, logger=_TV_LOGGER):
-        tv.create_cross_provider_job(db, item, 7, "drive")
+        tv.create_cross_provider_job(db, item, 7, "pan115")
     assert "sha1_present=0" in caplog.text
 
 
 # ---------- 期二：探针认领不占跨槽 ----------
 
-def test_probe_claim_works_when_cross_lane_full(db, monkeypatch):
-    """跨槽被一条 running 跨单占满（cap=1）：普通认领领不到
-    pending 跨单；探针认领照样领走可探针单，且不计入跨槽计数。"""
-    _enable(monkeypatch)
-    _set_config(db, "transfer_cross_lane_concurrency", 1)
-    item = _item(db)
-    _binding(db, 7)
-    _binding(db, 8)
-    running = _cross_job(
-        db, item.id, 8, status="running",
-        lease_expires_at=datetime.now() + timedelta(seconds=300))
-    pending = _cross_job(db, item.id, 7)
-    assert tv._running_cross_count(db) == 1
-    assert tv.claim_due_jobs(db) == []  # 跨槽满，普通认领无份
-    claimed = tv.claim_probe_jobs(db)
-    assert claimed == [pending.id]
-    db.refresh(pending)
-    assert pending.status == "running"
-    assert (pending.claimed_by or "").startswith("probe:")
-    assert pending.claimed_at is not None
-    assert pending.last_probe_at is not None
-    # 探针单不计入跨槽占用：计数仍只认普通 running 跨单口径外——
-    # 探针 claimed_by 带 probe: 标记，_running_cross_count 排除它。
-    assert tv._running_cross_count(db) == 1
-    db.refresh(running)
-    assert running.status == "running"
 
 
-def test_probe_claim_respects_lane_concurrency_key(db, monkeypatch):
-    _enable(monkeypatch)
-    _set_config(db, "transfer_probe_lane_concurrency", 1)
-    item = _item(db)
-    jobs = []
-    for uid in (7, 8, 9):
-        _binding(db, uid)
-        jobs.append(_cross_job(db, item.id, uid))
-    claimed = tv.claim_probe_jobs(db)
-    assert len(claimed) == 1
 
 
-def test_probe_claim_skips_non_probeable(db, monkeypatch):
-    """无可信 sha1 的跨单：探针道不碰；普通认领行为不变。"""
-    _enable(monkeypatch)
-    item = _item(db, sha1=None)
-    _binding(db, 7)
-    job = _cross_job(db, item.id, 7)
-    assert tv.claim_probe_jobs(db) == []
-    db.refresh(job)
-    assert job.status == "pending"
-    claimed = tv.claim_due_jobs(db)
-    assert claimed == [job.id]
 
 
-def test_probe_claim_throttled_by_last_probe_at(db, monkeypatch):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7)
-    job = _cross_job(db, item.id, 7, last_probe_at=datetime.now())
-    assert tv.claim_probe_jobs(db) == []
-    db.refresh(job)
-    assert job.status == "pending"
 
 
 def test_probe_disabled_switch_stops_lane(db, monkeypatch):
@@ -387,107 +332,16 @@ def test_probe_disabled_switch_stops_lane(db, monkeypatch):
 
 # ---------- 期二：probe_only 执行语义 ----------
 
-def test_probe_hit_done_and_variant_ready(db, monkeypatch, db_factory):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7)
-    job = _cross_job(db, item.id, 7)
-    fake = _FakeUser115(rapid="hit")
-    _patch_user115(monkeypatch, fake)
-    sa = _FakeSA()
-    stats = tv.process_probe_round(db_factory, lambda: sa)
-    assert stats["hit"] == 1
-    db.refresh(job)
-    assert job.status == "done"
-    assert len(fake.rapid_calls) == 1
-    assert fake.simple_calls == []  # 命中零字节搬运
-    assert sa.download_calls == 0
-    rows = (db.query(em.TransferVariant)
-            .filter(em.TransferVariant.item_id == item.id).all())
-    assert len(rows) == 1
-    assert rows[0].status == "ready"
-    assert rows[0].owner_ref == "7"
 
 
-def test_probe_miss_releases_without_burning_attempts(db, monkeypatch,
-                                                     db_factory):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7)
-    job = _cross_job(db, item.id, 7)
-    fake = _FakeUser115(rapid="miss")
-    _patch_user115(monkeypatch, fake)
-    stats = tv.process_probe_round(db_factory, lambda: _FakeSA())
-    assert stats["miss"] == 1
-    db.refresh(job)
-    assert job.status == "pending"      # 释放回队列等正常搬运认领
-    assert job.attempts == 0            # 不烧 attempts
-    assert job.error_kind is None       # 不写终态
-    assert job.lease_expires_at is None
-    assert job.claimed_by is None
-    assert job.last_probe_at is not None
-    assert fake.simple_calls == []      # 探针绝不搬字节
 
 
-def test_probe_protocol_error_releases_and_logs(db, monkeypatch,
-                                                db_factory, caplog):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7)
-    job = _cross_job(db, item.id, 7)
-    fake = _FakeUser115(rapid="error")
-    _patch_user115(monkeypatch, fake)
-    with caplog.at_level(logging.WARNING, logger=_TV_LOGGER):
-        stats = tv.process_probe_round(db_factory, lambda: _FakeSA())
-    assert stats["miss"] == 1
-    db.refresh(job)
-    assert job.status == "pending"
-    assert job.attempts == 0
-    assert "transfer_probe outcome=error" in caplog.text
 
 
-def test_probe_auth_error_releases_not_terminal(db, monkeypatch,
-                                                db_factory, caplog):
-    """探针时用户 Cookie 被 115 拒：响亮记日志 + 按未命中释放，
-    不在探针态判死——终态由普通执行路同口径处理。"""
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7)
-    job = _cross_job(db, item.id, 7)
-    fake = _FakeUser115(rapid="auth_error")
-    _patch_user115(monkeypatch, fake)
-    with caplog.at_level(logging.WARNING, logger=_TV_LOGGER):
-        stats = tv.process_probe_round(db_factory, lambda: _FakeSA())
-    assert stats["miss"] == 1
-    db.refresh(job)
-    assert job.status == "pending"
-    assert job.attempts == 0
-    assert job.error_kind is None
-    assert "transfer_probe outcome=error" in caplog.text
 
 
 # ---------- 期二：点播当场探针 ----------
 
-def test_inline_probe_hit_releases_gate_same_request(db, monkeypatch,
-                                                     db_factory):
-    _enable(monkeypatch)
-    item = _item(db)
-    _binding(db, 7)
-    job = _cross_job(db, item.id, 7)
-    fake = _FakeUser115(rapid="hit")
-    _patch_user115(monkeypatch, fake)
-    initial = {"verdict": "preparing", "job_id": job.id}
-
-    async def _gate():
-        return {"verdict": "proceed"}
-
-    result = asyncio.run(tv.maybe_run_play_inline(
-        initial, _gate, session_factory=db_factory,
-        drive_api_factory=lambda: _FakeSA()))
-    assert result["verdict"] == "proceed"  # 命中同请求放行
-    db.refresh(job)
-    assert job.status == "done"
-    assert fake.simple_calls == []
 
 
 def test_inline_probe_miss_falls_back_to_preparing(db, monkeypatch,

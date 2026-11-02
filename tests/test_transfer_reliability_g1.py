@@ -226,14 +226,14 @@ def test_create_user_job_with_binding_ok(db):
 
 
 def test_create_cross_job_dest_no_binding_rejected(db):
-    """跨单 Drive 源→115 盘：只有 Drive 绑定、没有 115 绑定时，
+    """跨单 115 源→Drive 盘：只有 115 绑定、没有 Drive 绑定时，
     目标盘无绑定 → no_binding 秒判，不落行（复核样本原型：
-    只有某盘却往另一盘转）。"""
-    _mount(db)
-    item = _item(db)
-    _binding(db, 7, provider="drive")
+    只有某盘却往另一盘转；原 Drive 源→115 盘方向已下线）。"""
+    item = SimpleNamespace(id=42, drive_file_id="fid1",
+                           file_path="115:/电影/a.mkv")
+    _binding(db, 7, provider="pan115")
     with pytest.raises(tv.TransferError) as excinfo:
-        tv.create_cross_provider_job(db, item, 7, "drive",
+        tv.create_cross_provider_job(db, item, 7, "pan115",
                                      trigger="playback")
     assert excinfo.value.kind == "no_binding"
     assert db.query(em.TransferJob).count() == 0
@@ -241,13 +241,13 @@ def test_create_cross_job_dest_no_binding_rejected(db):
 
 def test_create_cross_job_with_dest_binding_ok(db):
     """跨单目标盘有绑定：正常建单。"""
-    _mount(db)
-    item = _item(db)
-    _binding(db, 7, provider="pan115")
-    job = tv.create_cross_provider_job(db, item, 7, "drive",
+    item = SimpleNamespace(id=42, drive_file_id="fid1",
+                           file_path="115:/电影/a.mkv")
+    _binding(db, 7, provider="drive")
+    job = tv.create_cross_provider_job(db, item, 7, "pan115",
                                        trigger="playback")
     assert job.status == "pending"
-    assert job.dest_drive_id == "pan115:user-7"
+    assert job.dest_drive_id == "userdrive:7"
 
 
 def test_create_cross_job_115_source_dest_drive_ok(db):
@@ -276,9 +276,9 @@ def test_claim_sweeps_user_job_without_binding(db):
 
 
 def test_claim_sweeps_cross_job_with_wrong_binding(db):
-    """跨单落 115 盘但用户只有 Drive 绑定：认领前同判 no_binding。"""
-    _binding(db, 7, provider="drive")
-    job = _job(db, dest_drive_id="pan115:user-7")
+    """跨单落 Drive 盘但用户只有 115 绑定：认领前同判 no_binding。"""
+    _binding(db, 7, provider="pan115")
+    job = _job(db, provider="pan115", dest_drive_id="userdrive:7")
     claimed = tv.claim_due_jobs(db, limit=10)
     assert claimed == []
     fresh = _fresh(db, job.id)
@@ -330,13 +330,3 @@ def test_rebuild_dead_drive_copy_no_binding_fast_fail(db):
     assert db.query(em.TransferJob).count() == 0
 
 
-def test_rebuild_dead_115_cross_no_dest_binding_fast_fail(db):
-    """跨 provider 重建（Drive 源→用户 115 盘）：只有源侧 Drive
-    绑定、目标 115 盘无绑定 → 同款秒判 no_binding、不落行。"""
-    _mount(db)
-    item = _item(db)
-    _binding(db, 7, provider="drive")
-    out = tv.rebuild_dead_user115_copy(db, item, 7)
-    assert out["verdict"] == "failed"
-    assert out["reason"] == "no_binding"
-    assert db.query(em.TransferJob).count() == 0

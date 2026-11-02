@@ -324,35 +324,8 @@ def _quark_job(db, item, user_id=7):
     return row
 
 
-def test_executor_single_auth_recheck_alive_retries_not_kills(
-        db, fake_exec):
-    item = _drive_item(db)
-    binding = _binding(db, 7, "quark")
-    job = _quark_job(db, item)
-    out = tq.run_cross_to_quark(db, job, item,
-                                _FakeDriveApi(b"x" * 1000))
-    assert out["outcome"] == "retried"
-    db.refresh(job)
-    assert job.status == "pending"
-    assert job.error_kind == "retriable"
-    db.refresh(binding)
-    assert binding.status == "active"
 
 
-def test_executor_auth_recheck_dead_expires_binding(db, fake_exec):
-    fake_exec.verify_behavior = "dead"
-    item = _drive_item(db)
-    binding = _binding(db, 7, "quark")
-    job = _quark_job(db, item)
-    out = tq.run_cross_to_quark(db, job, item,
-                                _FakeDriveApi(b"x" * 1000))
-    assert out["outcome"] == "failed"
-    assert out["error_kind"] == "auth_error"
-    db.refresh(binding)
-    assert binding.status == "expired"
-    db.refresh(job)
-    assert job.status == "failed"
-    assert job.error_kind == "auth_error"
 
 
 # ---------------------------------------------------------------------------
@@ -387,25 +360,6 @@ class _Resp:
         return self._body
 
 
-def test_executor_403_detail_carries_step_and_upstream_code(
-        db, monkeypatch):
-    def _send_403(method, url, **kwargs):
-        return _Resp(403, {"status": 403, "code": 31001,
-                           "message": "登录态已过期", "data": None})
-
-    monkeypatch.setattr(quarkdrive, "_send", _send_403)
-    item = _drive_item(db)
-    binding = _binding(db, 7, "quark")
-    job = _quark_job(db, item)
-    out = tq.run_cross_to_quark(db, job, item,
-                                _FakeDriveApi(b"x" * 1000))
-    assert out["outcome"] == "failed"
-    assert out["error_kind"] == "auth_error"
-    db.refresh(job)
-    assert "[dir]" in (job.error_detail or "")
-    assert "31001" in (job.error_detail or "")
-    db.refresh(binding)
-    assert binding.status == "expired"
 
 
 # ---------------------------------------------------------------------------

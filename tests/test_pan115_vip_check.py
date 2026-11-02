@@ -114,85 +114,24 @@ def _cred_of(db, binding):
 
 # ---------- 建绑 ----------
 
-def test_create_vip_goes_active(db):
-    binding = _bind(db)
-    assert binding.status == "active"
-    assert binding.last_error_kind is None
-    assert _Stub115Client.calls["vip_status"] == 1
-    assert _cred_of(db, binding).status == "active"
 
 
-def test_create_not_vip_rejected_with_reason(db):
-    _Stub115Client.vip_behavior = "not_vip"
-    binding = _bind(db)
-    assert binding.status == "invalid"
-    assert binding.last_error_kind == "pan115_vip_required"
-    cred = _cred_of(db, binding)
-    assert cred.status == "invalid"
-    assert cred.last_error_kind == "pan115_vip_required"
-    # 接口出参：kind 可辨识、文案明示是 VIP 问题（不许说成 Cookie 失效）
-    out = ub.serialize_binding(binding)
-    assert out["last_error_kind"] == "pan115_vip_required"
-    assert out["error_message"] == VIP_MESSAGE
-    assert ub.error_message("pan115_vip_required") == VIP_MESSAGE
 
 
-def test_create_vip_unknown_shape_passes(db):
-    _Stub115Client.vip_behavior = "unknown"
-    binding = _bind(db)
-    assert binding.status == "active"
-    assert binding.last_error_kind is None
 
 
-def test_create_vip_probe_error_passes(db):
-    _Stub115Client.vip_behavior = "raise"
-    binding = _bind(db)
-    assert binding.status == "active"
 
 
-def test_create_switch_off_skips_vip_check(db):
-    _set_switch(db, "false")
-    _Stub115Client.vip_behavior = "not_vip"
-    binding = _bind(db)
-    assert binding.status == "active"
-    assert _Stub115Client.calls["vip_status"] == 0
 
 
-def test_create_cookie_auth_error_unchanged_and_no_vip_probe(db):
-    _Stub115Client.behavior = "auth_error"
-    binding = _bind(db)
-    assert binding.status == "expired"
-    assert binding.last_error_kind == "expired"
-    assert _Stub115Client.calls["vip_status"] == 0
 
 
 # ---------- 重验 ----------
 
-def test_verify_not_vip_marks_vip_required(db):
-    binding = _bind(db)
-    assert binding.status == "active"
-    _Stub115Client.vip_behavior = "not_vip"
-    updated = ub.verify_binding(db, 7, binding.id)
-    assert updated.status == "invalid"
-    assert updated.last_error_kind == "pan115_vip_required"
 
 
-def test_verify_vip_recovers_after_upgrade(db):
-    _Stub115Client.vip_behavior = "not_vip"
-    binding = _bind(db)
-    assert binding.status == "invalid"
-    _Stub115Client.vip_behavior = "vip"
-    updated = ub.verify_binding(db, 7, binding.id)
-    assert updated.status == "active"
-    assert updated.last_error_kind is None
 
 
-def test_verify_cookie_auth_error_unchanged(db):
-    binding = _bind(db)
-    _Stub115Client.behavior = "auth_error"
-    updated = ub.verify_binding(db, 7, binding.id)
-    assert updated.status == "expired"
-    assert updated.last_error_kind == "expired"
 
 
 # ---------- 开关 reader ----------

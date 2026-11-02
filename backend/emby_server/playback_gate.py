@@ -7,8 +7,9 @@
 - 只拦播放，不拦浏览：片库浏览、搜索、详情页一律不调本模块；本模块
   只在播放链接/变体下发处与直接流端点被调用。
 - 判定标准：请求播放的用户（WebUser.id）名下至少有一条 status 为
-  ``active`` 的用户存储绑定（drive / pan115 / quark 任一都算）。无绑定、或绑定
-  全是 invalid / expired，一律 403。
+  ``active`` 的用户存储绑定。2026-11-02 起夸克/115 用户绑定线已
+  下线，只认 drive 绑定（存量夸克/115 行视为不存在，见删除单）；
+  无 Drive 绑定、或绑定全是 invalid / expired，一律 403。
 - 只拦新下发的播放，不追溯已下发的链接：请求带有效的 play_sign 时，
   该签名本身就是 PlaybackInfo 门禁后下发的凭证（门禁上线前下发的在
   TTL 内自然过期），本次消费不拦截；无签名、签名无效、或走 Emby token
@@ -30,15 +31,17 @@ GATE_MESSAGE = "请先绑定自己的网盘账号才能点播"
 
 
 def has_active_binding(db: Session, user_id: int) -> bool:
-    """该用户名下是否存在至少一条 active 的用户存储绑定。
+    """该用户名下是否存在至少一条 active 的 Drive 用户存储绑定。
 
-    不区分 provider（drive / pan115 / quark 任一都算）；只认本用户自己的行，
-    绝不跨用户；invalid / expired 行不算。
+    只认 provider == "drive"（夸克/115 绑定线 2026-11-02 已下线，
+    存量行视为不存在）；只认本用户自己的行，绝不跨用户；
+    invalid / expired 行不算。
     """
     return (
         db.query(em.UserStorageBinding)
         .filter(
             em.UserStorageBinding.user_id == user_id,
+            em.UserStorageBinding.provider == "drive",
             em.UserStorageBinding.status == "active",
         )
         .first()

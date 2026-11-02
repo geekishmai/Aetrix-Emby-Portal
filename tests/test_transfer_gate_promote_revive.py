@@ -150,6 +150,15 @@ def _cross_setup(db, monkeypatch):
     return item
 
 
+def _cross115_setup(db, monkeypatch):
+    """绑 Drive 的用户播 115 条目 → 门禁跨 provider 分支（现存方向；
+    drive 条目＋只绑 115 的旧跨向已随 115 用户落点下线消失）。"""
+    _enable(monkeypatch)
+    item = _item(db, file_path="115:/电影/a.mkv")
+    _binding(db, 7, provider="drive")
+    return item
+
+
 def _same_setup(db, monkeypatch):
     """绑 Drive 的用户播 Drive 条目 → 门禁同 provider 分支。"""
     _enable(monkeypatch)
@@ -162,10 +171,10 @@ def _same_setup(db, monkeypatch):
 # ---------- ①② trigger 提升 ----------
 
 def test_gate_cross_prefetch_promoted_on_playback(db, monkeypatch, caplog):
-    item = _cross_setup(db, monkeypatch)
+    item = _cross115_setup(db, monkeypatch)
     created = datetime.now() - timedelta(minutes=30)
-    job = _job(db, item.id, 7, status="pending", trigger="prefetch",
-               created_at=created)
+    job = _job(db, item.id, 7, provider="pan115", status="pending",
+               trigger="prefetch", created_at=created)
     with caplog.at_level(logging.INFO):
         gate = tv.ensure_user_copy_gate(db, item, _user())
     assert gate["verdict"] == "preparing"
@@ -205,8 +214,9 @@ def test_gate_same_store_want_promoted_on_playback(db, monkeypatch):
 # ---------- ⑦ 锚：不提升的情形 ----------
 
 def test_gate_running_prefetch_not_promoted(db, monkeypatch):
-    item = _cross_setup(db, monkeypatch)
-    job = _job(db, item.id, 7, status="running", trigger="prefetch")
+    item = _cross115_setup(db, monkeypatch)
+    job = _job(db, item.id, 7, provider="pan115", status="running",
+               trigger="prefetch")
     gate = tv.ensure_user_copy_gate(db, item, _user())
     assert gate["verdict"] == "preparing"
     assert gate["reason"] == "job_in_flight"
@@ -227,21 +237,6 @@ def test_gate_pending_quota_not_promoted(db, monkeypatch):
 
 # ---------- ③ unsupported 签名自愈 ----------
 
-def test_gate_cross_failed_unsupported_retired_signature_revives(
-        db, monkeypatch):
-    item = _cross_setup(db, monkeypatch)
-    _job(db, item.id, 7, status="failed", trigger="prefetch",
-         error_kind="unsupported", error_detail=RETIRED_DETAIL)
-    gate = tv.ensure_user_copy_gate(db, item, _user())
-    assert gate["verdict"] == "preparing"
-    assert gate["reason"] == "job_retriggered"
-    assert db.query(em.TransferJob).count() == 2
-    new_job = db.query(em.TransferJob).order_by(
-        em.TransferJob.id.desc()).first()
-    assert new_job.status == "pending" and new_job.trigger == "playback"
-    assert new_job.dest_drive_id == "pan115:user-7"
-    assert tv._is_cross_job(new_job) is True
-    assert gate["job_id"] == new_job.id
 
 
 def test_gate_same_failed_unsupported_retired_signature_revives(
@@ -264,8 +259,9 @@ def test_gate_same_failed_unsupported_retired_signature_revives(
 
 def test_gate_failed_unsupported_unknown_signature_stays_failed(
         db, monkeypatch):
-    item = _cross_setup(db, monkeypatch)
-    job = _job(db, item.id, 7, status="failed", trigger="prefetch",
+    item = _same_setup(db, monkeypatch)
+    job = _job(db, item.id, 7, dest="userdrive:7", status="failed",
+               trigger="prefetch",
                error_kind="unsupported", error_detail=UNKNOWN_SIZE_DETAIL)
     gate = tv.ensure_user_copy_gate(db, item, _user())
     assert gate["verdict"] == "failed"
@@ -275,9 +271,10 @@ def test_gate_failed_unsupported_unknown_signature_stays_failed(
 
 
 def test_gate_failed_unsupported_switch_off_stays_failed(db, monkeypatch):
-    item = _cross_setup(db, monkeypatch)
+    item = _same_setup(db, monkeypatch)
     _set_sysconfig(db, "pan115_multipart_upload_enabled", "false")
-    job = _job(db, item.id, 7, status="failed", trigger="prefetch",
+    job = _job(db, item.id, 7, dest="userdrive:7", status="failed",
+               trigger="prefetch",
                error_kind="unsupported", error_detail=RETIRED_DETAIL)
     gate = tv.ensure_user_copy_gate(db, item, _user())
     assert gate["verdict"] == "failed"
@@ -289,9 +286,11 @@ def test_gate_failed_unsupported_switch_off_stays_failed(db, monkeypatch):
 def test_gate_failed_unsupported_budget_exhausted_stays_failed(
         db, monkeypatch):
     # 24h 同桶已有 2 行（旧行 + 本失败行）：预算耗尽，不再建单。
-    item = _cross_setup(db, monkeypatch)
-    _job(db, item.id, 7, status="done", trigger="playback")
-    job = _job(db, item.id, 7, status="failed", trigger="prefetch",
+    item = _same_setup(db, monkeypatch)
+    _job(db, item.id, 7, dest="userdrive:7", status="done",
+         trigger="playback")
+    job = _job(db, item.id, 7, dest="userdrive:7", status="failed",
+               trigger="prefetch",
                error_kind="unsupported", error_detail=RETIRED_DETAIL)
     gate = tv.ensure_user_copy_gate(db, item, _user())
     assert gate["verdict"] == "failed"

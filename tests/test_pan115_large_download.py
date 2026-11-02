@@ -249,23 +249,8 @@ def _patch_resolve(monkeypatch, behavior):
     monkeypatch.setattr(transfer115, "Pan115Client", _ResolveFake115)
 
 
-def test_copy_url_passes_player_ua_app_first(db, monkeypatch):
-    _binding115(db, 7)
-    _patch_resolve(monkeypatch, "ok")
-    url = ub.resolve_user115_copy_url(db, 7, "PC-BIG", ua="Lavf/60.16.100")
-    assert url == APP_URL
-    assert _ResolveFake115.seen["ua"] == "Lavf/60.16.100"
-    assert _ResolveFake115.seen["app_first"] is True
 
 
-def test_copy_url_channel_limit_no_binding_state_change(db, monkeypatch):
-    binding = _binding115(db, 7)
-    _patch_resolve(monkeypatch, "limit")
-    with pytest.raises(ub.BindingError) as excinfo:
-        ub.resolve_user115_copy_url(db, 7, "PC-BIG", ua="Lavf/60.16.100")
-    assert excinfo.value.kind == "size_limit"
-    db.refresh(binding)
-    assert binding.status == "active"
 
 
 def test_download_url_app_first_app_error_no_web_fallback(monkeypatch):

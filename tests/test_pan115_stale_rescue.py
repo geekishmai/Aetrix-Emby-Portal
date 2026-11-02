@@ -117,17 +117,6 @@ def _patch(monkeypatch, fake):
                         lambda db_arg, user_id, binding_id: "FAKEAUTH")
 
 
-def test_stale_115_revived_on_download_ok(db, monkeypatch):
-    item = _item(db)
-    _binding(db, 7)
-    row = _stale_115_row(db, item.id)
-    fake = _FakePan115("ok")
-    _patch(monkeypatch, fake)
-    stats = tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert stats["revived"] == 1
-    assert row.status == "ready" and row.stale_count == 0
-    assert fake.download_calls == ["PC-NEW"]
 
 
 def test_stale_115_stays_stale_when_gone(db, monkeypatch):
@@ -142,18 +131,6 @@ def test_stale_115_stays_stale_when_gone(db, monkeypatch):
     assert stats["stale"] == 0  # 不重复计入本轮新 stale
 
 
-def test_stale_115_revived_via_dir_listing_on_channel_limit(db, monkeypatch):
-    item = _item(db)
-    _binding(db, 7)
-    row = _stale_115_row(db, item.id)
-    fake = _FakePan115("limit", dir_files=[
-        {"fid": "newfid", "cid": "c-new", "name": "a.mkv",
-         "is_dir": False, "size": 1000, "pickcode": "PC-NEW"}])
-    _patch(monkeypatch, fake)
-    stats = tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert stats["revived"] == 1
-    assert row.status == "ready" and row.stale_count == 0
 
 
 def test_stale_115_stays_stale_on_channel_limit_without_listing(db, monkeypatch):
@@ -202,14 +179,3 @@ def test_stale_drive_row_not_revived(db):
     assert stats["revived"] == 0
 
 
-def test_stale_115_orphaned_when_item_deleted(db, monkeypatch):
-    item = _item(db)
-    _binding(db, 7)
-    row = _stale_115_row(db, item.id)
-    item.deleted_at = datetime.now()
-    db.commit()
-    fake = _FakePan115("ok")
-    _patch(monkeypatch, fake)
-    tv.patrol_once(db, lambda: object())
-    db.refresh(row)
-    assert row.status == "orphan"

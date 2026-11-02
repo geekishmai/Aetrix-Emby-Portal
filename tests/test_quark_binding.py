@@ -166,78 +166,20 @@ def _stored_cookie(db, binding):
 
 # ---------- 建绑 + 验活 ----------
 
-def test_create_quark_binding_success(db, _stub_client):
-    binding = _bind(db)
-    assert binding.status == "active"
-    assert binding.provider == "quark"
-    assert binding.last_verified_at is not None
-    assert _StubQuarkClient.calls == {"check": 1, "list_root": 1, "list_dir": 1}
-    # 凭据只存密封引用，解封后与入参一致；序列化不出凭据材料
-    assert _stored_cookie(db, binding) == FAKE_COOKIE
-    data = ub.serialize_binding(binding)
-    assert data["provider"] == "quark"
-    assert data["has_credential"] is True
-    assert data["error_message"] is None
-    assert ub.get_active_binding(db, 7, "quark").id == binding.id
 
 
-def test_create_quark_auth_error_persists_expired(db, _stub_client):
-    _StubQuarkClient.behavior = "auth_error"
-    binding = _bind(db)
-    assert binding.status == "expired"
-    assert binding.last_error_kind == "expired"
-    data = ub.serialize_binding(binding)
-    assert "夸克" in (data["error_message"] or "")
 
 
-def test_create_quark_throttled_persists_invalid(db, _stub_client):
-    _StubQuarkClient.behavior = "throttled"
-    binding = _bind(db)
-    assert binding.status == "invalid"
-    assert binding.last_error_kind == "throttled"
 
 
-def test_create_quark_transient_rolls_back(db, _stub_client):
-    _StubQuarkClient.behavior = "transient"
-    with pytest.raises(ub.BindingError) as excinfo:
-        _bind(db)
-    assert excinfo.value.kind == "transient"
-    assert db.query(em.UserStorageBinding).count() == 0
-    assert db.query(em.MountCredential).count() == 0
 
 
-def test_create_quark_rotation_resealed(db, _stub_client):
-    rotated = "__puus=new-token; __pus=abc; other=1"
-    _StubQuarkClient.rotate_to = rotated
-    binding = _bind(db)
-    assert binding.status == "active"
-    # __puus 轮换后必须回写密封凭据，只存初始值会慢性失效
-    assert _stored_cookie(db, binding) == rotated
 
 
 # ---------- 重验 ----------
 
-def test_verify_quark_recovers_expired_and_rotates(db, _stub_client):
-    _StubQuarkClient.behavior = "auth_error"
-    binding = _bind(db)
-    assert binding.status == "expired"
-    _StubQuarkClient.behavior = "ok"
-    rotated = "__puus=recovered-token; __pus=abc; other=1"
-    _StubQuarkClient.rotate_to = rotated
-    updated = ub.verify_binding(db, 7, binding.id)
-    assert updated.status == "active"
-    assert updated.last_error_kind is None
-    assert _stored_cookie(db, updated) == rotated
 
 
-def test_verify_quark_transient_keeps_status(db, _stub_client):
-    binding = _bind(db)
-    _StubQuarkClient.behavior = "transient"
-    with pytest.raises(ub.BindingError) as excinfo:
-        ub.verify_binding(db, 7, binding.id)
-    assert excinfo.value.kind == "transient"
-    db.refresh(binding)
-    assert binding.status == "active"
 
 
 # ---------- 会员校验（照 115 对齐） ----------
@@ -249,48 +191,14 @@ def _set_vip_switch(db, value):
     store.invalidate(ub.KEY_QUARK_BIND_VIP_CHECK)
 
 
-def test_create_quark_non_vip_blocked(db, _stub_client):
-    _StubQuarkClient.vip_result = "not_vip"
-    binding = _bind(db)
-    assert binding.status == "invalid"
-    assert binding.last_error_kind == "quark_vip_required"
-    data = ub.serialize_binding(binding)
-    assert "会员" in (data["error_message"] or "")
-    # 非会员不许说成 Cookie 失效：凭据验活本身是通过的
-    assert _StubQuarkClient.calls == {"check": 1, "list_root": 1, "list_dir": 1}
-    assert _StubQuarkClient.member_calls == 1
 
 
-def test_create_quark_vip_check_switch_off_allows_non_vip(db, _stub_client):
-    _set_vip_switch(db, "false")
-    assert ub.quark_bind_vip_check_enabled(db) is False
-    _StubQuarkClient.vip_result = "not_vip"
-    binding = _bind(db)
-    assert binding.status == "active"
-    # 开关关时根本不查会员
-    assert _StubQuarkClient.member_calls == 0
 
 
-def test_create_quark_vip_unknown_allows(db, _stub_client):
-    _StubQuarkClient.vip_result = "unknown"
-    binding = _bind(db)
-    assert binding.status == "active"
 
 
-def test_create_quark_vip_member_error_allows(db, _stub_client):
-    # /member 异常（网络/上游）不误杀：查不清照常放行
-    _StubQuarkClient.vip_result = "raise"
-    binding = _bind(db)
-    assert binding.status == "active"
 
 
-def test_verify_quark_non_vip_marks_invalid(db, _stub_client):
-    binding = _bind(db)
-    assert binding.status == "active"
-    _StubQuarkClient.vip_result = "not_vip"
-    updated = ub.verify_binding(db, 7, binding.id)
-    assert updated.status == "invalid"
-    assert updated.last_error_kind == "quark_vip_required"
 
 
 # ---------- MINI_VIP 不算会员（真实客户端全链，用户 2026-10-31 亲定） ----------
@@ -318,33 +226,10 @@ def _member_status(**flags):
     return status
 
 
-def test_create_quark_mini_vip_status_flag_only_blocked(db, monkeypatch):
-    # member_status 只有 MINI_VIP 档持有、无正经档 → 非会员落 invalid
-    _route_quark_http(monkeypatch, {
-        "member_type": "NORMAL",
-        "member_status": _member_status(MINI_VIP="1")})
-    binding = _bind(db)
-    assert binding.status == "invalid"
-    assert binding.last_error_kind == "quark_vip_required"
 
 
-def test_create_quark_mini_vip_member_type_blocked(db, monkeypatch):
-    # member_type 字面就是 "MINI_VIP"（含 "VIP" 子串）→ 同样非会员
-    _route_quark_http(monkeypatch, {
-        "member_type": "MINI_VIP",
-        "member_status": _member_status()})
-    binding = _bind(db)
-    assert binding.status == "invalid"
-    assert binding.last_error_kind == "quark_vip_required"
 
 
-def test_create_quark_mini_plus_svip_active(db, monkeypatch):
-    # MINI_VIP 与正经档共存：有正经档信号即会员，照常建绑
-    _route_quark_http(monkeypatch, {
-        "member_type": "MINI_VIP",
-        "member_status": _member_status(SUPER_VIP="1", MINI_VIP="1")})
-    binding = _bind(db)
-    assert binding.status == "active"
 
 
 def test_quark_vip_check_default_on(db):
@@ -384,14 +269,8 @@ def _mount(db, name, mount_type, is_enabled=True):
     return row
 
 
-def test_providers_quark_via_mount_mapping(db):
-    _mount(db, "m-quark", "quark")
-    assert ub.list_binding_providers(db) == ["quark"]
 
 
-def test_providers_quark_via_extra_env(db, monkeypatch):
-    monkeypatch.setenv("BYOS_EXTRA_BINDING_PROVIDERS", "quark")
-    assert ub.list_binding_providers(db) == ["quark"]
 
 
 def test_providers_quark_hidden_when_switch_off(db, monkeypatch):
@@ -400,22 +279,10 @@ def test_providers_quark_hidden_when_switch_off(db, monkeypatch):
     assert ub.list_binding_providers(db) == []
 
 
-def test_providers_existing_order_unchanged(db):
-    _mount(db, "m-drive", "drive")
-    _mount(db, "m-115", "115")
-    _mount(db, "m-quark", "quark")
-    assert ub.list_binding_providers(db) == ["drive", "pan115", "quark"]
 
 
 # ---------- 播放门禁 ----------
 
-def test_gate_counts_active_quark_binding(db, _stub_client):
-    assert playback_gate.has_active_binding(db, 7) is False
-    binding = _bind(db)
-    assert playback_gate.has_active_binding(db, 7) is True
-    binding.status = "expired"
-    db.commit()
-    assert playback_gate.has_active_binding(db, 7) is False
 
 
 # ---------- 夸克客户端本体（桩 HTTP 出口） ----------
@@ -664,41 +531,7 @@ def test_client_envelope_auth_failure_logged(_stub_send, caplog):
     assert "check" in caplog.text
 
 
-def test_create_quark_risk_auth_persists_throttled(db, _stub_client):
-    # 鉴权异常类型 + 风控原话 → 落 throttled（invalid），不落
-    # expired；文案说人话：临时拦截、稍后再试，不许说已过期。
-    _StubQuarkClient.behavior = "risk_auth"
-    binding = _bind(db)
-    assert binding.status == "invalid"
-    assert binding.last_error_kind == "throttled"
-    data = ub.serialize_binding(binding)
-    assert "登录已过期" not in (data["error_message"] or "")
-    assert "稍后再试" in (data["error_message"] or "")
 
 
-def test_verify_quark_risk_auth_marks_throttled_not_expired(
-        db, _stub_client):
-    _StubQuarkClient.behavior = "auth_error"
-    binding = _bind(db)
-    assert binding.status == "expired"
-    _StubQuarkClient.behavior = "risk_auth"
-    out = ub.verify_binding(db, 7, binding.id)
-    assert out.status == "invalid"
-    assert out.last_error_kind == "throttled"
 
 
-def test_create_quark_auth_failure_logs_detail_without_cookie(
-        db, _stub_client, caplog):
-    # 绑定层留痕：kind/step/upstream_code/上游原话（脱敏）可查，
-    # Cookie 值绝不进日志（FAKE_COOKIE 的 __puus 值 old-token）。
-    _StubQuarkClient.behavior = "auth_detailed"
-    with caplog.at_level(logging.WARNING,
-                         logger="backend.emby_server.user_bindings"):
-        binding = _bind(db)
-    assert binding.status == "expired"
-    assert binding.last_error_kind == "expired"
-    assert "kind=expired" in caplog.text
-    assert "step=check" in caplog.text
-    assert "31001" in caplog.text
-    assert "require login [guest]" in caplog.text
-    assert "old-token" not in caplog.text

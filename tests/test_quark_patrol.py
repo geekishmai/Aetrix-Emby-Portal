@@ -140,32 +140,8 @@ def _patch(monkeypatch, fake):
                         lambda *a, **kw: False)
 
 
-def test_ready_quark_row_not_checked_via_drive(db, monkeypatch):
-    item = _item(db)
-    _binding(db, 7)
-    row = _quark_row(db, item.id)
-    fake = _FakeQuark("ok")
-    _patch(monkeypatch, fake)
-    drive = _Drive404()
-    tv.patrol_once(db, lambda: drive)
-    tv.patrol_once(db, lambda: drive)
-    db.refresh(row)
-    assert drive.calls == []  # 夸克行绝不许再喂给 Drive get_file
-    assert fake.download_calls == ["qfid-1", "qfid-1"]
-    assert row.status == "ready" and row.stale_count == 0
 
 
-def test_ready_quark_row_two_upstream_rejections_go_stale(db, monkeypatch):
-    item = _item(db)
-    _binding(db, 7)
-    row = _quark_row(db, item.id)
-    _patch(monkeypatch, _FakeQuark("gone"))
-    tv.patrol_once(db, lambda: _Drive404())
-    db.refresh(row)
-    assert row.status == "ready" and row.stale_count == 1
-    tv.patrol_once(db, lambda: _Drive404())
-    db.refresh(row)
-    assert row.status == "stale" and row.stale_count == 2
 
 
 def test_ready_quark_row_auth_error_no_strike(db, monkeypatch):
@@ -179,28 +155,8 @@ def test_ready_quark_row_auth_error_no_strike(db, monkeypatch):
     assert row.status == "ready" and row.stale_count == 0
 
 
-def test_ready_quark_row_network_error_no_strike(db, monkeypatch):
-    item = _item(db)
-    _binding(db, 7)
-    row = _quark_row(db, item.id)
-    _patch(monkeypatch, _FakeQuark("neterr"))
-    stats = tv.patrol_once(db, lambda: _Drive404())
-    db.refresh(row)
-    assert row.status == "ready" and row.stale_count == 0
-    assert stats["errors"] == 1
 
 
-def test_stale_quark_row_revived_on_download_ok(db, monkeypatch):
-    item = _item(db)
-    _binding(db, 7)
-    row = _quark_row(db, item.id, status="stale", stale_count=2)
-    fake = _FakeQuark("ok")
-    _patch(monkeypatch, fake)
-    stats = tv.patrol_once(db, lambda: _Drive404())
-    db.refresh(row)
-    assert stats["revived"] == 1
-    assert row.status == "ready" and row.stale_count == 0
-    assert fake.download_calls == ["qfid-1"]
 
 
 def test_stale_quark_row_stays_stale_when_gone(db, monkeypatch):

@@ -172,11 +172,10 @@ def list_variants(db: Session, item, *,
         # 不进变体清单；None = 未提供信号，保持旧行为。
         if mount_can_generate_play_target is not False:
             names.append(MOUNT_RELAY)
-        # BYOS P1：调用方已算好“该用户有 active 的 pan115 绑定且
-        # 条目挂载为 115”时，追加绑定直链（排在主线之后，第一条
-        # 仍是现行主线，老客户端无感）。清单阶段不真解析直链。
-        if user115_direct_available:
-            names.append(BYOS115_DIRECT)
+        # BYOS 115 直链已下线（2026-11-02 删除单）：user115_direct_
+        # available 信号不再追加 BYOS115_DIRECT——变体枚举保留，
+        # 客户端显式选它时 resolve_requested_variant 按「已知但
+        # 不可用」回 409 明示，不静默改走默认条。
     else:
         names.append(LOCAL_FILE)
     # BYOS Drive：排在主线之后（第一条仍是现行主线），无绑定或
