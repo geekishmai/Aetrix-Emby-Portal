@@ -619,12 +619,14 @@ def _process_entry(db: Session, library, source, entry: dict,
         stats["skipped_other_library"] += 1
         return
     if row is None:
+        had_poster = False
         row = _create_row(db, library, source, vod_id, record)
         run_cache[key] = row
         stats["added"] += 1
         if harvest and _fill_row_from_harvest(db, row, harvest):
             db.flush()
     else:
+        had_poster = bool(row.poster_path or row.primary_image_url)
         changed = _refresh_row(db, row, record)
         if harvest and _fill_row_from_harvest(db, row, harvest):
             changed = True
@@ -634,7 +636,7 @@ def _process_entry(db: Session, library, source, entry: dict,
             stats["existing"] += 1
         if row.upstream_source_id != source.id:
             stats["dedupe_hits"] += 1
-    if _fill_row_poster(row, entry):
+    if _fill_row_poster(row, entry) or ((not had_poster) and (row.primary_image_url or row.poster_path)):
         stats["posters_filled"] += 1
     uim.record_mapping(
         db, local_item_id=row.id, source_id=source.id,
@@ -708,6 +710,7 @@ def _process_series_entry(db: Session, library, source, entry: dict,
             "applecms 剧集无直链组跳过 library_id=%s source_id=%s "
             "vod_id=%s", library.id, source.id, vod_id)
         return
+    had_poster = bool(row.poster_path or row.primary_image_url) if row is not None else False
     if row is None:
         tree = acser.ensure_series_tree(db, library, source, record,
                                         detail)
@@ -730,7 +733,7 @@ def _process_series_entry(db: Session, library, source, entry: dict,
     # detail 才带），detail 没有再看 list 条目；集行不单独填，
     # 取图链自会回退剧图。
     if row is not None and row is not _OTHER_LIBRARY:
-        if _fill_row_poster(row, detail) or _fill_row_poster(row, entry):
+        if _fill_row_poster(row, detail) or _fill_row_poster(row, entry) or ((not had_poster) and (row.primary_image_url or row.poster_path)):
             stats["posters_filled"] += 1
     stats["episodes_added"] += tree["episodes_added"]
     stats["episodes_existing"] += tree["episodes_existing"]
