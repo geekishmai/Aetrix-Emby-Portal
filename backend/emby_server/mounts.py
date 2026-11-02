@@ -2494,10 +2494,9 @@ def resolve_play_target(file_path: Optional[str], db: Session, library=None, *,
             logger.info("解析单飞等锁超时 %.0fs，直接解析 mount://%s/%s",
                         _RESOLVE_SINGLE_FLIGHT_WAIT_SEC, mount_id, rel)
         try:
-            if acquired:
-                stored = _resolve_cache_get(cache_key)   # 等锁期间别人可能已经解析完
-                if stored is not None:
-                    return _reattach_cached_target(provider, stored, rel)
+            stored = _resolve_cache_get(cache_key)   # 等锁期间别人可能已经解析完
+            if stored is not None:
+                return _reattach_cached_target(provider, stored, rel)
             target = provider.resolve_final(rel)
             if target.kind == "url":
                 target.value = validate_remote_url(target.value)
