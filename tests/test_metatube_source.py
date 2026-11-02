@@ -193,3 +193,32 @@ def test_search_upstream_error_carries_status(monkeypatch):
             _search("SSIS-001")
     assert exc.value.status == 500
     assert exc.value.count_failure is True  # 真失败：喂熔断
+
+
+def test_write_config_metatube_rate_saved(monkeypatch):
+    """后台保存含 metatube 的限速：写通用 meta_source_rate_metatube 键，不许报错。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend import models as base_models
+    from backend.integrations import store
+    from backend.models import SystemConfig
+
+    monkeypatch.setenv("METATUBE_BASE_URL", "http://127.0.0.1:1")
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    base_models.Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    store.invalidate()
+    try:
+        ms_config.write_config(
+            db, enabled=True, prefer_chinese=True,
+            order=list(ms_config.DEFAULT_ORDER),
+            rates={"metatube": 2.0, "bangumi": 1.0})
+        row = db.query(SystemConfig).filter(
+            SystemConfig.key == "meta_source_rate_metatube").first()
+        assert row is not None and row.value == "2.0"
+        snap = ms_config.read_config(db, sources.SPECS)
+        assert snap.by_id("metatube").rate == 2.0
+    finally:
+        db.close()
+        store.invalidate()
