@@ -741,8 +741,12 @@ def _cms_line_key(source_id, quality_mapping_id) -> str:
 #: 分支有两个来源（本地分级门控未配置、源站接口 403），按码无法
 #: 区分，且 403 与探活软放行同哲学（只证明服务器 IP 被拒或本地
 #: 未配，不证明源坏了），一律不记失败，免得把好源误熔断。
+#: upstream_quota_exhausted（429）同理刻意排除（PA-078）：429
+#: 只证明源站对本站共享 IP 短暂限流，是瞬态、不是源坏了的证据；
+#: 计入连续失败会在限流窗口内把健康源自动停用，且探活工人默认关、
+#: 无自动复活。注意：排除的只是健康/熔断喂数，结构化错误本身
+#: 仍按原样向调用方报 429 upstream_quota_exhausted。
 _CMS_FAILURE_KINDS = {
-    "upstream_quota_exhausted": "rate_limited",
     "upstream_credential_invalid": "unauthorized",
     "upstream_unavailable": "server_error",
 }
