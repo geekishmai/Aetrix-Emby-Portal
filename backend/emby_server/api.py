@@ -710,9 +710,23 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
         except Exception as exc:  # noqa: BLE001
             logger.warning("详情 MediaSource 用户查询失败 user_id=%s: %s",
                            user_id, exc)
-        dto["MediaSources"] = [_media_source(item, base, api_key, db, auth_qs,
-                                             synthesize=True, user=_src_user)]
-        dto["MediaSourceCount"] = 1
+        # 托管行（movie/episode 且无 file_path）：没有本地文件，
+        # _media_source 拼出的本地源是空壳——无文件、无流信息、按其
+        # Id 走通用 /stream 必失败，下发到详情面会被客户端渲染成一条
+        # 不可用来源（2026-11-02 Rex 实证：一红一绿）。与 PlaybackInfo
+        # 托管分支（_upstream_only_media_sources）同口径：托管行不放
+        # 本地空壳，MediaSources 只由下方上游线路组成，无可展示线路
+        # 时为空列表；有 file_path 的本地条目与容器类维持原口径。
+        _hosted_row = (item.item_type in ("movie", "episode")
+                       and not item.file_path)
+        if _hosted_row:
+            dto["MediaSources"] = []
+            dto["MediaSourceCount"] = 0
+        else:
+            dto["MediaSources"] = [_media_source(
+                item, base, api_key, db, auth_qs,
+                synthesize=True, user=_src_user)]
+            dto["MediaSourceCount"] = 1
         # 详情源补「回本服务取流」地址（甲方案）：此前详情 MediaSource
         # 申报 SupportsDirectPlay=True 却不带任何地址，不走 PlaybackInfo、
         # 直放详情源的播放器（如 SenPlayer 关掉「始终播放原始路径」时）
@@ -734,8 +748,11 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
                 and _gate_mod.has_active_binding(db, user_id))
             dto["MediaSources"][0]["DirectPlayUrl"] = _detail_url
             dto["MediaSources"][0]["DirectStreamUrl"] = _detail_url
-        # 详情页「上游」线路（U-02）：本地条目有可展示的上游映射时，
-        # 来源列表末尾追加一条上游线路（开关关/无映射/源停用则不出现）。
+        # 详情页「上游」线路（U-02）：有可展示的上游映射时，
+        # 来源列表追加上游线路（开关关/无映射/源停用则不出现）；
+        # 本地条目排在主源之后，托管行（无本地主源）线路即全部
+        # 来源、base_source 传 None 走合成口径（与 PlaybackInfo
+        # 托管分支一致）。
         # 与主源同一签名口径：签名轨只给已有 active 绑定的用户；
         # 线路地址只回本服务取流口，(source_id, upstream_item_id)
         # 不下发，点播时取流口现查映射复验。
@@ -743,10 +760,12 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
         # 本地文件，有映射即可挂线路（本地主源的 DirectPlayUrl 仍只给
         # 有 file_path 的条目，见上方）；有映射与否由
         # _upstream_line_media_source 内的 get_displayable_mapping 裁决。
-        if (dto["MediaSources"] and item.item_type in ("movie", "episode")):
+        if item.item_type in ("movie", "episode"):
             from backend.emby_server import playback_gate as _gate_mod
             _up_lines = _upstream_line_media_sources(
-                item, dto["MediaSources"][0], base, user_id, db, api_key,
+                item,
+                dto["MediaSources"][0] if dto["MediaSources"] else None,
+                base, user_id, db, api_key,
                 with_sign=bool(user_id)
                 and _gate_mod.has_active_binding(db, user_id))
             if _up_lines:
