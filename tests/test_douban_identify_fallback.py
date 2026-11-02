@@ -17,9 +17,10 @@
    条目已带 external_ids.douban 时，无新证据也认（防重排空转）。
 ④ apply_fill：只有豆瓣身份的条目不再被「未绑定」拒绝（判据与
    identity_gate.is_bound_row 同源）；真无身份仍拒绝。
-⑤ 分发：识别队列模式（identify=True/fill=False）下豆瓣定身份的条目
-   直接终态 done——它没有 tmdb/imdb 列，刮削队列永远不会认领，
-   回 pending 只会在识别队列里空转。
+⑤ 分发（PA-081 修正）：识别队列模式（identify=True/fill=False）下
+   豆瓣定身份的条目回 pending——队列谓词已与身份判据同源，豆瓣
+   身份行属刮削队列，下一轮由刮削队列认领并真正跑 apply_fill；
+   旧“直接终态 done”会让简介/海报/类型永远补不上，已废止。
 ⑥ _enrich_apply 的豆瓣 rich 落库块：命中同时把豆瓣号写进
    external_ids（此前只落资料字段、号蒸发）。
 """
@@ -216,17 +217,36 @@ def test_apply_fill_still_refuses_truly_unbound(db):
     assert not item.overview
 
 
-# ---------- ⑤ 分发：识别队列模式下豆瓣身份直接终态 ----------
+# ---------- ⑤ 分发：识别段后回 pending，刮削队列再跑 apply_fill ----------
 
-def test_two_stage_identify_queue_douban_binding_terminates(db):
+def test_two_stage_identify_queue_douban_binding_returns_pending(db):
     item = _make_item(db)
     fetched = {"douban_fallback_hit": _rich_hit()}
     enrich_worker._enrich_apply_two_stage(
         db, item, fetched, identify=True, fill=False)
     db.flush()
     assert json.loads(item.external_ids)["douban"] == "36742042"
-    assert item.enrich_status == "done", \
-        "豆瓣身份条目无 tmdb/imdb 列，回 pending 只会在识别队列空转"
+    assert item.enrich_status == "pending", \
+        "PA-081：豆瓣身份行属刮削队列，识别段后回 pending 等刮削队列认领，不许直接 done"
+
+
+def test_two_stage_fill_queue_douban_only_runs_apply_fill(db, monkeypatch):
+    item = _make_item(db, external_ids='{"douban": "36742042"}')
+    calls = []
+    orig_apply_fill = ts.apply_fill
+
+    def _recording(db_, item_, fetched_):
+        calls.append(True)
+        return orig_apply_fill(db_, item_, fetched_)
+
+    monkeypatch.setattr(ts, "apply_fill", _recording)
+    fetched = {"tmdb_details": {"overview": "豆瓣来的简介"}}
+    enrich_worker._enrich_apply_two_stage(
+        db, item, fetched, identify=False, fill=True)
+    db.flush()
+    assert calls, "PA-081：刮削队列必须真正跑到 apply_fill，不许回落现行写库"
+    assert item.enrich_status == "done"
+    assert item.overview == "豆瓣来的简介"
 
 
 # ---------- ⑥ rich 落库块写豆瓣号 ----------
