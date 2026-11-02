@@ -4,11 +4,12 @@
 不是条目上一个布尔位；决策可追溯、可复核、可回放。
 
 决策函数 = 身份货架案 A 判定口径（货架严 / 搜索宽 / 直达放行），
-与 identity_gate.py 的判据同源、只换了一层 Python 实现（SQL 表达式
-版在 identity_gate.identity_clause，Python 行判定版在这里，两边口径
-必须一致：movie/series 看自身 tmdb_id/imdb_id strip 后非空；
-season/episode 跟随所属 series；只有豆瓣身份不算；空白串不算；
-已软删的 series 不能替它的集绑定；其余类型不在治理内，恒通过）。
+判据唯一出处在 identity_gate（本模块 _own_bound 直接委托
+identity_gate.is_bound_row，不再维护副本，避免口径撕裂）：movie/series
+看自身 tmdb_id/imdb_id strip 后非空，或 external_ids 任一在用来源键
+非空（2026-11-02 站主拍板扩围，豆瓣等单源身份也算）；season/episode
+跟随所属 series；空白串不算；已软删的 series 不能替它的集绑定；
+其余类型不在治理内，恒通过。
 
 硬约束（测试必须证明，缺一不可）：
 ① 开关关时行为与现行逐字一致：resolve_* 走现行货架口径
@@ -51,11 +52,10 @@ def governance_enabled() -> bool:
 
 
 def _own_bound(item) -> bool:
-    """行自身已绑定：tmdb_id / imdb_id 任一 strip 后非空（与 identity_gate._own_bound 同口径）。"""
-    for v in (getattr(item, "tmdb_id", None), getattr(item, "imdb_id", None)):
-        if v is not None and str(v).strip():
-            return True
-    return False
+    """行自身已绑定：委托 identity_gate.is_bound_row（判据唯一出处，
+    横切纪律——2026-11-02 扩围后 external_ids 任一来源键非空也算，
+    本模块不再维护自己的副本）。"""
+    return identity_gate.is_bound_row(item)
 
 
 def item_bound(db, item) -> bool:
