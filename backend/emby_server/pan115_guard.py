@@ -45,6 +45,9 @@ class Pan115CooldownError(RuntimeError):
         super().__init__(f"115 账号冷却中（{reason}），约 {int(remaining // 60) + 1} 分钟后恢复")
         self.reason = reason
         self.remaining = remaining
+        # Q&A Z-1：retry_after 别名（= remaining），与 transfer115 / mounts /
+        # sidecar 的同义属性统一——上层按「有没有 retry_after」识别冷却。
+        self.retry_after = max(1.0, float(remaining))
 
 
 def enabled() -> bool:
@@ -174,6 +177,13 @@ def _incr(key: str, window: float) -> int:
 
 
 def _rate_limited(scope: str, reason: str) -> None:
+    """429 风控冷却升级：24h 滑窗内按次数翻倍，第 4 次起停 24h。
+
+    Q&A Z-6：**只计 429**（真风控信号）。405 另走 ``_rate_limited_405``
+    ——HTTP 405 多是客户端/工具行为问题（语义不唯一，见
+    docs/pan115-rate-evidence.md §1.11），不能与 429 共享升级计数
+    把运维侧一路顶到 24h，也不能掩盖 bug。
+    """
     strikes = _incr(f"{_KEY_PREFIX}:strikes:{scope}", 86400)
     base = env_float("PAN115_429_COOLDOWN_SEC", 1800.0)
     cap = env_float("PAN115_429_COOLDOWN_MAX_SEC", 7200.0)
@@ -184,7 +194,37 @@ def _rate_limited(scope: str, reason: str) -> None:
     _set_cooldown(scope, f"{reason}，24 小时内第 {strikes} 次", seconds)
 
 
+def _rate_limited_405(scope: str, reason: str) -> None:
+    """405 专用低倍冷却（Q&A Z-6）：只告警 + 5 分钟固定冷却，
+    **不进 429 的升级链**。405 在 10 分钟内反复出现更可能是代码/工具
+    bug（或 URL 语义问题），停 24h 会掩盖问题且误伤运维操作；
+    5 分钟足够「先停下来看看日志」。PAN115_405_COOLDOWN_SEC 可覆盖。
+    """
+    strikes = _incr(f"{_KEY_PREFIX}:strikes405:{scope}", 86400)
+    seconds = env_float("PAN115_405_COOLDOWN_SEC", 300.0)
+    _set_cooldown(scope, f"{reason}（低倍冷却，24h 内第 {strikes} 次；"
+                         "405 不是账号风控，请先查调用方日志）", seconds)
+
+
 # ---------------- 收口 ----------------
+
+def _wait_cap(kind: str) -> float:
+    """按调用类型的排队上限秒数（Q&A Z-5）。
+
+    - ``download_url``（播放取链）：**5 秒**——首帧延迟是用户可感知的，
+      排队不如快速失败让播放器立刻重试/换路；队列里稍后被放行的请求
+      自己会拿到令牌，不会有惊群。
+    - ``list`` / ``other``：维持 30 秒——刷库/管理操作对延迟不敏感，
+      排队远好于失败重来的整轮成本。
+    环境变量可覆盖（0 = 不等待，立即拒绝）。
+    """
+    global_cap = env_float("PAN115_GUARD_MAX_WAIT_SEC", 30.0)
+    if kind == "download_url":
+        # 独立更小的上限（默认 5s），但**永不超过全局硬上限**：
+        # MAX_WAIT_SEC 是「任何调用最多排队多久」的合同（原测试语义）。
+        return min(env_float("PAN115_GUARD_MAX_WAIT_LINK_SEC", 5.0), global_cap)
+    return global_cap
+
 
 def before_call(cookie: str, kind: str) -> None:
     """发请求前：冷却中直接拒绝；否则按桶排队，等太久也拒绝（不把线程无限挂住）"""
@@ -194,7 +234,7 @@ def before_call(cookie: str, kind: str) -> None:
     state = cooldown_state(scope)
     if state is not None:
         raise Pan115CooldownError(*state)
-    max_wait = env_float("PAN115_GUARD_MAX_WAIT_SEC", 30.0)
+    max_wait = _wait_cap(kind)
     waited = 0.0
     for name, rate, burst in _bucket_params(kind):
         key = f"{_KEY_PREFIX}:bucket:{scope}:{name}"
@@ -223,7 +263,7 @@ def after_body(cookie: str, body: dict) -> None:
 
 
 def after_error(cookie: str, status: Optional[int]) -> None:
-    """HTTP 层失败：429 直接冷却；405 在 10 分钟内累计 3 次按限流处理"""
+    """HTTP 层失败：429 直接冷却；405 在 10 分钟内累计 3 次 → 5 分钟低倍冷却"""
     if not enabled() or not status:
         return
     scope = scope_of(cookie)
@@ -231,7 +271,10 @@ def after_error(cookie: str, status: Optional[int]) -> None:
         _rate_limited(scope, "115 返回 HTTP 429")
     elif status == 405:
         if _incr(f"{_KEY_PREFIX}:http405:{scope}", 600) >= 3:
-            _rate_limited(scope, "115 10 分钟内多次 HTTP 405")
+            # Z-6：405 走独立低倍冷却（5 分钟），不进 429 的 24h 升级链
+            logger.warning("115 连续 HTTP 405（10 分钟内 ≥3 次）：%s 进入 5 分钟低倍冷却"
+                           "（不升级 24h——405 更可能是调用方 bug，先查日志）", scope)
+            _rate_limited_405(scope, "115 10 分钟内多次 HTTP 405")
 
 
 def reset_for_tests() -> None:

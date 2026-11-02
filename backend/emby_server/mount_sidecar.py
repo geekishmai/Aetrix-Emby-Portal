@@ -37,6 +37,7 @@ from backend.emby_server import disc_filter
 from backend.emby_server.mounts import (
     MountEntry,
     MountError,
+    MountCooldownError,
     MountFile,
     require_capability,
     MountProvider,
@@ -73,6 +74,18 @@ def manifest_to_capabilities(manifest: dict) -> ProviderCapabilities:
         can_generate_play_target="resolve_play_target" in caps,
         can_refresh_credentials=False,
     )
+
+
+def _wrap_sidecar_error(exc: ProviderRuntimeError, prefix: str) -> MountError:
+    """sidecar 的 ProviderRuntimeError → 宿主 MountError（Q&A Z-1）。
+
+    kind=``throttled``（pan115_guard 冷却，sidecar 侧 _map_115_error 已定性）
+    必须翻成 MountCooldownError 透传 retry_after——绝不能因为序列化丢类型
+    就把冷却降级成普通 MountError 被当成「连接失败」。
+    """
+    if exc.kind == "throttled":
+        return MountCooldownError(f"{prefix}：{exc}", retry_after=exc.retry_after)
+    return MountError(f"{prefix}：{exc}")
 
 
 class SidecarMountProvider(MountProvider):
@@ -136,7 +149,7 @@ class SidecarMountProvider(MountProvider):
             try:
                 page = self.client.list_page(self.session_id, rel, token)
             except ProviderRuntimeError as exc:
-                raise MountError(f"sidecar 列目录失败：{exc}") from exc
+                raise _wrap_sidecar_error(exc, "sidecar 列目录失败") from exc
             for item in page.get("entries") or []:
                 entries.append(MountEntry(
                     name=item.get("name") or "",
@@ -184,7 +197,7 @@ class SidecarMountProvider(MountProvider):
         try:
             result = self.client.resolve_play_target(self.session_id, rel)
         except ProviderRuntimeError as exc:
-            raise MountError(f"sidecar 换链失败：{exc}") from exc
+            raise _wrap_sidecar_error(exc, "sidecar 换链失败") from exc
         url = result.get("url") or ""
         if not url:
             raise MountError(f"sidecar 未返回播放地址：{rel}")

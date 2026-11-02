@@ -520,6 +520,25 @@ class Pan115AuthError(Pan115Error):
     """115 登录态失效（Cookie 过期 / 被踢）——调用方应提示重新配置 Cookie"""
 
 
+class Pan115CooldownError(Pan115Error):
+    """115 账号处于风控冷却期（pan115_guard 限速冷却，Q&A Z-1）。
+
+    **不是 Cookie 失效**：本次调用未发出、凭据没问题，到点自动恢复。
+    调用方（挂载测试/播放错误/管理面板）必须把它与 ``Pan115AuthError``
+    区分开——提示「账号限速冷却中，约 X 分钟后自动恢复」，绝不能引导
+    用户去重配 Cookie（重配过程本身可能再触发风控）。
+
+    - ``reason``：冷却原因（429 / 405 / 排队超时等）
+    - ``retry_after``：剩余冷却秒数（浮点，向上取整到分钟用于展示）
+    """
+
+    def __init__(self, reason: str, remaining: float):
+        super().__init__(f"115 账号限速冷却中（{reason}），约 "
+                         f"{int(remaining // 60) + 1} 分钟后自动恢复")
+        self.reason = reason
+        self.retry_after = max(1.0, float(remaining))
+
+
 class Pan115ChannelLimitError(Pan115Error):
     """取链通道自身的限制（网页端对大文件回 50028「文件大小超出限制」）。
 
@@ -1796,8 +1815,13 @@ class Pan115Client:
         kind = _call_kind(url)
         try:
             pan115_guard.before_call(self.cookie, kind)
-        except pan115_guard.Pan115CooldownError as exc:
-            raise Pan115Error(str(exc)) from exc   # 冷却中不发请求，也不计调用次数
+        except pan115_guard.Pan115CooldownError:
+            raise   # 冷却中不发请求，也不计调用次数；类型透传（Z-1）：
+                    # 上层凭 isinstance 分流「限速冷却」与「凭据失效」，
+                    # 绝不能包成普通 Pan115Error 被当成连接失败/Cookie 坏。
+                    # pan115_guard.Pan115CooldownError 与本模块
+                    # Pan115CooldownError 是两个类（guard 无反向依赖），
+                    # 用属性判定兼容两者。
         try:
             body = _http_json(method, url, params=params, data=data, cookie=self.cookie,
                               ua=self.ua)

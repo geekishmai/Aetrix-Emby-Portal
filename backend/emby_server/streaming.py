@@ -628,8 +628,10 @@ async def serve_mount_relay_async(
     import httpx
 
     forward = {k: v for k, v in (headers or {}).items()}
-    # X-Pickcode 是内部头（115 直链缓存失效用），不转发给上游
+    # X-Pickcode / X-115-Scope 是内部头（115 直链缓存失效与冷却判定用），
+    # 不转发给上游
     forward.pop("X-Pickcode", None)
+    forward.pop("X-115-Scope", None)
     forward.setdefault("User-Agent", REMOTE_UA)
     range_header = request.headers.get("range")
     if range_header:
@@ -657,7 +659,24 @@ async def serve_mount_relay_async(
             pt.mark("ttfb")
         # 115 直链过期检测：403/404/410 时清 pickcode 缓存，客户端重试时
         # 挂载解析会拿到新直链（沿用删除前的口径）。
-        if resp.status_code in (403, 404, 410):
+        # Q&A Z-2：账号处于 pan115_guard 冷却期时不做任何缓存清理——
+        # 冷却期每次重取链都被 guard 秒拒，清掉的缓存里可能还有有效期内的
+        # 旧直链，恢复后反而多一次取链（放大风控暴露）。冷却判定走
+        # pan115_guard.cooldown_state（同账号 scope），零成本、不阻塞。
+        _cooldown_active = False
+        try:
+            from backend.emby_server import pan115_guard as _pg
+            _scope_hint = (headers or {}).get("X-115-Scope") or ""
+            if _scope_hint and _pg.enabled():
+                if _pg.cooldown_state(_scope_hint[:16]) is not None:
+                    _cooldown_active = True
+        except Exception:  # noqa: BLE001 — 判定失败按无冷却处理（保守可清）
+            _cooldown_active = False
+        if _cooldown_active:
+            logger.info("115 账号冷却中：跳过直链/解析缓存清理（Z-2），"
+                        "pickcode=%s status=%s",
+                        (headers or {}).get("X-Pickcode"), resp.status_code)
+        elif resp.status_code in (403, 404, 410):
             _pickcode = (headers or {}).get("X-Pickcode")
             if _pickcode:
                 try:

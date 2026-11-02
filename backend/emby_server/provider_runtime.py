@@ -124,6 +124,7 @@ ERROR_CODES: dict[str, int] = {
     "session_unknown": -32010,
     "not_found": -32011,
     "cookie_expired": -32012,
+    "throttled": -32016,
     "remote_unavailable": -32013,
     "not_implemented": -32014,
     "timeout": -32015,
@@ -134,10 +135,13 @@ ERROR_CODES: dict[str, int] = {
 class ProviderRuntimeError(RuntimeError):
     """运行时契约错误：``kind`` 是分级语义，调用方按 kind 分流，不许只看文本。"""
 
-    def __init__(self, kind: str, message: str):
+    def __init__(self, kind: str, message: str, retry_after: float | None = None):
         super().__init__(message)
         self.kind = kind
         self.code = ERROR_CODES.get(kind, ERROR_CODES["internal"])
+        # Z-1：限速冷却（kind="throttled"）带剩余秒数，跨进程序列化后
+        # 客户端/面板据此展示「约 X 分钟后自动恢复」与 Retry-After。
+        self.retry_after = retry_after
 
     def as_error_dict(self) -> dict:
         return {"code": self.code, "kind": self.kind, "message": str(self)}

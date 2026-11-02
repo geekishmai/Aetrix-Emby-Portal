@@ -65,9 +65,20 @@ MAX_SYNC_ENTRIES = 100000
 
 
 def _map_115_error(exc: Exception) -> ProviderRuntimeError:
-    """115 客户端异常 → 契约错误分级（401/403 定性 cookie_expired，见 BYOS-4）。"""
+    """115 客户端异常 → 契约错误分级（401/403 定性 cookie_expired，见 BYOS-4）。
+
+    Z-1：限速冷却独立为 ``throttled``——不是 cookie_expired（凭据没问题，
+    到点自动恢复），调用方不许据此触发重配 Cookie 或判死账号。
+    guard 与 transfer115 各有一个 Pan115CooldownError 类（无继承关系），
+    统一按 ``retry_after`` 属性 + 类型名识别。
+    """
     if isinstance(exc, transfer115.Pan115AuthError):
         return ProviderRuntimeError("cookie_expired", str(exc))
+    if isinstance(exc, transfer115.Pan115CooldownError) \
+            or type(exc).__name__ == "Pan115CooldownError":
+        return ProviderRuntimeError(
+            "throttled", str(exc),
+            retry_after=getattr(exc, "retry_after", None))
     if isinstance(exc, transfer115.Pan115Error):
         return ProviderRuntimeError("remote_unavailable", str(exc))
     return ProviderRuntimeError("internal", str(exc))
