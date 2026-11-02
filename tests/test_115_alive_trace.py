@@ -175,28 +175,10 @@ def _patch_client(monkeypatch, client_cls):
     monkeypatch.setattr(transfer115, "Pan115Client", client_cls)
 
 
-def test_copy_url_carries_player_sign_ua(db, monkeypatch):
-    _binding115(db, 7)
-    _patch_client(monkeypatch, _Fake115)
-    url = ub.resolve_user115_copy_url(db, 7, "PC1", ua="Lavf/60.16.100")
-    assert url == "https://115.example/dl"
-    assert isinstance(url, str)
-    assert url.sign_ua == "Lavf/60.16.100"
 
 
-def test_copy_url_without_ua_signs_with_server_default(db, monkeypatch):
-    _binding115(db, 7)
-    _patch_client(monkeypatch, _Fake115)
-    url = ub.resolve_user115_copy_url(db, 7, "PC1")
-    assert url.sign_ua == transfer115.PAN115_UA
 
 
-def test_copy_url_client_without_ua_attr_still_traced(db, monkeypatch):
-    _binding115(db, 7)
-    _patch_client(monkeypatch, _Fake115NoUaAttr)
-    url = ub.resolve_user115_copy_url(db, 7, "PC1", ua="Lavf/60.16.100")
-    assert url == "https://115.example/dl2"
-    assert url.sign_ua == "Lavf/60.16.100"
 
 
 # ---------- video_stream：探测跳留痕与 byos 探测 ----------

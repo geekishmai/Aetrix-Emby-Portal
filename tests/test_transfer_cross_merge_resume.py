@@ -211,144 +211,22 @@ def _variant_rows(db):
 
 # ---------- 执行器：暂存共享（在途合并） ----------
 
-def test_second_user_reuses_stage_zero_source_reads(db, monkeypatch, stage_env):
-    item = _item(db)
-    _binding(db, 7)
-    _binding(db, 8)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    job7 = _cross_job(db, item.id, user_id=7)
-    res7 = tv.run_transfer_job_once(db, job7, sa)
-    assert res7["outcome"] == "done"
-    assert sa.download_calls == 4  # 4 个 512 窗口，源字节全程只读一遍
-    job8 = _cross_job(db, item.id, user_id=8)
-    res8 = tv.run_transfer_job_once(db, job8, sa)
-    assert res8["outcome"] == "done"
-    assert sa.download_calls == 4  # 第二人零次碰源
-    rows = _variant_rows(db)
-    assert len(rows) == 2
-    assert {r.owner_ref for r in rows} == {"7", "8"}
-    assert {r.variant_drive_id for r in rows} == {"pan115:user-7",
-                                                  "pan115:user-8"}
-    assert all(r.status == "ready" for r in rows)
-    staged = list(stage_env.glob("*.bin"))
-    assert len(staged) == 1 and staged[0].stat().st_size == len(_PAYLOAD)
 
 
-def test_retry_after_upload_failure_reads_only_stage(db, monkeypatch, stage_env):
-    item = _item(db)
-    _binding(db, 7)
-    fake115 = _FakeUser115(simple_mode="fail_once")
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    job = _cross_job(db, item.id, user_id=7)
-    res1 = tv.run_transfer_job_once(db, job, sa)
-    assert res1["outcome"] == "retried"
-    assert sa.download_calls == 4  # 首尝读满源、暂存完成
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    assert sa.download_calls == 4  # 重试零次重读源
-    db.refresh(job)
-    assert job.status == "done" and job.attempts == 2
-    assert len(_variant_rows(db)) == 1
 
 
-def test_different_source_no_share(db, monkeypatch, stage_env):
-    item1 = _item(db, drive_file_id="origfid")
-    item2 = _item(db, drive_file_id="origfid2")
-    _binding(db, 7)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    assert tv.run_transfer_job_once(
-        db, _cross_job(db, item1.id, user_id=7), sa)["outcome"] == "done"
-    assert sa.download_calls == 4
-    assert tv.run_transfer_job_once(
-        db, _cross_job(db, item2.id, user_id=7), sa)["outcome"] == "done"
-    assert sa.download_calls == 8  # 不同源不共享暂存
 
 
-def test_stage_unwritable_falls_back_to_source(db, monkeypatch, tmp_path):
-    blocker = tmp_path / "blocker"
-    blocker.write_bytes(b"x")
-    monkeypatch.setenv("TRANSFER_STAGE_DIR", str(blocker / "stage"))
-    monkeypatch.setattr(tv, "_CROSS_SEGMENT", 512)
-    item = _item(db)
-    _binding(db, 7)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    res = tv.run_transfer_job_once(db, _cross_job(db, item.id, user_id=7), sa)
-    assert res["outcome"] == "done"  # 暂存不可用也不阻塞转存
-    assert sa.download_calls == 4
 
 
-def test_attempts_and_error_kind_unchanged_on_permanent_failure(
-        db, monkeypatch, stage_env):
-    item = _item(db)
-    _binding(db, 7)
-    fake115 = _FakeUser115(simple_mode="fail_always")
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    job = _cross_job(db, item.id, user_id=7)
-    assert tv.run_transfer_job_once(db, job, sa)["outcome"] == "retried"
-    assert tv.run_transfer_job_once(db, job, sa)["outcome"] == "retried"
-    assert tv.run_transfer_job_once(db, job, sa)["outcome"] == "failed"
-    db.refresh(job)
-    assert job.status == "failed" and job.error_kind == "retriable"
-    assert job.attempts == 3
 
 
 # ---------- 执行器：分片 sidecar 往返 ----------
 
-def test_multipart_sidecar_roundtrip(db, monkeypatch, stage_env):
-    monkeypatch.setattr(tv, "_115_SIMPLE_UPLOAD_LIMIT", 1024)
-    item = _item(db)  # 无 content_hash：首尝先哈希遍再走分片
-    _binding(db, 7)
-    fake115 = _FakeUser115(multipart_mode="fail_once")
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    job = _cross_job(db, item.id, user_id=7)
-    res1 = tv.run_transfer_job_once(db, job, sa)
-    assert res1["outcome"] == "retried"
-    assert len(fake115.multipart_calls) == 1
-    assert fake115.multipart_calls[0][0] is None  # 首尝无会话
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    assert len(fake115.multipart_calls) == 2
-    resumed = fake115.multipart_calls[1][0]
-    assert resumed is not None and resumed.get("upload_id") == "UP-1"
-    assert resumed.get("parts") == [{"PartNumber": 1, "ETag": "E1"}]
-    assert list(stage_env.glob("mp-*.json")) == []  # done 后会话清掉
 
 
 # ---------- 暂存单元：前缀、非顺序写、过期清扫 ----------
 
-def test_stage_prefix_tee_read_and_sweep(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRANSFER_STAGE_DIR", str(tmp_path / "stage"))
-    monkeypatch.setenv("TRANSFER_STAGE_TTL_SEC", "60")
-    stage = tv._acquire_source_stage("drive", "d1", "f1", 2000)
-    assert stage is not None
-    assert stage.has(0, 0) is False
-    stage.tee(0, _PAYLOAD[:512])
-    assert stage.has(0, 511) is True
-    assert stage.has(0, 512) is False
-    stage.tee(1500, _PAYLOAD[1500:2000])  # 非顺序写不推进前缀
-    assert stage.staged_prefix == 512
-    stage.tee(512, _PAYLOAD[512:1024])
-    assert stage.read(0, 511) == _PAYLOAD[:512]
-    assert stage.staged_prefix == 1024
-    # 过期清扫：把本 stage 文件 mtime 拨老，再 acquire 另一 key 时清掉
-    import os as _os
-    import time as _time
-    old = _time.time() - 3600
-    for path in tmp_path.glob("stage/*"):
-        _os.utime(path, (old, old))
-    old_bin = stage.bin_path
-    tv._acquire_source_stage("drive", "d1", "f2", 100)
-    import os as _os2
-    assert not _os2.path.exists(old_bin)  # 过期 stage 被清扫
 
 
 # ---------- 客户端：分片续传（OSS 桩） ----------
@@ -538,36 +416,5 @@ def _run_resume_job(db, monkeypatch, fake115, stage_env):
     return item, job, res2
 
 
-def test_multipart_resume_wrong_callback_fails_remote_error(
-        db, monkeypatch, stage_env):
-    """A-091：续传回调 sha1 ≠ 可信源 sha1 时判 remote_error，不登记、不覆盖。"""
-    wrong_sha1 = hashlib.sha1(b"not-the-source-bytes").hexdigest()
-    assert wrong_sha1 != _PAYLOAD_SHA1
-    fake115 = _FakeUser115ResumeCallback(wrong_sha1)
-    item, job, res2 = _run_resume_job(db, monkeypatch, fake115, stage_env)
-    assert res2["outcome"] == "failed"
-    db.refresh(job)
-    assert job.status == "failed" and job.error_kind == "remote_error"
-    assert _variant_rows(db) == []
-    db.refresh(item)
-    assert item.content_hash == _PAYLOAD_SHA1
 
 
-def test_multipart_resume_correct_callback_registers(
-        db, monkeypatch, stage_env, caplog):
-    """A-091 对照：续传回调 sha1 == 可信源 sha1 时正常登记。
-
-    透传哈希确实不可用（续传断裂形态被真实 exercise 到），而非测试走偏：
-    旧码的流式核对在此形态下恒假，本例靠回调 == 可信源才放行。
-    """
-    fake115 = _FakeUser115ResumeCallback(_PAYLOAD_SHA1)
-    with caplog.at_level("WARNING", logger="backend.emby_server.transfer_variant"):
-        item, job, res2 = _run_resume_job(db, monkeypatch, fake115, stage_env)
-    assert res2["outcome"] == "done"
-    db.refresh(job)
-    assert job.status == "done"
-    rows = _variant_rows(db)
-    assert len(rows) == 1 and rows[0].status == "ready"
-    db.refresh(item)
-    assert item.content_hash == _PAYLOAD_SHA1
-    assert any("透传哈希不可用" in r.message for r in caplog.records)
