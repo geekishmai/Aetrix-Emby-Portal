@@ -297,6 +297,21 @@ class MountMethodMissing(MountError):
     """
 
 
+class MountCooldownError(MountError):
+    """115 账号处于 pan115_guard 限速冷却期（Q&A Z-1）。
+
+    **不是凭据失效**：凭据没问题、本次请求没发出去，到点自动恢复。
+    面板/播放错误必须显示「账号限速冷却中，约 X 分钟后自动恢复」，
+    并带 ``retry_after``（秒）；绝不能归为 ``MountAuthError`` 引导重配
+    Cookie。冷却期上游一律不发请求（guard 已挡），也不会产生新的
+    403/404，与「直链失效清缓存」是两回事（见 streaming 的门）。
+    """
+
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class MountAuthError(MountError):
     """挂载的凭据失效（Cookie / 令牌 / 密码）——调用方应提示重新配置"""
 
@@ -1343,8 +1358,19 @@ class Pan115Mount(MountProvider):
         return transfer115.Pan115Client(self._cookie(), ua=self._ua())
 
     def _wrap(self, exc: Exception) -> MountError:
+        # Z-1：限速冷却独立成 MountCooldownError（带 retry_after），必须排在
+        # AuthError 之前判——guard 的 Pan115CooldownError 不是 Pan115Error
+        # 子类，transfer115 的那个是；两者都以 retry_after 属性区分。
         if isinstance(exc, transfer115.Pan115AuthError):
             return MountAuthError(str(exc))
+        if isinstance(exc, transfer115.Pan115CooldownError):
+            return MountCooldownError(str(exc), getattr(exc, "retry_after", None))
+        # pan115_guard.Pan115CooldownError（guard 模块自己的类）：按类型白名单识别，
+        # 不按 retry_after 属性猜——别的 SDK 异常带同名属性时不能被当成冷却（QA R-1）。
+        # guard 只依赖 env_util，局部 import 无循环。
+        from backend.emby_server import pan115_guard
+        if isinstance(exc, pan115_guard.Pan115CooldownError):
+            return MountCooldownError(str(exc), getattr(exc, "retry_after", None))
         return MountError(str(exc))
 
     # ---- 目录 ----
@@ -1353,7 +1379,9 @@ class Pan115Mount(MountProvider):
         try:
             info = client.check()
             entries = client.list_dir(self.root_cid)
-        except (transfer115.Pan115Error, transfer115.Pan115AuthError) as exc:
+        except Exception as exc:  # noqa: BLE001 — 统一走 _wrap 分类（Z-1：
+            # guard.Pan115CooldownError 是 RuntimeError 不是 Pan115Error，
+            # 旧的窄 except 会把冷却漏成「连接失败」）
             raise self._wrap(exc) from exc
         root = "根目录" if self.root_cid == "0" else f"目录 {self.root_cid}"
         return {
@@ -1480,6 +1508,11 @@ class Pan115Mount(MountProvider):
             "Referer": "https://115.com/",
             "Cookie": self._cookie(),
             "X-Pickcode": pickcode_115,
+            # Q&A Z-2：scope = guard 账号摘要（与 pan115_guard.scope_of 同一
+            # 摘要口径），中继据此判定冷却期、跳过缓存清理。内部头，不转发。
+            # 注意：guard 的 scope 是摘要前 16 位；这里给中继的也是同一
+            # 摘要前 16 位（pan115_guard.scope_of 同口径），判定可直接对表。
+            "X-115-Scope": scope[:16],
         })
 
     # 解析缓存的凭据拆分：Cookie 每次现取（``transfer115.resolve_cookie`` 是
@@ -1848,6 +1881,12 @@ def test_mount(mount, db: Optional[Session] = None, library=None) -> dict:
         return {"ok": True, "message": result.get("message", "连接正常"), "detail": result}
     except MountAuthError as exc:
         return {"ok": False, "message": str(exc), "auth_error": True}
+    except MountCooldownError as exc:
+        # Z-1：限速冷却不是凭据失效——auth_error=False + cooldown 标记，
+        # 面板显示「账号限速冷却中，约 X 分钟后自动恢复」，禁止引导重配 Cookie。
+        return {"ok": False, "message": str(exc), "auth_error": False,
+                "cooldown": True,
+                "retry_after": getattr(exc, "retry_after", None)}
     except MountError as exc:
         return {"ok": False, "message": str(exc), "auth_error": False}
     except Exception as exc:  # noqa: BLE001 — 兜底：任何异常都要变成可读提示

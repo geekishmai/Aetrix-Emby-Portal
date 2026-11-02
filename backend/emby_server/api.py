@@ -5457,6 +5457,17 @@ def _play_target(db: Session, item: em.MediaItem, *, variant=None):
             error_kind="auth",
             resolve_ms=int((time.perf_counter() - _evt_t0) * 1000))
         raise HTTPException(status_code=503, detail=f"媒体来源凭据失效：{exc}")
+    except mount_lib.MountCooldownError as exc:
+        # Z-1：限速冷却独立展示（不是 Cookie 失效、不是 404）：
+        # 503 + Retry-After，客户端按秒数退避重试；文案明说会自动恢复。
+        _note_play_start_safe(
+            item, method="resolve", variant=variant, result="error",
+            error_kind="cooldown",
+            resolve_ms=int((time.perf_counter() - _evt_t0) * 1000))
+        _ra = getattr(exc, "retry_after", None)
+        _headers = {"Retry-After": str(max(1, int(_ra)))} if _ra else None
+        raise HTTPException(status_code=503, detail=str(exc),
+                            headers=_headers) from exc
     except mount_lib.MountError as exc:
         _note_play_start_safe(
             item, method="resolve", variant=variant, result="error",

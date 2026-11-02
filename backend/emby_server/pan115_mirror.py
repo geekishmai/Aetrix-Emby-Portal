@@ -407,6 +407,8 @@ def _discover_scopes(db) -> list[dict]:
 def _run_one_tick() -> None:
     from backend.database import SessionLocal
     from backend.emby_server import transfer115
+    # Q&A Z-5 线程口径：本函数只在后台镜像线程（_mirror_thread）里跑，
+    # 不在事件循环里；before_call 的同步排队（list 30s）可接受。
 
     db = SessionLocal()
     try:

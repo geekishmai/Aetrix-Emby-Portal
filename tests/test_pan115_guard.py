@@ -60,9 +60,23 @@ def test_accounts_do_not_share_buckets(clock):
 
 
 def test_wait_beyond_max_raises(clock, monkeypatch):
+    # Z-5：MAX_WAIT_SEC 仍是全局硬上限（download_url 的独立 LINK 上限
+    # 永不超过它）；download_url burst=2，第 3 次排队 0.5s > 0.2s → 拒绝。
     monkeypatch.setenv("PAN115_GUARD_MAX_WAIT_SEC", "0.2")
     for _ in range(2):
         guard.before_call(COOKIE, "download_url")
+    with pytest.raises(guard.Pan115CooldownError):
+        guard.before_call(COOKIE, "download_url")
+
+
+def test_wait_cap_link_independent(clock, monkeypatch):
+    """Z-5：download_url 的排队上限独立（LINK 键），不受 MAX_WAIT_SEC 影响。"""
+    monkeypatch.setenv("PAN115_GUARD_MAX_WAIT_SEC", "0.2")
+    monkeypatch.setenv("PAN115_GUARD_MAX_WAIT_LINK_SEC", "30")
+    for _ in range(2):
+        guard.before_call(COOKIE, "download_url")  # 等得起（30s 上限）→ 不抛
+    # LINK 也设小后同样会拒绝
+    monkeypatch.setenv("PAN115_GUARD_MAX_WAIT_LINK_SEC", "0.2")
     with pytest.raises(guard.Pan115CooldownError):
         guard.before_call(COOKIE, "download_url")
 
@@ -132,6 +146,8 @@ def test_client_stops_calling_115_during_cooldown(clock, monkeypatch):
     url = f"{transfer115.PAN115_WEBAPI_BASE}/files"
     with pytest.raises(transfer115.Pan115Error):
         client._call("GET", url)
-    with pytest.raises(transfer115.Pan115Error, match="冷却"):
+    # Z-1：第二次起 guard 直接拒——透传 guard.Pan115CooldownError
+    #（它是 RuntimeError，不是 Pan115Error 子类；这不是回归，是修复）。
+    with pytest.raises(guard.Pan115CooldownError, match="冷却"):
         client._call("GET", url)
     assert len(calls) == 1, "冷却期间不许再打 115"
