@@ -2794,8 +2794,9 @@ function typeLabel(t: string): string {
                 placeholder='{"电影": "in", "电视剧": "out"}'
               />
               <p class="field-help">
-                按源站的顶级分类名决定收不收：<code>in</code> = 收、<code>out</code> = 不收；
-                没写到的分类默认收。留空 = 全部收。只认分类名，不写死任何站的业务。
+                按源站的顶级分类名决定收不收：留空 = 全部收；一旦填写，
+                就只有标 <code>in</code> 的顶级分类会收（白名单），没写到的一律不收。
+                电影库就把该源的电影顶级分类标 in。只认分类名，不写死任何站的业务。
               </p>
             </el-form-item>
           </el-form>
