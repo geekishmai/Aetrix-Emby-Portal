@@ -105,9 +105,10 @@ def _handle_menu(db, callback_query: dict) -> None:
 def _handle_whois_callback(db, callback_query: dict) -> None:
     """处理 /whois 管理员面板按钮（whois:<page>:<user_id>[:<op>]）。
 
-    每次点击都重新校验点击者：未绑定或非管理员一律回拒绝卡（不带
-    目标任何数据）；目标不存在回明示卡。渲染与写操作全在
-    whois_panel（写操作二次确认在 ask/do 两步里，do 才执行）。
+    每次点击都重新校验点击者：未绑定或非管理员、目标不存在时只给
+    点按者弹 toast 拒绝提示，绝不改写共享面板消息（PA-057：群面板是
+    共享消息，路人一点击就改写会毁掉管理员的面板）。渲染与写操作
+    全在 whois_panel（写操作二次确认在 ask/do 两步里，do 才执行）。
     """
     from . import whois_panel
 
@@ -131,10 +132,8 @@ def _handle_whois_callback(db, callback_query: dict) -> None:
         return
     caller = resolve(db, int(tg_id))
     if caller is None or not bool(getattr(caller, "is_staff", False)):
-        text = layout.card(
-            layout.title("账号反查"),
-            [layout.row("🔒", "访问状态", "仅管理员可用")])
-        sender.edit_message_text(db, chat_id, message_id, text, None)
+        # PA-057：只弹 toast，不改写共享面板消息。
+        sender.answer_callback_query(db, cq_id, text="仅管理员可用")
         return
     target = (
         db.query(models.WebUser)
@@ -142,10 +141,8 @@ def _handle_whois_callback(db, callback_query: dict) -> None:
         .first()
     )
     if target is None:
-        text = layout.card(
-            layout.title("账号速览"),
-            [layout.row("📭", "结果", "目标账号不存在")])
-        sender.edit_message_text(db, chat_id, message_id, text, None)
+        # PA-057：同款改法，目标不存在也不改写共享面板消息。
+        sender.answer_callback_query(db, cq_id, text="目标账号不存在")
         return
     try:
         text, markup = whois_panel.render(db, caller, target, page, op)

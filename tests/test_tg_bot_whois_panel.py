@@ -63,7 +63,7 @@ def _user(db, tg, name, staff=False, **kw):
 def _click(db, monkeypatch, data, tg=STAFF_TG, chat_id=GROUP):
     edited = []
 
-    def fake_answer(db_, cq_id):
+    def fake_answer(db_, cq_id, text=None, show_alert=False):
         return (True, None)
 
     def fake_edit(db_, cid, mid, text_, reply_markup=None, parse_mode="HTML"):
@@ -132,13 +132,14 @@ def test_whois_panel_bindings_and_cred_pages(db, monkeypatch):
 # ---------- 管理员校验：非管理员点击拒绝 ----------
 
 def test_whois_panel_click_by_non_staff_rejected(db, monkeypatch):
+    # PA-057 口径：非管理员点击不再改写共享面板（旧拒绝卡已废），
+    # 只给点按者弹 toast 拒绝提示；面板原文不动、目标数据不泄露。
     _staff, target = _panel(db)
     _user(db, PLAIN_TG, "plainuser")
-    edited = _click(db, monkeypatch, f"whois:bind:{target.id}", tg=PLAIN_TG)
-    assert edited
-    text, _m = edited[0]
-    assert "仅管理员可用" in text
-    assert "targetx" not in text
+    edited, answers = _click_with_answers(
+        db, monkeypatch, f"whois:bind:{target.id}", tg=PLAIN_TG)
+    assert edited == []
+    assert "仅管理员可用" in answers
 
 
 # ---------- 二次确认：点动作不出事，点确认才执行 ----------
@@ -233,6 +234,47 @@ def test_gift_view_unlock_lands(db, monkeypatch):
     assert int(row.points_spent or 0) == 0  # 赠送标记，不扣能量
     assert row.expires_at is not None
     assert row.expires_at > datetime.now() + timedelta(days=29)
+
+
+# ---------- PA-057：拒绝分支只弹 toast，绝不改写共享面板 ----------
+
+def _click_with_answers(db, monkeypatch, data, tg=STAFF_TG, chat_id=GROUP):
+    edited = []
+    answers = []
+
+    def fake_answer(db_, cq_id, text=None, show_alert=False):
+        answers.append(text)
+        return (True, None)
+
+    def fake_edit(db_, cid, mid, text_, reply_markup=None, parse_mode="HTML"):
+        edited.append((text_, reply_markup))
+        return (True, None)
+
+    monkeypatch.setattr(sender, "answer_callback_query", fake_answer)
+    monkeypatch.setattr(sender, "edit_message_text", fake_edit)
+    cq = {
+        "id": "cq1", "data": data, "from": {"id": tg, "first_name": "Clicker"},
+        "message": {"message_id": 5, "chat": {"id": chat_id, "type": "group"}},
+    }
+    callbacks.handle_callback(db, cq)
+    return edited, answers
+
+
+def test_pa057_non_staff_click_leaves_shared_panel_intact(db, monkeypatch):
+    _staff, target = _panel(db)
+    _user(db, PLAIN_TG, "plainuser")
+    edited, answers = _click_with_answers(
+        db, monkeypatch, f"whois:bind:{target.id}", tg=PLAIN_TG)
+    assert edited == []  # 群共享面板原文不动
+    assert "仅管理员可用" in answers  # 仅点按者收到拒绝提示
+
+
+def test_pa057_missing_target_click_leaves_shared_panel_intact(db, monkeypatch):
+    _staff, _target = _panel(db)
+    edited, answers = _click_with_answers(
+        db, monkeypatch, "whois:bind:999999")
+    assert edited == []  # 目标不存在也不改写共享面板
+    assert "目标账号不存在" in answers
 
 
 # ---------- 结构守卫：网站管理端与面板共用同一封禁服务 ----------
