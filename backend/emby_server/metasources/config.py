@@ -62,7 +62,7 @@ COLLECT_TIMEOUT_SEC = 40.0
 
 # 默认顺序：**中文源在前**（治 TMDB 对中文剧集/综艺搜不准），
 # TMDB 放最后兜底 —— 它字段最全，但中文命中率最低。
-DEFAULT_ORDER = ["bangumi", "douban", "anilist", "tvmaze", "omdb", "tvdb", "tmdb"]
+DEFAULT_ORDER = ["metatube", "bangumi", "douban", "anilist", "tvmaze", "omdb", "tvdb", "tmdb"]
 
 
 @dataclass
@@ -150,7 +150,15 @@ def read_config(db, specs: list) -> Snapshot:
         if spec is None:
             continue
         keys, keys_legacy, key_storage = _keys_for(db, cfg, source_id)
-        if source_id == "douban":
+        if source_id == "metatube":
+            # MetaTube（番号）：**环境变量启用制**——METATUBE_BASE_URL 未配置
+            # 时整源不参与（快照层过滤，刮削链路零请求）；配置后仍受单源开关。
+            from backend.emby_server.metasources import metatube as _mt
+
+            src_enabled = _mt.configured() and _truthy(
+                cfg(CONFIG_SOURCE_ENABLED.format(id=source_id), ""), True)
+            src_rate = _rate(cfg(CONFIG_SOURCE_RATE.format(id=source_id), ""))
+        elif source_id == "douban":
             # 豆瓣开关/间隔单一存储（见模块头注）：取豆瓣自己的两个键，
             # 不再读 meta_source_enabled_douban / meta_source_rate_douban。
             from backend.emby_server import douban as _douban
@@ -245,7 +253,15 @@ def write_config(db, *, enabled: bool = True, prefer_chinese: bool = True,
         # 已废弃的分叉键：从「本轮要写的键」里拿掉，函数层面就不可能再写它
         values.pop(LEGACY_KEY_CONFIG[source_id], None)
     for source_id, raw_rate in (rates or {}).items():
-        if source_id == "douban":
+        if source_id == "metatube":
+            # MetaTube（番号）：**环境变量启用制**——METATUBE_BASE_URL 未配置
+            # 时整源不参与（快照层过滤，刮削链路零请求）；配置后仍受单源开关。
+            from backend.emby_server.metasources import metatube as _mt
+
+            src_enabled = _mt.configured() and _truthy(
+                cfg(CONFIG_SOURCE_ENABLED.format(id=source_id), ""), True)
+            src_rate = _rate(cfg(CONFIG_SOURCE_RATE.format(id=source_id), ""))
+        elif source_id == "douban":
             # 豆瓣间隔单一存储：写 douban_min_interval，不写已废弃的
             # meta_source_rate_douban（读侧也不再读它）。
             from backend.emby_server.douban import DOUBAN_RATE_KEY
