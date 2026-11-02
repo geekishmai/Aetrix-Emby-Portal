@@ -73,8 +73,13 @@
 - 探活与错误码全复用既有：CMS 接口非 1 → 502
   upstream_unavailable；detail 空列表（vod 消失）→ 404
   upstream_item_not_found；429 → 429；401 → 409
-  upstream_credential_invalid、403 → 403 upstream_forbidden；
-  直链探活仍走 ``_classify_probe_status``。unplayable 原因映射：
+  upstream_credential_invalid；CMS 接口本身的 403（取 detail 时）
+  → 403 upstream_forbidden。直链探活走 ``_classify_probe_status``，
+  唯一例外是探活 403 软放行（2026-11-02 定案，只限本分支）：
+  播放 CDN 对数据中心 IP 的 403 不判死，记 cms_probe_soft_pass
+  日志后照常下发 302——detail 现取成功已证明源与条目可用，
+  403 只证明服务器 IP 被播放 CDN 拒，用户家里未必被拒；
+  404/401/429/5xx 仍按统一分类判死。unplayable 原因映射：
   episode_out_of_range → 404 upstream_item_not_found，其余
   （parse_not_enabled / parse_rule_missing / no_direct_group）
   → 502 upstream_unavailable，message 区分原因，code 不新发明。
@@ -535,6 +540,16 @@ def _resolve_applecms_stream(source, vod_id: str, *,
     probe = _default_http_range_probe if http_probe is None else http_probe
     probe_status, retry_after = probe(
         address, _source_headers(source), UPSTREAM_PROBE_TIMEOUT_SEC)
+    if probe_status == 403:
+        # 探活软放行（CMS 分支专属，2026-11-02 定案）：多家 CMS 播放
+        # CDN 对数据中心 IP 一律 403——403 只证明「服务器这个 IP 被
+        # 拒」，不证明链死；detail 刚刚现取成功（源活着、条目在、
+        # 直链组在、集序号不越界）才是可用性信号。照常下发 302，
+        # 播放器在用户家里自拉。日志只记 id 不记地址。其余状态仍走
+        # 统一分类（404 判死 / 401 凭据 / 429 额度 / 5xx 不可用）；
+        # Emby/Jellyfin 分支不经这里，403 仍判 upstream_forbidden。
+        logger.info("cms_probe_soft_pass source_id=%s", source.id)
+        return address
     _classify_probe_status(probe_status, source.id, retry_after)
     logger.info("上游播放解析成功 source_id=%s", source.id)
     return address
