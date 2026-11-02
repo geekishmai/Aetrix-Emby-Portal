@@ -326,20 +326,17 @@ def test_prefetch_no_binding_no_job(db):
     assert db.query(em.TransferJob).count() == 0
 
 
-def test_prefetch_cross_provider_follows_bind_which(db):
-    """只绑 115、条目是 Drive：预取走跨 provider 转存绑哪播哪
-    （2026-10-26 定版，2026-10-30 重开恢复）——建跨单、落盘
-    pan115:user-7，不偷换成同盘单。"""
+def test_prefetch_removed_provider_binding_no_job(db):
+    """只绑 115（存量绑定行）、条目是 Drive：115 用户绑盘线已下线
+    （2026-11-02 删除一期），存量 115 绑定视为不存在——预取不建单，
+    理由 no_matching_binding，不再跨 provider 落 pan115。"""
     _mount(db)
     item = _item(db)
     _binding(db, 7, provider="pan115")
     out = tv.maybe_prefetch_transfer(db, item, _user(7))
-    assert out["triggered"] is True
-    assert db.query(em.TransferJob).count() == 1
-    job = db.query(em.TransferJob).one()
-    assert job.provider == "drive"
-    assert job.dest_drive_id == "pan115:user-7"
-    assert tv._is_cross_job(job) is True
+    assert out["triggered"] is False
+    assert out["reason"] == "no_matching_binding"
+    assert db.query(em.TransferJob).count() == 0
 
 
 def test_prefetch_daily_cap(db, monkeypatch):
