@@ -819,6 +819,23 @@ def _apply_people_fill(db, item, fetched, people_fetcher=None):
     return changed
 
 
+def _rename_from_bound_details(item, details: dict) -> bool:
+    """覆盖模式下，把文件名解析出的片名换成本条目所绑 TMDB 详情的标题。
+
+    只在详情 id 与条目 tmdb_id 一致时改（不拿别的条目的详情改名）；
+    口径与 enrich_worker._rename_from_known_tmdb 相同（只改电影与剧、
+    ``enrich_tmdb_text_fill_only=0`` 才改）。改了返回 True。
+    """
+    if not details or _empty(getattr(item, "tmdb_id", None)):
+        return False
+    if str(details.get("id") or "") != str(item.tmdb_id).strip():
+        return False
+    from backend.emby_server.enrich_worker import _rename_from_known_tmdb
+    before = getattr(item, "name", None)
+    _rename_from_known_tmdb(item, getattr(item, "item_type", "") or "", details)
+    return getattr(item, "name", None) != before
+
+
 def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
     """补资料段：只在已绑定条目上、只填空缺字段。
 
@@ -845,6 +862,8 @@ def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
         if _empty(getattr(item, field, None)) and field in candidates:
             setattr(item, field, candidates[field])
             filled.append(field)
+    if _rename_from_bound_details(item, fetched.get("tmdb_details") or {}):
+        filled.append("name")
     # 图片字段：side 本地图是本地文件路径，直落本地字段；TMDB 详情的
     # 相对路径原值走 _land_remote_image 落远程 URL（见 _IMAGE_FIELDS
     # 注释的事故成因）。缺图判定是双字段口径：已有远程 URL 的条目

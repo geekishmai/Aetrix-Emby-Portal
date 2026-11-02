@@ -38,3 +38,16 @@ def test_episode_and_empty_title_untouched(monkeypatch):
     mv = _item("原名")
     enrich_worker._rename_from_known_tmdb(mv, "movie", {"title": ""})
     assert mv.name == "原名"
+
+
+def test_two_stage_fill_renames_only_matching_id(monkeypatch):
+    """两段式补资料段：详情 id 与条目 tmdb_id 一致才改名"""
+    from backend.emby_server import identify_two_stage as ts
+    monkeypatch.setattr(tmdb, "tmdb_text_fill_only", lambda db=None: False)
+    it = SimpleNamespace(name="风云2 The Storm Warriors H 265 10 bit HD", sort_name="",
+                         item_type="movie", tmdb_id="32654")
+    assert ts._rename_from_bound_details(it, {"id": 32654, "title": "风云Ⅱ"}) is True
+    assert it.name == "风云Ⅱ"
+    other = SimpleNamespace(name="原名 H 265", sort_name="", item_type="movie", tmdb_id="1")
+    assert ts._rename_from_bound_details(other, {"id": 2, "title": "别的片"}) is False
+    assert other.name == "原名 H 265"
