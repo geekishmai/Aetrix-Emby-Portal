@@ -226,10 +226,21 @@ def _capture_cms_quality(source, mapping_id, detail, address, *,
     等）时拼标签存 ``label``；播放地址是 m3u8 时现抓主清单解析
     分辨率/带宽/范围信号（真实数值，优先于备注标签）。全程
     fail-safe：任何失败只留空，绝不阻塞、绝不改写 302 结果。
+
+    新鲜度门禁（PA-073）：缓存里已有 label 且宽、高非空即视为
+    完整，直接返回、不再发任何 HTTP——画质是 vod 的固有属性，
+    7 天 TTL 内重复点播不该每次都在 302 下发前同步抓主清单；
+    仅缺失/不完整（缺 label 或宽高任一为空）时才抓取回填，
+    与 CMS_QUALITY_CACHE_TTL_SEC 注释的「过期后下一次点播取流
+    时自然回填」口径一致。
     """
     if mapping_id is None:
         return
     try:
+        existing = read_cms_quality(mapping_id) or {}
+        if (existing.get("label") and existing.get("width")
+                and existing.get("height")):
+            return
         from backend.emby_server import quality_label as ql
         payload: dict = {}
         if isinstance(detail, dict):
