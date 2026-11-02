@@ -2998,6 +2998,23 @@ def _fast_skip_enabled() -> bool:
     return (os.getenv("SCAN_FAST_SKIP", "1") or "1").strip().lower() \
         not in {"0", "false", "no", "off"}
 
+def _should_scrape_incomplete_done(item, policy: str) -> bool:
+    """「假完成」条目在要求重刮的策略下不许秒跳。
+
+    done 但无 tmdb_id 且无海报（poster_path 与 primary_image_url 双空，与
+    enrich_worker 假完成巡检/none 回捞同一口径）——通常是历史事故里多源
+    兜底只给了名字/图就终态化的行（2026-11-02《听说你喜欢我》案：TMDB Key
+    未热生效，rescrape 因 L1 秒跳永远碰不到它们）。missing_only 下
+    ``should_scrape`` 本就会 True（无 tmdb_id），这里把 L1 秒跳的门也对齐，
+    让 rescrape/policy=all 真能把它们翻回 pending 重新补全。
+    """
+    if not should_scrape(item, policy):
+        return False
+    if getattr(item, "tmdb_id", None):
+        return False
+    return not (getattr(item, "poster_path", None)
+                or getattr(item, "primary_image_url", None))
+
 
 def _dir_key_of(scan_file: "ScanFile") -> str:
     """目录的稳定标识：本机用绝对路径，挂载用 ``mount://<id>/<rel>``"""
@@ -4779,7 +4796,12 @@ def _prepare_and_prefetch(db: Session, batch: list, ctx: "_ScanContext", pool) -
                 and not getattr(item, "deleted_at", None)   # 下架过的条目不能秒跳
                 and (getattr(item, "file_fingerprint", None) or None) == file_fp
                 and (getattr(item, "enrich_status", None) or "pending") == "done"
-                and not getattr(item, "repair_requested_at", None)):
+                and not getattr(item, "repair_requested_at", None)
+                # A②：strategy 要求重刮时，「done 但无 tmdb_id 且无海报」的条目
+                # 不许秒跳——它们是假完成（多源只给了名字/图就终态了），放行到
+                # _apply_enrich_status 翻回 pending。missing_only 下 should_scrape
+                # 对无 tmdb_id 的条目本来就为 True，全量策略更不必说。
+                and not _should_scrape_incomplete_done(item, policy)):
             # 外挂字幕是独立于视频的 sidecar：视频没变但字幕增减时不能秒跳，
             # 否则新字幕永远登记不上。用缓存目录列表检查，零额外 IO。
             if _external_subtitles_changed(ctx, item, scan_file):
