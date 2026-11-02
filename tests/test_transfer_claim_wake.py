@@ -13,7 +13,7 @@
 2. 端到端：订阅已断裂时，主循环仍应在数秒内认领到轮内新建的
    playback 单，而不是等满 60 秒兜底扫。
 
-全部离线：SQLite :memory: + 桩 drive_api + 桩 Redis 客户端；
+全部离线：SQLite 临时文件库 + 桩 drive_api + 桩 Redis 客户端；
 订阅重连等待用封顶 Event 加速（真实间隔 30 秒不变）。
 """
 import os
@@ -28,7 +28,6 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from backend import database as dbmod
 from backend import models as base_models
@@ -37,12 +36,22 @@ from backend.emby_server import transfer_variant as tv
 
 
 @pytest.fixture()
-def db_factory():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
-                           poolclass=StaticPool)
+def db_factory(tmp_path):
+    # 临时文件库，不用 :memory:+StaticPool：StaticPool 让主线程与守护/
+    # 订阅线程共用同一条 DBAPI 连接，任一会话的回滚会顺带撤销其他会话
+    # 刚提交的写入——job 插入被撤销后 job.id 读回抛 ObjectDeletedError、
+    # 认领更新被撤销后状态久停中间态，全量负载下间歇复现（2026-11-02
+    # CI 多个 PR 同形态冒烟红；本地复现：StaticPool 口径 2/30 出同签名
+    # ObjectDeletedError、文件库口径 0/30）。文件库每会话独立连接，
+    # 与生产（PG）连接语义一致。
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/claim_wake.db",
+        connect_args={"check_same_thread": False, "timeout": 30})
     base_models.Base.metadata.create_all(engine)
     em.Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)
+    factory = sessionmaker(bind=engine)
+    yield factory
+    engine.dispose()
 
 
 @pytest.fixture()
