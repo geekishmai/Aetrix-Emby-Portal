@@ -613,11 +613,18 @@ def fetch_with_route(url, headers, *, source_id, db, stats=None,
 
 
 def parse_media_playlist(text: str, base_url: str):
-    """媒体清单 → ([(dur, 绝对地址), …], init 段地址或 None)。"""
+    """媒体清单 → ([(dur, 绝对地址), …], init 段地址或 None, 密钥信息)。
+
+    密钥信息 None 或 {method, key_url, iv(bytes|None), sequence}：
+    一批降权源的 HLS 是 AES-128 加密的（第一批实证 32 条
+    segment_not_ts 全是这类），段字节必须先解密才谈得上解码。
+    """
     import urllib.parse
 
     segments = []
     init_url = None
+    key_info = None
+    sequence = 0
     pending = None
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -626,6 +633,36 @@ def parse_media_playlist(text: str, base_url: str):
             if marker in line:
                 uri = line.split(marker, 1)[1].split('"', 1)[0]
                 init_url = urllib.parse.urljoin(base_url, uri)
+            continue
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                sequence = int(line.split(":", 1)[1])
+            except ValueError:
+                sequence = 0
+            continue
+        if line.startswith("#EXT-X-KEY:"):
+            attrs = {}
+            for part in line[len("#EXT-X-KEY:"):].split(","):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    attrs[k.strip()] = v.strip().strip('"')
+            method = attrs.get("METHOD", "NONE")
+            if method != "NONE":
+                iv = None
+                iv_hex = attrs.get("IV", "")
+                if iv_hex.lower().startswith("0x"):
+                    try:
+                        iv = bytes.fromhex(iv_hex[2:].rjust(32, "0")[-32:])
+                    except ValueError:
+                        iv = None
+                key_info = {
+                    "method": method,
+                    "key_url": (urllib.parse.urljoin(
+                        base_url, attrs.get("URI", ""))
+                        if attrs.get("URI") else None),
+                    "iv": iv,
+                    "sequence": sequence,
+                }
             continue
         if line.startswith("#EXTINF:"):
             try:
@@ -638,7 +675,45 @@ def parse_media_playlist(text: str, base_url: str):
         segments.append((pending or 0.0,
                          urllib.parse.urljoin(base_url, line)))
         pending = None
-    return segments, init_url
+    if key_info is not None and "sequence" not in key_info:
+        key_info["sequence"] = sequence
+    return segments, init_url, key_info
+
+
+def fetch_key_bytes(key_info, headers, *, source_id, db, stats=None):
+    """取 AES 密钥字节（同路线）；非 AES-128/取不到 → FetchError。"""
+    if not key_info:
+        return None
+    if key_info.get("method") != "AES-128":
+        raise FetchError(
+            f"unsupported_key_method {key_info.get('method')}")
+    if not key_info.get("key_url"):
+        raise FetchError("key uri missing")
+    key = fetch_with_route(key_info["key_url"], headers,
+                           source_id=source_id, db=db, stats=stats,
+                           timeout=30)
+    if len(key) != 16:
+        raise FetchError(f"aes key length {len(key)}")
+    return key
+
+
+def decrypt_segment(data: bytes, key: bytes, iv: bytes) -> bytes:
+    """AES-128-CBC 解密一段（openssl CLI，镜像现成、无新依赖）；
+    enc 默认处理 PKCS#7 填充。失败 → FetchError。"""
+    proc = subprocess.run(
+        ["openssl", "enc", "-d", "-aes-128-cbc",
+         "-K", key.hex(), "-iv", iv.hex()],
+        input=data, capture_output=True, timeout=60)
+    if proc.returncode != 0 or not proc.stdout:
+        raise FetchError("segment_decrypt_failed")
+    return proc.stdout
+
+
+def _segment_iv(key_info, index: int) -> bytes:
+    if key_info.get("iv"):
+        return key_info["iv"]
+    seq = int(key_info.get("sequence") or 0) + int(index)
+    return seq.to_bytes(16, "big")
 
 
 def fetch_media_playlist_text(url, headers, *, source_id, db,
@@ -679,10 +754,10 @@ def load_media_playlist(url, headers, *, source_id, db, stats=None):
     函数对原文再核一遍（见 verify_repair）。"""
     text, url = fetch_media_playlist_text(
         url, headers, source_id=source_id, db=db, stats=stats)
-    segments, init_url = parse_media_playlist(text, url)
+    segments, init_url, key_info = parse_media_playlist(text, url)
     if not segments:
         raise FetchError(f"empty media playlist {url}")
-    return segments, init_url, url
+    return segments, init_url, url, key_info
 
 
 def resolve_stream(db, mapping):
@@ -1130,8 +1205,16 @@ def graft_window(dirty_seg_paths, clean_paths, info, *, strip_full,
 
 
 def _download_segments(segments, headers, *, source_id, db, stats,
-                       work_dir: Path, prefix, cover_sec):
-    """按清单序下载分段直到累计时长 ≥ cover_sec；返回 (路径表, 累计时长)。"""
+                       work_dir: Path, prefix, cover_sec,
+                       key_info=None, key_bytes=None):
+    """按清单序下载分段直到累计时长 ≥ cover_sec；返回 (路径表, 累计时长)。
+
+    清单带 EXT-X-KEY（AES-128）时先解密再验真/落盘：调用方用
+    fetch_key_bytes 取好密钥传入；没传密钥直接 FetchError，
+    不把密文当坏段误记 segment_not_ts。
+    """
+    if key_info is not None and key_bytes is None:
+        raise FetchError("key_bytes_missing")
     paths = []
     total = 0.0
     for i, (dur, seg_url) in enumerate(segments):
@@ -1139,6 +1222,9 @@ def _download_segments(segments, headers, *, source_id, db, stats,
             break
         data = fetch_with_route(seg_url, headers, source_id=source_id,
                                 db=db, stats=stats, timeout=60)
+        if key_info is not None:
+            data = decrypt_segment(data, key_bytes,
+                                   _segment_iv(key_info, i))
         if not data or (data[0] != 0x47 and b"ftyp" not in data[:12]):
             # 既不是 TS（同步字节 0x47）也不是 fMP4（ftyp 盒）=
             # 下回来的不是视频段（HTML 错误页等，第一批实证 5 条
@@ -1178,20 +1264,26 @@ def process_pair(db, dirty, sibling, *, mouth, stats=None):
     try:
         durl, dhdr = resolve_stream(db, dirty)
         curl_, chdr = resolve_stream(db, sibling)
-        dsegs, dinit, _ = load_media_playlist(
+        dsegs, dinit, _, dkey = load_media_playlist(
             durl, dhdr, source_id=dirty.source_id, db=db, stats=stats)
-        csegs, cinit, _ = load_media_playlist(
+        csegs, cinit, _, ckey = load_media_playlist(
             curl_, chdr, source_id=sibling.source_id, db=db, stats=stats)
         if dinit or cinit:
             return {"status": "skipped",
                     "reason": "unsupported_init_segment"}
+        dkey_bytes = fetch_key_bytes(
+            dkey, dhdr, source_id=dirty.source_id, db=db, stats=stats)
+        ckey_bytes = fetch_key_bytes(
+            ckey, chdr, source_id=sibling.source_id, db=db, stats=stats)
         horizon = float(mouth) + 30.0
         dpaths, _ = _download_segments(
             dsegs, dhdr, source_id=dirty.source_id, db=db, stats=stats,
-            work_dir=work, prefix="dirty", cover_sec=horizon)
+            work_dir=work, prefix="dirty", cover_sec=horizon,
+            key_info=dkey, key_bytes=dkey_bytes)
         cpaths, _ = _download_segments(
             csegs, chdr, source_id=sibling.source_id, db=db, stats=stats,
-            work_dir=work, prefix="clean", cover_sec=horizon + 45.0)
+            work_dir=work, prefix="clean", cover_sec=horizon + 45.0,
+            key_info=ckey, key_bytes=ckey_bytes)
         if not dpaths or not cpaths:
             return {"status": "failed", "reason": "fetch_failed",
                     "detail": "no segments downloaded"}
@@ -1439,7 +1531,7 @@ def _verify_frame(db, row, segments, strip, playlist_text, media_url,
         if rep is None:
             return ("frame_check_failed", "repaired frame missing")
         # 脏版同段同帧
-        dsegs, _init = parse_media_playlist(playlist_text, media_url)
+        dsegs, _init, dkey = parse_media_playlist(playlist_text, media_url)
         durl, dhdr = None, None
         dirty = (db.query(em.UpstreamItemMapping)
                  .filter(em.UpstreamItemMapping.id == row.mapping_id)
@@ -1450,6 +1542,12 @@ def _verify_frame(db, row, segments, strip, playlist_text, media_url,
             data = fetch_with_route(
                 dsegs[seg["idx"]][1], dhdr, source_id=dirty.source_id,
                 db=db, stats=stats, timeout=60)
+            if dkey is not None:
+                dkey_bytes = fetch_key_bytes(
+                    dkey, dhdr, source_id=dirty.source_id, db=db,
+                    stats=stats)
+                data = decrypt_segment(
+                    data, dkey_bytes, _segment_iv(dkey, seg["idx"]))
             dpath.write_bytes(data)
             dinfo = video_info(dpath)
             dframe = _frame_at([dpath], local_idx,
@@ -1467,13 +1565,17 @@ def _verify_frame(db, row, segments, strip, playlist_text, media_url,
                                    == row.sibling_mapping_id).first())
                 if sibling is not None:
                     curl_, chdr = resolve_stream(db, sibling)
-                    csegs, _ci, _cu = load_media_playlist(
+                    csegs, _ci, _cu, ckey = load_media_playlist(
                         curl_, chdr, source_id=sibling.source_id, db=db,
+                        stats=stats)
+                    ckey_bytes = fetch_key_bytes(
+                        ckey, chdr, source_id=sibling.source_id, db=db,
                         stats=stats)
                     cpaths, _tot = _download_segments(
                         csegs, chdr, source_id=sibling.source_id, db=db,
                         stats=stats, work_dir=Path(td), prefix="clean",
-                        cover_sec=band_mid + 15.0)
+                        cover_sec=band_mid + 15.0,
+                        key_info=ckey, key_bytes=ckey_bytes)
                     if cpaths:
                         cinfo = video_info(cpaths[0])
                         gidx = (int(band_mid * _seg_fps(cinfo))
