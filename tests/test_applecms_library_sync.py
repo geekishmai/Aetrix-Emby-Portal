@@ -226,3 +226,60 @@ def test_round_gate_off_by_default(db, monkeypatch):
     assert als.sync_enabled() is False
     assert als.run_library_sync_round(
         session_factory=lambda: db, http_get=FakeHttpGet()) == []
+
+
+def test_sync_quality_gate_blocks_gun_and_lowdef(db):
+    """worker 同步路径质量门：枪版/低清条目不建行、不记映射。
+
+    与扩抓 lane 同口径（片名/备注信号）；「枪」字正常标题与
+    单词内嵌 CAM 不误杀；无信号不杀。
+    """
+    lib = _seed(db, type_map={"电影": "in"})
+    page = {
+        "code": 1, "page": 1, "pagecount": 1, "limit": 20, "total": 8,
+        "class": CLASS_TREE,
+        "list": [
+            _entry(201, "干净片"),
+            _entry(202, "某片枪版"),
+            dict(_entry(203, "某片"), vod_remarks="影院版"),
+            dict(_entry(204, "某片"), vod_remarks="TELESYNC"),
+            _entry(205, "某片标清"),
+            dict(_entry(206, "某片"), vod_remarks="SD"),
+            _entry(207, "枪神传说"),
+            _entry(208, "CAMELOT行动"),
+        ],
+    }
+    empty = {"code": 1, "page": 1, "pagecount": 1, "limit": 20,
+             "total": 0, "class": CLASS_TREE, "list": []}
+
+    class GateHttpGet:
+        def __call__(self, url, headers=None, timeout=None):
+            host = urllib.parse.urlparse(url).netloc
+            payload = page if host == "s7.example" else empty
+            return 200, json.loads(json.dumps(payload, ensure_ascii=False))
+
+    stats = als.sync_library(db, lib, http_get=GateHttpGet())
+    assert {r.name for r in _movies(db, lib)} == {
+        "干净片", "枪神传说", "CAMELOT行动"}
+    assert stats["skipped_quality_gun"] == 3
+    assert stats["skipped_quality_lowdef"] == 2
+    assert stats["added"] == 3
+    assert stats["mapped"] == 3
+
+
+def test_process_entry_series_mode_gate_before_detail(db):
+    """剧集路径的门在 detail 拉取之前：枪版剧行不耗 detail 请求。"""
+    lib = _seed(db, type_map={"电影": "in"})
+    source = (db.query(em.UpstreamSource)
+              .filter(em.UpstreamSource.id == 7).first())
+    stats = als._zero_stats(lib.id)
+
+    def _boom(url, headers=None, timeout=None):
+        raise AssertionError("detail must not be fetched for gated entries")
+
+    als._process_entry(db, lib, source, _entry(301, "某剧枪版"),
+                       stats, {}, type_map={"电影": "in"}, tops={},
+                       seen=[], series_mode=True, http_get=_boom,
+                       headers={}, do_sleep=lambda s: None, delay=0.0)
+    assert stats["skipped_quality_gun"] == 1
+    assert _movies(db, lib) == []

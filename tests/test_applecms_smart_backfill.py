@@ -102,6 +102,16 @@ def test_quality_gate_tokens():
     assert bf.quality_gate_reject("国产剧", "某剧", "1080P高清") is None
     # 片名里正常的「枪」字不误杀（枪版才是标记）
     assert bf.quality_gate_reject("国产剧", "枪神传说") is None
+    # 与扩抓 lane 同口径的扩围信号（2026-11-03 worker 质量门单）
+    assert bf.quality_gate_reject("国产剧", "某片影院版") == "bad_version"
+    assert bf.quality_gate_reject("国产剧", "某片抢先") == "bad_version"
+    assert bf.quality_gate_reject("国产剧", "某片", "TELESYNC") == "bad_version"
+    assert bf.quality_gate_reject("国产剧", "某片", "HDTS") == "bad_version"
+    assert bf.quality_gate_reject("国产剧", "CAMELOT行动") is None
+    # 同步侧专用 helper 只查枪版/低清两层：备注带短剧词也不
+    # 影响枪版判定（短剧层在同步侧走白名单，不由它拦）
+    assert bf.version_quality_block("某片枪版", "短剧") == "bad_version"
+    assert bf.version_quality_block("某片", "短剧") is None
 
 
 def test_quality_gate_short_drama_ancestor_and_class():
