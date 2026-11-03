@@ -443,6 +443,58 @@ def test_download_segments_decrypts_aes(monkeypatch, tmp_path):
     assert paths[0].read_bytes() == plain
 
 
+def test_graft_window_pairs_via_single_stream(monkeypatch, tmp_path):
+    # 回归（第一批 gate_failed 39 条真因）：脏版逐段单独解码时
+    # fps 重采样相位会与拼接解码错开一帧，配对一滑门控必挂。
+    # 这里用替身模拟「单段解码帧序滑移一帧」：贴帧必须走整窗
+    # 单流解码（多文件一次解码不被替身动），滑移替身只许影响
+    # 单文件调用——贴帧若退回逐段解码，本用例立即翻红。
+    import shutil
+    import subprocess as sp
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("ffmpeg/ffprobe not available")
+    from pathlib import Path as _P
+
+    def _mk(out, strip, dur=2.0):
+        vf = ("drawbox=x=0:y=0:w=iw:h=30:color=red:t=fill"
+              if strip else "null")
+        sp.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                "-i", f"testsrc2=size=320x180:rate=10:duration={dur}",
+                "-vf", vf, "-c:v", "libx264", "-preset", "veryfast",
+                str(out)], check=True)
+
+    full_d, cl = tmp_path / "full_d.ts", tmp_path / "c.ts"
+    _mk(full_d, True)
+    _mk(cl, False)
+    d0, d1 = tmp_path / "d0.ts", tmp_path / "d1.ts"
+    for out, ss in ((d0, "0"), (d1, "1")):
+        sp.run(["ffmpeg", "-y", "-v", "error", "-i", str(full_d),
+                "-ss", ss, "-t", "1", "-c:v", "libx264",
+                "-preset", "veryfast", str(out)], check=True)
+    dirty_paths = [d0, d1]
+    info = graft.video_info(d0)
+
+    real_decode = graft.decode_frames
+
+    def slipped(paths, **kw):
+        frames = real_decode(paths, **kw)
+        if (len(paths) == 1 and _P(paths[0]) in dirty_paths
+                and not kw.get("gray", True)):
+            it = iter(frames)
+            next(it, None)  # 滑移一帧
+            return it
+        return frames
+
+    monkeypatch.setattr(graft, "decode_frames", slipped)
+    segments, counters = graft.graft_window(
+        dirty_paths, [cl], info, strip_full=(0, 30),
+        offset_frames=0, band_end_sec=2.0, out_dir=tmp_path / "out",
+        seg_durations=[1.0, 1.0])
+    assert len(segments) == 2
+    assert counters["pasted"] > 0
+
+
 def test_fetch_key_bytes_rejects_other_methods():
     with pytest.raises(graft.FetchError, match="unsupported_key_method"):
         graft.fetch_key_bytes(
