@@ -622,6 +622,7 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
     do_sleep = sleep_fn if sleep_fn is not None else time.sleep
     page_limit = max_pages or acf.DEFAULT_MAX_PAGES
     pg = 1
+    catalog_complete = False
     try:
         while pg <= page_limit:
             payload = acf.fetch_page(
@@ -647,10 +648,21 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
             except (TypeError, ValueError):
                 pagecount = 0
             if not entries or (pagecount and pg >= pagecount):
+                catalog_complete = True
                 break
             pg += 1
             if delay > 0:
                 do_sleep(delay)
+        if not catalog_complete:
+            # 撞页数安全阀停下：目录没翻完，seen 只是前段子集。
+            # 按「源不完整」同口径记 errors（PA-068）：对账门禁据此
+            # 整轮跳过，不许拿残缺目录判下架；增量轮也能在统计里
+            # 看见截断。已取回的数据照常 commit 入库，不浪费。
+            stats["errors"].append(
+                f"source_truncated:{source_id}:page_limit={page_limit}")
+            logger.warning(
+                "applecms 库同步单源截断 library_id=%s source_id=%s "
+                "page_limit=%s", library.id, source_id, page_limit)
         db.commit()
     except acf.AppleCMSError as exc:
         db.rollback()
