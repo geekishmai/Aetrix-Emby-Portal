@@ -870,6 +870,52 @@ def decode_frames(paths, *, width, height, fps, gray=True):
 # ---------------------------------------------------------------- 对齐与贴帧
 
 
+def _refine_offset(dirty_paths, clean_paths, base_offset, *, fps,
+                   sw, sh, max_delta=6, window=72):
+    """全帧率精对齐：在粗偏移 ±max_delta 帧内找中段差最小的偏移。
+
+    两侧片头各取 need 帧低清灰度图，逐候选偏移配对前 window 对
+    求 _mid_score 均值；仅当明显更优（>0.05）才改粗偏移——片头
+    纯黑/渐变段人人得分相近时不许乱漂。配对不足 20 对则保留
+    粗偏移原值。
+    """
+    need = window + max_delta + abs(int(base_offset)) + 2
+    dframes = []
+    for f in decode_frames(dirty_paths, width=sw, height=sh, fps=fps):
+        dframes.append(f)
+        if len(dframes) >= need:
+            break
+    cframes = []
+    for f in decode_frames(clean_paths, width=sw, height=sh, fps=fps):
+        cframes.append(f)
+        if len(cframes) >= need:
+            break
+    def _score(off):
+        total = 0.0
+        pairs = 0
+        for k, dframe in enumerate(dframes):
+            j = k + off
+            if 0 <= j < len(cframes):
+                total += _mid_score(dframe, cframes[j])
+                pairs += 1
+                if pairs >= window:
+                    break
+        return (total / pairs) if pairs >= 20 else None
+
+    base = int(base_offset)
+    base_score = _score(base)
+    best = (base_score, base) if base_score is not None else None
+    for delta in range(-max_delta, max_delta + 1):
+        if delta == 0:
+            continue
+        off = base + delta
+        score = _score(off)
+        if score is not None and (
+                best is None or score < best[0] - 0.05):
+            best = (score, off)
+    return best[1] if best else base
+
+
 def _mid_score(img_a, img_b):
     """对齐评分：画面中段（去顶/底各 22%）的平均绝对差。"""
     from PIL import ImageChops, ImageStat
@@ -931,6 +977,13 @@ def analyze_pair(dirty_paths, clean_paths, info, *, horizon_sec):
         return {"ok": False, "reason": "align_failed",
                 "detail": f"best_score={best[0] if best else None}"}
     offset_frames = int(round(best[1] / 5.0 * fps))
+    # ---- 精对齐：粗对齐按 5fps 采样找偏移，24/25fps 下 1 个采样
+    # ≈4.8–5 帧，取整后残余可达 ±2–3 帧；片头渐变/快动段只要
+    # 错一帧门控就挂（第一批实证 frame=8/9 gate=12.8 一簇，
+    # 24fps 脏版配 25fps 净版时最明显）。全帧率在粗偏移附近
+    # 再扫一遍定死帧级偏移，analyze 后段与 graft 共用此值。
+    offset_frames = _refine_offset(
+        dirty_paths, clean_paths, offset_frames, fps=fps, sw=sw, sh=sh)
     # ---- 全帧率低清配对：行差剖面（前 12 秒）→ 条带 → 带尾序列
     dirty_gen = decode_frames(dirty_paths, width=aw, height=ah, fps=fps)
     clean_gen = decode_frames(clean_paths, width=aw, height=ah, fps=fps)

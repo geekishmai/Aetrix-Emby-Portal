@@ -495,6 +495,38 @@ def test_graft_window_pairs_via_single_stream(monkeypatch, tmp_path):
     assert counters["pasted"] > 0
 
 
+def test_refine_offset_finds_frame_level_shift(monkeypatch):
+    # 精对齐回归：粗偏移（5fps 采样粒度）留 ±数帧残余时，全帧率
+    # 精扫必须把帧级偏移找回来；黑场无信息时不许漂离粗偏移。
+    from PIL import Image, ImageDraw
+
+    def _pattern(n):
+        img = Image.new("L", (256, 144), 20)
+        d = ImageDraw.Draw(img)
+        x = 10 + (n * 7) % 180
+        d.rectangle([x, 50, x + 40, 95], fill=220)
+        d.rectangle([0, 120, 255, 130], fill=(n * 3) % 200 + 30)
+        return img
+
+    dirty = [_pattern(i) for i in range(100)]
+    clean = [_pattern(i - 2) for i in range(100)]  # 真偏移 +2
+
+    def _fake(paths, **kw):
+        return iter(dirty if paths[0] == "D" else clean)
+
+    monkeypatch.setattr(graft, "decode_frames", _fake)
+    got = graft._refine_offset(["D"], ["C"], 0, fps=24, sw=256, sh=144)
+    assert got == 2
+    got = graft._refine_offset(["D"], ["C"], 5, fps=24, sw=256, sh=144)
+    assert got == 2
+    # 全黑无信息：保留粗偏移，不许乱漂
+    black = [Image.new("L", (256, 144), 0) for _ in range(100)]
+    monkeypatch.setattr(
+        graft, "decode_frames", lambda paths, **kw: iter(black))
+    got = graft._refine_offset(["D"], ["C"], 3, fps=24, sw=256, sh=144)
+    assert got == 3
+
+
 def test_fetch_key_bytes_rejects_other_methods():
     with pytest.raises(graft.FetchError, match="unsupported_key_method"):
         graft.fetch_key_bytes(
