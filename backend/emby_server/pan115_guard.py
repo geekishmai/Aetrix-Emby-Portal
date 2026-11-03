@@ -283,11 +283,13 @@ def before_call(cookie: str, kind: str, deadline: float | None = None) -> None:
     if state is not None:
         raise Pan115CooldownError(*state)
     max_wait = _wait_cap(kind)
+    deadline_bound = False
     if deadline is not None:
         remaining = float(deadline) - time.time()
         if remaining <= 0:
             raise Pan115DeadlineExceeded("宿主截止时刻已过（请求未发出）", 0.0)
         # 排队上限收紧到 deadline 剩余（多留 1s 给真实 HTTP 往返）
+        deadline_bound = remaining - 1.0 < max_wait
         max_wait = min(max_wait, max(0.0, remaining - 1.0))
     waited = 0.0
     for name, rate, burst in _bucket_params(kind):
@@ -297,6 +299,10 @@ def before_call(cookie: str, kind: str, deadline: float | None = None) -> None:
             if wait <= 0:
                 break
             if waited + wait > max_wait:
+                # 上限是被宿主截止时刻收紧的：超了是宿主等不起，不是账号冷却（AD-1）
+                if deadline_bound:
+                    raise Pan115DeadlineExceeded("宿主截止时刻将过（请求未发出）",
+                                                 max(0.0, deadline - time.time()))
                 raise Pan115CooldownError("本机限速排队超时", wait)
             if deadline is not None and time.time() + wait > deadline:
                 raise Pan115DeadlineExceeded("宿主截止时刻将过（请求未发出）",
