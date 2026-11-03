@@ -80,6 +80,26 @@ def get_upstream_source(
     return ups.source_payload(_get_source_or_404(db, source_id))
 
 
+@admin_emby_router.get("/upstream-sources/ad-skip/detections/{mapping_id}")
+def get_ad_skip_detection(
+    mapping_id: int,
+    staff: base_models.WebUser = Depends(require_staff),
+    db: Session = Depends(get_db),
+):
+    """片头印制广告检测结果只读查询（广告剪除试点，2026-11-03）。
+
+    按映射 id 查 cms_ad_skip 的现行结论：状态/跳过秒数/置信度/
+    证据帧路径；无记录回 404。管理页面暂未接（试点期先给接口
+    口，页面列后续项）。
+    """
+    from backend.emby_server import cms_ad_skip as adskip
+
+    row = adskip.get_detection(db, mapping_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="该映射尚无检测记录")
+    return adskip.detection_payload(row)
+
+
 class UpstreamSourceCreateRequest(BaseModel):
     name: str = Field(description="源名称（管理端辨识用，全站唯一）")
     source_type: str = Field(

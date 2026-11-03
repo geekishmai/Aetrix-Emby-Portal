@@ -222,13 +222,46 @@ def log_fallback(reason: str, *, source_id=None, item_id=None) -> None:
         reason, source_id, item_id)
 
 
+def _apply_ad_skip(text, *, source_id, item_id, skip_seconds):
+    """片头印制广告剪除（cms_ad_skip 高置信记录才有非空 skip）。
+
+    返回摘段后的文本；不适用/摘不了时返回 None 表示维持原样。
+    摘段口径全在 emby_server.cms_ad_skip.trim_playlist（段界对
+    齐、多丢正片超阈整条不剪）；这里只负责接线与记日志。
+    """
+    if not skip_seconds or skip_seconds <= 0:
+        return None
+    try:
+        from backend.emby_server import cms_ad_skip
+
+        out = cms_ad_skip.trim_playlist(text, float(skip_seconds))
+    except Exception:  # noqa: BLE001 — 剪除失败绝不挡播放
+        logger.warning("cms_ad_skip trim failed item=%s", item_id,
+                       exc_info=True)
+        return None
+    if out is None:
+        logger.info("cms_ad_skip trim skipped item=%s skip=%s "
+                    "(segment alignment)", item_id, skip_seconds)
+        return None
+    new_text, stats = out
+    logger.info(
+        "cms_ad_skip trimmed item=%s source=%s segments=%s "
+        "duration=%s extra_loss=%s", item_id, source_id,
+        stats["trimmed_segments"], stats["trimmed_duration"],
+        stats["extra_loss"])
+    return new_text
+
+
 def build_master_response_text(url: str, headers: dict, make_variant_url, *,
                                source_id=None, item_id=None,
-                               http_get_text=None):
+                               http_get_text=None, skip_seconds=0.0):
     """取流口一级处理：抓主清单并按形态产出代理清单文本。
 
-    - 主清单（带 variant）：改写 variant 为二级端点地址后下发；
-    - 媒体清单（暴风形态，主=媒体）：直接过滤 + absolutize 下发。
+    - 主清单（带 variant）：改写 variant 为二级端点地址后下发
+      （子清单在二级端点各自过滤/剪除）；
+    - 媒体清单（暴风形态，主=媒体）：直接过滤 + absolutize 下发；
+      skip_seconds>0（cms_ad_skip 高置信记录）时先按记录摘掉片
+      头广告段再过滤。
     任何失败返回 None（调用方回落 302 直发），不抛异常。
     """
     try:
@@ -238,6 +271,11 @@ def build_master_response_text(url: str, headers: dict, make_variant_url, *,
             return None
         if is_master_playlist(text):
             return rewrite_master_playlist(text, url, make_variant_url)
+        trimmed = _apply_ad_skip(text, source_id=source_id,
+                                 item_id=item_id,
+                                 skip_seconds=skip_seconds)
+        if trimmed is not None:
+            text = trimmed
         markers = filter_markers_for_source(source_id)
         new_text, stats = filter_media_playlist(text, url, markers)
         logger.info(
@@ -252,11 +290,14 @@ def build_master_response_text(url: str, headers: dict, make_variant_url, *,
 
 
 def build_media_response_text(url: str, headers: dict, *, source_id=None,
-                              item_id=None, http_get_text=None):
+                              item_id=None, http_get_text=None,
+                              skip_seconds=0.0):
     """二级端点处理：抓 variant 媒体清单，过滤 + absolutize 后下发。
 
-    抓到的若仍是主清单（多层嵌套）则原样 absolutize 不过滤——
-    拿不准不下刀；失败返回 None（调用方 302 回落原地址）。
+    skip_seconds>0（cms_ad_skip 高置信记录）时先按记录摘掉片头
+    广告段再过滤。抓到的若仍是主清单（多层嵌套）则原样
+    absolutize 不过滤——拿不准不下刀；失败返回 None（调用方
+    302 回落原地址）。
     """
     try:
         status, text = _fetch_text(url, headers, http_get_text)
@@ -268,6 +309,11 @@ def build_media_response_text(url: str, headers: dict, *, source_id=None,
             log_fallback("media_unexpected_master",
                          source_id=source_id, item_id=item_id)
             return None
+        trimmed = _apply_ad_skip(text, source_id=source_id,
+                                 item_id=item_id,
+                                 skip_seconds=skip_seconds)
+        if trimmed is not None:
+            text = trimmed
         markers = filter_markers_for_source(source_id)
         new_text, stats = filter_media_playlist(text, url, markers)
         logger.info(

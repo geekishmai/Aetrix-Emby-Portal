@@ -7483,7 +7483,21 @@ async def _maybe_cms_playlist_proxy(db, item, mapping_id, url, request, user):
         return None
     source_id = await run_db(
         _proxy.source_id_for_mapping, db, item.id, mapping_id)
-    if source_id is None or not _proxy.engages(source_id, url):
+    if source_id is None:
+        return None
+    # 片头印制广告剪除（cms_ad_skip 试点）：有高置信记录时即使
+    # 该源没有清单过滤标记也 engage 代理（剪除复用同一通道）；
+    # 无记录时顺手排一次后台检测——不阻塞本次播放，本次仍按原
+    # 行为播未剪版。
+    from backend.emby_server import cms_ad_skip as _adskip
+
+    _skip = None
+    if _adskip.source_enabled(source_id):
+        _skip, _skip_known = await run_db(
+            _adskip.lookup_trim, db, item.id, mapping_id, source_id)
+        if not _skip_known:
+            _adskip.schedule_detection(item.id, mapping_id, source_id)
+    if _skip is None and not _proxy.engages(source_id, url):
         return None
     source = await run_db(_up.get_source_row, db, source_id)
     headers = _up._source_headers(source) if source is not None else {}
@@ -7509,7 +7523,8 @@ async def _maybe_cms_playlist_proxy(db, item, mapping_id, url, request, user):
 
     text = await run_in_threadpool(
         _proxy.build_master_response_text, url, headers, _variant_url,
-        source_id=source_id, item_id=item.id)
+        source_id=source_id, item_id=item.id,
+        skip_seconds=_skip or 0.0)
     if text is None:
         return None
     return Response(
@@ -7562,9 +7577,26 @@ async def upstream_playlist_media(
                 "code": "upstream_source_disabled",
                 "message": "所选线路已不可用"})
     headers = _up._source_headers(source) if source is not None else {}
+    # 片头印制广告剪除：与取流口同口径查高置信记录（MediaSourceId
+    # 形如 {guid}:upstream:{mapping_id}，无 id 后缀时查最佳映射）。
+    _skip = 0.0
+    if source_id is not None:
+        from backend.emby_server import cms_ad_skip as _adskip
+
+        if _adskip.source_enabled(source_id):
+            _msid = (q.get("MediaSourceId") or "").strip()
+            _prefix = f"{item_id}:upstream:"
+            _mid = None
+            if _msid.startswith(_prefix) and \
+                    _msid[len(_prefix):].isdigit():
+                _mid = int(_msid[len(_prefix):])
+            _found, _known = await run_db(
+                _adskip.lookup_trim, db, item.id, _mid, source_id)
+            if _found:
+                _skip = _found
     text = await run_in_threadpool(
         _proxy.build_media_response_text, target, headers,
-        source_id=source_id, item_id=item.id)
+        source_id=source_id, item_id=item.id, skip_seconds=_skip)
     if text is None:
         return RedirectResponse(target, status_code=302)
     return Response(
