@@ -504,6 +504,13 @@ def build_candidate_queue(db, *, demoted_source_ids, limit,
     demoted = {int(s) for s in demoted_source_ids}
     if not demoted or limit <= 0:
         return []
+    # 停用中的源在解析口径里本就不可见（resolve 必 not_found），
+    # 不进队列白跑（第一批实证：无尽停用期间 11 条全灭）。
+    enabled = {int(sid) for (sid,) in db.query(em.UpstreamSource.id)
+               .filter(em.UpstreamSource.enabled.is_(True)).all()}
+    demoted &= enabled
+    if not demoted:
+        return []
     heat_rows = (db.query(em.PlayStartEvent.item_id,
                           func.count(em.PlayStartEvent.id))
                  .filter(em.PlayStartEvent.provider == "upstream",
@@ -639,9 +646,17 @@ def fetch_media_playlist_text(url, headers, *, source_id, db,
     """拉清单原文（主清单自动下钻一层）；返回 (媒体清单文本, 媒体清单地址)。"""
     import urllib.parse
 
+    def _require_m3u8(payload: bytes) -> str:
+        decoded = payload.decode("utf-8", "replace")
+        if not decoded.lstrip("﻿ \t\r\n").startswith("#EXTM3U"):
+            # 源站把 HTML 验证/错误页当清单回（第一批实证：清单是
+            # 整页 HTML 时段 URL 直接解出乱码、curl rc=3）。
+            raise FetchError(f"playlist_not_m3u8 {url}")
+        return decoded
+
     raw = fetch_with_route(url, headers, source_id=source_id, db=db,
                            stats=stats)
-    text = raw.decode("utf-8", "replace")
+    text = _require_m3u8(raw)
     if "#EXT-X-STREAM-INF" in text:
         variant = None
         for raw_line in text.splitlines():
@@ -653,7 +668,7 @@ def fetch_media_playlist_text(url, headers, *, source_id, db,
             raise FetchError(f"master without variant {url}")
         raw = fetch_with_route(variant, headers, source_id=source_id,
                                db=db, stats=stats)
-        text = raw.decode("utf-8", "replace")
+        text = _require_m3u8(raw)
         url = variant
     return text, url
 
@@ -1124,6 +1139,12 @@ def _download_segments(segments, headers, *, source_id, db, stats,
             break
         data = fetch_with_route(seg_url, headers, source_id=source_id,
                                 db=db, stats=stats, timeout=60)
+        if not data or (data[0] != 0x47 and b"ftyp" not in data[:12]):
+            # 既不是 TS（同步字节 0x47）也不是 fMP4（ftyp 盒）=
+            # 下回来的不是视频段（HTML 错误页等，第一批实证 5 条
+            # ffprobe failed 的共同形态）；门口拦下记清原因，
+            # 不进解码白烧 CPU。
+            raise FetchError(f"segment_not_ts {seg_url}")
         path = work_dir / f"{prefix}_{i:03d}.ts"
         path.write_bytes(data)
         paths.append(path)
