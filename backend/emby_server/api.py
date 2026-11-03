@@ -730,8 +730,7 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
             from backend.emby_server import playback_gate as _gate_mod
             _detail_url, _, _ = _signed_local_stream_url(
                 item, base, user_id, db, api_key,
-                with_sign=bool(user_id)
-                and _gate_mod.has_active_binding(db, user_id))
+                with_sign=_gate_mod.can_issue_play_sign(db, user_id, item))
             dto["MediaSources"][0]["DirectPlayUrl"] = _detail_url
             dto["MediaSources"][0]["DirectStreamUrl"] = _detail_url
         # 详情页「上游」线路（U-02）：本地条目有可展示的上游映射时，
@@ -747,8 +746,7 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
             from backend.emby_server import playback_gate as _gate_mod
             _up_line = _upstream_line_media_source(
                 item, dto["MediaSources"][0], base, user_id, db, api_key,
-                with_sign=bool(user_id)
-                and _gate_mod.has_active_binding(db, user_id))
+                with_sign=_gate_mod.can_issue_play_sign(db, user_id, item))
             if _up_line is not None:
                 dto["MediaSources"].append(_up_line)
                 dto["MediaSourceCount"] = len(dto["MediaSources"])
@@ -5630,7 +5628,8 @@ async def playback_info(
     # 播放门禁（2026-10-26 用户亲定硬规矩，无开关）：名下无 active 绑定
     # 的用户不发放播放地址；浏览、搜索、详情页不受影响（本函数只管下发）。
     from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user)
+    # item 传入：服务端挂载（mount://）条目由服务端中继出流，不需要用户绑定。
+    await run_db(_gate.ensure_binding_playback_allowed, db, user, None, item)
     _pt.mark("auth")
     # 按需媒体信息探测：远程文件缺 codec 时入队，后台限流探测，不阻塞播放（v2.51.0）
     try:
@@ -6257,7 +6256,7 @@ async def video_stream(
     # 播放门禁（2026-10-26 用户亲定硬规矩）：Emby token 直接调流是新播放，
     # 必须过门禁；带有效 play_sign 的请求是在消费已下发的链接，不追溯。
     from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user, request)
+    await run_db(_gate.ensure_binding_playback_allowed, db, user, request, item)
     _pt.mark("auth_playback")
     # 三层路径授权门禁（FMBY 挂载-7，#1240 落库、本 PR 接线）：放在占租约
     # 之前，拒绝的请求不占播放路数；非挂载路径 / 无授权行时放行，
@@ -7438,8 +7437,8 @@ async def upstream_item_stream(
     # 播放门禁（2026-10-26 用户亲定硬规矩）：本次调用即新下发，
     # 无条件过门禁（与 upstream_stream 同口径）。
     from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user)
     item = await run_db(_require_visible_item, db, user, item_id)
+    await run_db(_gate.ensure_binding_playback_allowed, db, user, None, item)
     _t0 = time.perf_counter()
     try:
         _url = await run_in_threadpool(

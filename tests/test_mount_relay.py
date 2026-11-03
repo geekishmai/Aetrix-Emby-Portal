@@ -149,7 +149,7 @@ def _stub_common(monkeypatch, item, target):
     # 门禁行为见 tests/test_playback_gate.py）。
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, u, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(api.play_sign, "check_referer", lambda *a, **k: None)
     monkeypatch.setattr(api, "_play_target", lambda db, it: target)
     monkeypatch.setattr(_strategy, "maybe_direct_url", lambda db, fid: None)

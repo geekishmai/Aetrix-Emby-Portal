@@ -45,7 +45,8 @@
         <div v-else-if="playStatus" class="play-status">
           <p>{{ playStatus.detail }}</p>
           <!-- 动作只给文字指引：建转存任务是商店那单的想看按钮，这里不造假按钮 -->
-          <p v-if="playStatus.action === 'play'" class="note">有你自己盘的副本，走既有播放链打开。</p>
+          <p v-if="playStatus.action === 'play' && playStatus.route === 'server_mount'" class="note">本服统一提供片源，可直接播放。</p>
+          <p v-else-if="playStatus.action === 'play'" class="note">有你自己盘的副本，走既有播放链打开。</p>
           <p v-else-if="playStatus.action === 'wait'" class="note">转存完成后就能播，先等等。</p>
           <p v-else-if="playStatus.action === 'failed'" class="note">转存失败了，不播共享原件，请重试或联系管理员。</p>
           <p v-else-if="playStatus.action === 'want'" class="note">还没有自己的副本，去想看建一个转存任务，转完就能播。</p>

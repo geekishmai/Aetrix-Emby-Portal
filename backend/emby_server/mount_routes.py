@@ -55,7 +55,7 @@ def mounted_item_file(
     # 必须过门禁；带有效 play_sign 的请求是在消费已下发的链接，不追溯。
     # 与 stream_routes.item_file 逐字同口径（360° 审计 A-007：替换版曾静默丢门禁）。
     from backend.emby_server import playback_gate as _gate
-    _gate.ensure_binding_playback_allowed(db, user, request)
+    _gate.ensure_binding_playback_allowed(db, user, request, item)
     # 首播转存门禁（与 video_stream 同口径）：该片需先转存到用户
     # 自己绑定盘且尚无 ready 副本时，不许经 File 拿到共享原件字节；
     # 已下发链接消费不追溯（play_sign 豁免与主路一致）。

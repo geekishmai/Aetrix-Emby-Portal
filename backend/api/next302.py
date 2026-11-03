@@ -176,11 +176,16 @@ def play_status(item_id: int = Query(..., ge=1),
     job = tv._latest_job(db, item.id, "user", str(user_id)) \
         if user_id is not None else None
     job_status = getattr(job, "status", None) if job is not None else None
+    # 服务端统一供片（2026-11-03）：mount:// 条目不需要用户绑定；绑定门
+    # 整体关闭时所有条目都按可播处理（与 playback_gate 的兜底开关同口径）。
+    playback_open = not playback_gate.binding_gate_enabled(db)
+    server_mount = playback_gate.is_server_mount_item(item) or playback_open
     verdict = decide_route(
         bound=bound,
         has_user_ready_copy=bool(ready),
         user_copy_stale=bool(stale) and not bool(ready),
-        user_job_status=job_status)
+        user_job_status=job_status,
+        server_mount=server_mount)
     route = verdict["route"]
     action = {
         "user_copy": "play",
@@ -190,6 +195,7 @@ def play_status(item_id: int = Query(..., ge=1),
         "quota_guide": "want",
         "no_copy_guide": "want",
         "bind_guide": "bind",
+        "server_mount": "play",
     }[route]
     obs.log_event("next302_play_status", route=route, item_id=item.id)
     return {
@@ -200,4 +206,5 @@ def play_status(item_id: int = Query(..., ge=1),
         "has_binding": bound,
         "has_user_ready_copy": bool(ready),
         "job_status": job_status,
+        "server_mount": bool(server_mount),
     }

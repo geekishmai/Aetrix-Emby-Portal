@@ -168,7 +168,7 @@ def _stub_flow(monkeypatch, item):
                         lambda db, user: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, user, r=None: None)
+        lambda *a, **k: None)
     from backend.emby_server import drive_changes
     monkeypatch.setattr(
         drive_changes, "get_token_for_drive",
