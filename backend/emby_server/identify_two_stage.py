@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -135,11 +136,107 @@ def _first_identity(*values):
     return None
 
 
-def _item_year(item) -> Optional[int]:
-    """条目年份（Frodo 按标题搜用；取不到就 None，不编年份）。"""
+#: 标题尾年份的合理区间下限：早于此的四位尾数按片名本身处理
+#: （与 applecms_sync.split_trailing_year 同口径）。
+_TITLE_YEAR_MIN = 1900
+_TRAILING_YEAR_BRACKET_RE = re.compile(r"[\(（\[]\s*(\d{4})\s*[\)）\]]\s*$")
+_TRAILING_YEAR_PLAIN_RE = re.compile(r"(\d{4})\s*$")
+
+
+def _title_trailing_year(name) -> Optional[int]:
+    """片名尾巴黏着的年份（「诅咒2025」→ 2025），解析不出返回 None。
+
+    解析口径与 applecms_sync.split_trailing_year 对齐（#1789 在同步侧
+    落的同名函数，落地后两边应收敛为一份）：只认结尾四位，括号包裹
+    （「（2026）」「[2026]」）或裸黏尾；剥后名为空、尾数前一位仍是
+    数字（更长数字串的一部分）、年份不在 1900..当前年+2 区间内
+    （如「银翼杀手2049」是片名本身），都不认。
+    """
+    text = name.strip() if isinstance(name, str) else ""
+    if not text:
+        return None
+    year_max = datetime.now().year + 2
+    match = _TRAILING_YEAR_BRACKET_RE.search(text)
+    if match:
+        clean = text[: match.start()].strip()
+        year = int(match.group(1))
+        if clean and _TITLE_YEAR_MIN <= year <= year_max:
+            return year
+        return None
+    match = _TRAILING_YEAR_PLAIN_RE.search(text)
+    if match:
+        start = match.start(1)
+        if start == 0 or text[start - 1].isdigit():
+            return None
+        clean = text[:start].strip()
+        year = int(match.group(1))
+        if clean and _TITLE_YEAR_MIN <= year <= year_max:
+            return year
+    return None
+
+
+def known_item_year(item) -> Optional[int]:
+    """条目的首要已知年份：production_year（入库时由 vod 年份落账）
+    优先，其次片名尾黏年份。都取不到返回 None——不编年份。
+
+    背景（2026-11-03 错认亲定案）：CMS 入库的 list 载荷常缺
+    vod_year，production_year 留空、年份只黏在片名尾（「诅咒2025」
+    实为 2025 年台湾片，vod detail 里 vod_year=2025），识别链此前
+    只认 production_year，年份校验整体落空，同名旧片（Cursed
+    2005，中文名正好同为《诅咒》）被直接绑上。
+    """
     year = getattr(item, "production_year", None)
     if isinstance(year, int) and year > 0:
         return year
+    return _title_trailing_year(getattr(item, "name", ""))
+
+
+def known_item_years(item) -> tuple:
+    """条目全部已知年份（去重，production_year 在前）。
+
+    片名尾年份与 production_year 互相冲突时两个都在——绑定候选与
+    任一冲突即拒（见 binding_reject_reason_for_item）：年份证据自相
+    矛盾的条目宁可不绑，留待人工/后续口径，不许挑一个顺眼的用。
+    """
+    years: list = []
+    year = getattr(item, "production_year", None)
+    if isinstance(year, int) and year > 0:
+        years.append(year)
+    tail = _title_trailing_year(getattr(item, "name", ""))
+    if tail is not None and tail not in years:
+        years.append(tail)
+    return tuple(years)
+
+
+def _item_year(item) -> Optional[int]:
+    """条目年份（Frodo 按标题搜用；取不到就 None，不编年份）。
+
+    口径已扩为 known_item_year：production_year 缺失时认片名尾黏
+    年份（2026-11-03 错认亲定案，见 known_item_year 背景）。
+    """
+    return known_item_year(item)
+
+
+def binding_reject_reason_for_item(data, kind, item) -> Optional[str]:
+    """识别落账的绑定复核收口（年份证据版）。
+
+    候选载荷逐一对条目的每个已知年份过 tmdb.binding_reject_reason
+    （全仓唯一口径，年份差 >1 年 → year_mismatch），任一冲突即拒。
+    条目年份全未知时以 None 判（只查 details_not_found /
+    kind_mismatch），与既有口径一致、不新降门槛。enrich 单段复核门
+    与两段式识别段共用本函数，不许再各自拿 production_year 裸调
+    binding_reject_reason——那正是「诅咒2025」错绑 Cursed(2005)
+    的洞：production_year 为空时年份校验被整体跳过。
+    """
+    from backend.emby_server.tmdb import binding_reject_reason
+
+    years = known_item_years(item)
+    if not years:
+        return binding_reject_reason(data, kind, None)
+    for year in years:
+        reason = binding_reject_reason(data, kind, year)
+        if reason:
+            return reason
     return None
 
 
@@ -679,11 +776,10 @@ def apply_identity(db, item, fetched: dict, tmdb_details_fetcher=None) -> Option
             elif isinstance(_fh, dict) and _fh.get("id"):
                 _det = _fh
             if _det is not None:
-                from backend.emby_server.tmdb import (
-                    binding_reject_reason as _reject_reason,
-                )
-                _reason = _reject_reason(
-                    _det, _kind, getattr(item, "production_year", None))
+                # 年份证据走收口（binding_reject_reason_for_item）：
+                # production_year 为空时还要认片名尾黏年份，不许再
+                # 裸传 production_year 让年份校验整体落空（诅咒2025 案）。
+                _reason = binding_reject_reason_for_item(_det, _kind, item)
                 if _reason == "details_not_found":
                     _reason = None  # 局部证据缺 id 不是查不到，见上方注释
                 if _reason:
