@@ -38,6 +38,26 @@ from pathlib import Path
 logger = logging.getLogger("cms_graft_worker")
 
 
+def partition_candidates(queue, existing_status: dict):
+    """按已落库状态分拣候选（断点续跑口径）：
+
+    - 无行 → todo；
+    - ``running`` → todo（上一轮进程被杀/崩溃的残留：工人单跑
+      纪律下不存在另一个活工人，running 只可能是死残留，必须
+      重处理，不许静默丢弃——第一批第二轮实证丢过 30 条）；
+    - ``repaired`` → verify_only（只补验证，不重修）；
+    - 其余（verified/skipped/failed/verify_failed）为终局，跳过。
+    """
+    todo, verify_only = [], []
+    for cand in queue:
+        status = existing_status.get(int(cand["mapping_id"]))
+        if status is None or status == "running":
+            todo.append(cand)
+        elif status == "repaired":
+            verify_only.append(cand)
+    return todo, verify_only
+
+
 def _load_verdicts(path):
     verdicts = {}
     if not path:
@@ -112,16 +132,14 @@ def main(argv=None) -> int:
         queue = cms_graft.build_candidate_queue(
             db, demoted_source_ids=up.demoted_source_ids(db),
             limit=args.pool, heat_days_n=cms_graft.heat_days(db))
-        # 已有终局结论的跳过（断点续跑口径）：verified/skipped/
-        # failed/verify_failed 不重跑；repaired 只补验证。
-        todo = []
-        verify_only = []
-        for cand in queue:
-            row = cms_graft.get_repair(db, cand["mapping_id"])
-            if row is None:
-                todo.append(cand)
-            elif row.status == "repaired":
-                verify_only.append(cand)
+        # 已有终局结论的跳过（断点续跑口径见 partition_candidates）。
+        from backend.emby_server import models as _em
+
+        existing_status = {
+            int(mid): status for mid, status in (
+                db.query(_em.CmsGraftRepair.mapping_id,
+                         _em.CmsGraftRepair.status).all())}
+        todo, verify_only = partition_candidates(queue, existing_status)
         logger.info("queue=%d todo=%d verify_only=%d limit=%d conc=%d "
                     "home_conc=%d", len(queue), len(todo),
                     len(verify_only), limit, conc, home_conc)

@@ -170,6 +170,19 @@ def test_process_pair_resolve_error_is_fetch_failed(monkeypatch):
     assert "upstream_mapping_not_found" in out["detail"]
 
 
+def test_partition_candidates_resume_semantics():
+    # 断点续跑口径（第一批实证）：running 是死残留必须重处理，
+    # 不许静默丢；repaired 只补验证；终局状态跳过。
+    from backend.emby_server.cms_graft_worker import partition_candidates
+
+    queue = [{"mapping_id": i} for i in range(1, 8)]
+    existing = {2: "running", 3: "repaired", 4: "verified",
+                5: "skipped", 6: "failed", 7: "verify_failed"}
+    todo, verify_only = partition_candidates(queue, existing)
+    assert [c["mapping_id"] for c in todo] == [1, 2]
+    assert [c["mapping_id"] for c in verify_only] == [3]
+
+
 def test_host_ok_breaker():
     assert graft.host_ok(4_000_000, 10.0) is True     # KB, load1
     assert graft.host_ok(1_000_000, 10.0) is False    # 可用内存 <1.5GB
