@@ -1222,9 +1222,10 @@ def get_stats_trend(
     current_admin: models.WebUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    """趋势统计（默认近 14 天）：新增用户 / 播放次数 / 营收 / 签到
+    """趋势统计（默认近 14 天）：新增用户 / 播放次数 / 新增入库 / 营收 / 签到
 
-    单次聚合查询后按日补零，保证折线图连续。
+    单次聚合查询后按日补零，保证折线图连续。另附 ``hourly``：最近 24 个
+    上海整点桶的播放/新增入库序列（与按日同源同定义，只换分桶粒度）。
     """
     from backend.emby_server import models as em
 
@@ -1269,6 +1270,20 @@ def get_stats_trend(
         em.PlaybackSession.start_time
     ).all()
 
+    # 新增入库（2026-11-03 仪表盘补口径，#1805 占位替换的真口径）：
+    # 入库时间 = MediaItem.date_added（UTC-naive 入库帧，与 plays 同帧），
+    # 与 _series 同一 +8h 上海日界聚合。可见性口径与全站一致：软删除行
+    # （deleted_at 非空）与合并副本（merged_into_id 非空）不计——聚合查询
+    # 上全局软删钩子下不到子查询，必须显式带条件（count_visible 同教训）。
+    # 时间范围过滤走 idx_item_added，不拉全表。
+    item_rows = db.query(
+        em.MediaItem.date_added, func.count(em.MediaItem.id)
+    ).filter(
+        em.MediaItem.date_added >= start,
+        em.MediaItem.deleted_at.is_(None),
+        em.MediaItem.merged_into_id.is_(None),
+    ).group_by(em.MediaItem.date_added).all()
+
     recharge_rows = db.query(
         models.RechargeOrder.paid_at, func.coalesce(func.sum(models.RechargeOrder.price), 0)
     ).filter(
@@ -1297,6 +1312,7 @@ def get_stats_trend(
 
     users_map = _series(user_rows)
     plays_map = _series(play_rows)
+    items_map = _series(item_rows)
     recharge_map = _series(recharge_rows)
     sub_map = _series(sub_rows)
 
@@ -1308,8 +1324,58 @@ def get_stats_trend(
             "date": key,
             "new_users": int(users_map.get(key, 0)),
             "plays": int(plays_map.get(key, 0)),
+            "new_items": int(items_map.get(key, 0)),
             "revenue": round(float(recharge_map.get(key, 0)) + float(sub_map.get(key, 0)), 2),
             "checkins": int(checkin_map.get(key, 0)),
+        })
+
+    # 24 小时序列（2026-11-03 仪表盘补口径）：与按日同源同定义，只换
+    # 分桶粒度——播放仍数 PlaybackSession.start_time、入库仍数
+    # MediaItem.date_added（同样的软删/副本排除），窗口为最近 24 个
+    # 上海整点桶（含当前未走完的整点），缺桶补零。时间戳是 UTC-naive，
+    # +8h 即上海帧；查询只取窗口内行（范围过滤），不全表分桶。
+    hour_cursor = _now.replace(minute=0, second=0, microsecond=0)
+    first_hour = hour_cursor - timedelta(hours=23)
+    win_start = first_hour - timedelta(hours=8)
+    win_end = hour_cursor + timedelta(hours=1) - timedelta(hours=8)
+
+    def _hourly(rows) -> dict:
+        out: dict = {}
+        for ts, value in rows:
+            try:
+                key = (ts + timedelta(hours=8)).replace(
+                    minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:00")
+            except Exception:  # noqa: BLE001
+                continue
+            out[key] = out.get(key, 0) + (value or 0)
+        return out
+
+    play_hour_rows = db.query(
+        em.PlaybackSession.start_time, func.count(em.PlaybackSession.id)
+    ).filter(
+        em.PlaybackSession.start_time >= win_start,
+        em.PlaybackSession.start_time < win_end,
+    ).group_by(em.PlaybackSession.start_time).all()
+
+    item_hour_rows = db.query(
+        em.MediaItem.date_added, func.count(em.MediaItem.id)
+    ).filter(
+        em.MediaItem.date_added >= win_start,
+        em.MediaItem.date_added < win_end,
+        em.MediaItem.deleted_at.is_(None),
+        em.MediaItem.merged_into_id.is_(None),
+    ).group_by(em.MediaItem.date_added).all()
+
+    play_hours = _hourly(play_hour_rows)
+    item_hours = _hourly(item_hour_rows)
+    hourly_series = []
+    for i in range(24):
+        hour = first_hour + timedelta(hours=i)
+        key = hour.strftime("%Y-%m-%d %H:00")
+        hourly_series.append({
+            "hour": key,
+            "plays": int(play_hours.get(key, 0)),
+            "new_items": int(item_hours.get(key, 0)),
         })
 
     return {
@@ -1318,8 +1384,13 @@ def get_stats_trend(
         "totals": {
             "new_users": sum(p["new_users"] for p in series),
             "plays": sum(p["plays"] for p in series),
+            "new_items": sum(p["new_items"] for p in series),
             "revenue": round(sum(p["revenue"] for p in series), 2),
             "checkins": sum(p["checkins"] for p in series),
+        },
+        "hourly": {
+            "hours": 24,
+            "series": hourly_series,
         },
     }
 
