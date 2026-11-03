@@ -18,6 +18,7 @@ import hmac
 import json
 import logging
 import os
+import http.cookiejar as cookiejar
 import re
 import threading
 import time
@@ -249,14 +250,17 @@ def _http_full(method: str, url: str, *, headers: Optional[dict] = None,
     own = client is None
     oss_timeout = httpx.Timeout(connect=30.0, read=600.0, write=600.0,
                                 pool=30.0)
-    c = client or _get_http_client()
+    # 长传输（OSS 上传/下载，read 600s）**不复用共享池**：共享池只有 4 条，
+    # 一个长传输就会长期占一条，列目录/取链会排到 PoolTimeout 并被计为错误。
+    # 每次独立 client，传输结束即关；长传输频次低，重做一次握手可接受。
+    c = client or httpx.Client(timeout=oss_timeout, follow_redirects=True)
     try:
-        resp = c.request(method, url, headers=headers or {}, data=data,
-                         timeout=oss_timeout, follow_redirects=True)
+        resp = c.request(method, url, headers=headers or {}, data=data)
     except httpx.HTTPError as exc:
-        if own and _is_connection_level_error(exc):
-            _discard_http_client(c)
         raise Pan115Error(f"115 OSS 请求失败：{exc}") from exc
+    finally:
+        if own:
+            c.close()
     if resp.status_code >= 400:
         raise Pan115Error(
             f"115 OSS 返回 HTTP {resp.status_code}："
@@ -762,12 +766,26 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_http_client_after_fork)
 
 
+class _RejectAllCookies(cookiejar.DefaultCookiePolicy):
+    """共享 client 拒收一切 Set-Cookie。
+
+    115 响应会带 Set-Cookie；共享 jar 会把 A 账号的会话 Cookie 存下来，
+    再被 B 账号的请求自动带上（跨账号串 Cookie）。Cookie 一律由调用方逐
+    请求放 headers，因此这里直接拒收。
+    """
+
+    def set_ok(self, cookie, request):   # noqa: D102 — cookiejar 协议
+        return False
+
+
 def _new_http_client():
     import httpx
 
     return httpx.Client(
         timeout=PAN115_TIMEOUT,
-        follow_redirects=False,     # 逐请求传：json/bytes/OSS 要跟随，上传不跟随
+        follow_redirects=False,     # 逐请求传：json/bytes 要跟随
+        # 不保存任何 Set-Cookie：多账号共用 client，jar 必须是空的
+        cookies=cookiejar.CookieJar(policy=_RejectAllCookies()),
         limits=httpx.Limits(max_connections=4, max_keepalive_connections=4,
                             keepalive_expiry=30.0),
     )
@@ -788,7 +806,14 @@ def _get_http_client():
 
 
 def _discard_http_client(client) -> None:
-    """连接级错误后丢弃共享客户端；只丢弃当前那一个（并发下不误杀新实例）。"""
+    """连接级错误后丢弃共享客户端；只丢弃当前那一个（并发下不误杀新实例）。
+
+    取舍：close() 会连带打断其他线程正在用这个 client 的请求（它们会拿到
+    ConnectError/ReadError）。连接级错误意味着连接池本身已坏，继续复用只
+    会扩大失败面；代价是这一瞬间的并发请求可能被误伤，由调用方按普通网络
+    错误重试/降级。不 close 而只是丢引用则会把坏连接留给下一次调用，故选择
+    立即关闭。
+    """
     global _http_client, _http_client_pid
     with _http_client_lock:
         if _http_client is not client:
@@ -1324,18 +1349,16 @@ class Pan115Client:
             raise Pan115Error("115 简单上传初始化未返回完整 OSS 参数")
         timeout = httpx.Timeout(connect=30.0, read=300.0, write=300.0,
                                 pool=30.0)
-        client = _get_http_client()
+        # 长传输（上传，read/write 300s）独立 client：不占共享池的 4 条连接。
         try:
-            resp = client.post(
-                host, data=fields,
-                files={"file": (filename, fileobj)},
-                headers={"User-Agent": self.ua,
-                         "Referer": "https://115.com/"},
-                timeout=timeout, follow_redirects=False,
-            )
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.post(
+                    host, data=fields,
+                    files={"file": (filename, fileobj)},
+                    headers={"User-Agent": self.ua,
+                             "Referer": "https://115.com/"},
+                )
         except httpx.HTTPError as exc:
-            if _is_connection_level_error(exc):
-                _discard_http_client(client)
             raise Pan115Error(f"115 简单上传请求失败：{exc}") from exc
         if resp.status_code in (401, 403):
             raise Pan115AuthError(

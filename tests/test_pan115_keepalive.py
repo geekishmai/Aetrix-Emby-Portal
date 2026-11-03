@@ -8,7 +8,8 @@
 - 同进程连续两次调用只建一次 client（连接复用）；
 - Cookie/UA 逐请求传，不进 client 级 headers（账号不串）；
 - 超时口径与 deadline 参数不变；
-- 连接池上限 4 / keepalive 30s；
+- 共享 client 拒收 Set-Cookie（A 账号的会话 Cookie 不会进 B 账号请求）；
+- 连接池上限 4 / keepalive 30s；长传输（OSS 600s/上传 300s）不占共享池；
 - fork 后按 pid 重建（不复用父进程连接）；
 - 连接级错误丢弃并重建；普通读超时不重建。
 """
@@ -48,6 +49,15 @@ class _FakeClient:
 
     def close(self):
         self.closed = True
+
+
+class _FakeCtxClient(_FakeClient):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
+        return False
 
 
 @pytest.fixture(autouse=True)
@@ -106,13 +116,25 @@ def test_timeout_passthrough_unchanged(monkeypatch):
     assert created[0].requests[0][2]["follow_redirects"] is True
 
 
-def test_http_full_uses_oss_timeout_and_shared_client(monkeypatch):
-    created = _install(monkeypatch, _FakeClient())
+def test_http_full_uses_dedicated_client_not_shared(monkeypatch):
+    """OSS 长传输（read 600s）独立 client，不占共享池的 4 条连接。"""
+    shared = _FakeClient()
+    _install(monkeypatch, shared)
+    dedicated = _FakeCtxClient()
+    init = {}
+
+    def factory(*args, **kwargs):
+        init.update(kwargs)
+        return dedicated
+
+    monkeypatch.setattr(httpx, "Client", factory)
     transfer115._http_full("GET", "https://oss.example/x")
-    kwargs = created[0].requests[0][2]
-    assert kwargs["follow_redirects"] is True
-    assert kwargs["timeout"].read == 600.0
-    assert kwargs["timeout"].write == 600.0
+    assert shared.requests == [], "长传输不应走共享 client"
+    assert len(dedicated.requests) == 1
+    assert init["follow_redirects"] is True
+    assert init["timeout"].read == 600.0
+    assert init["timeout"].write == 600.0
+    assert dedicated.closed is True, "独立 client 用完即关"
 
 
 def test_pool_limits_are_small():
@@ -158,6 +180,26 @@ def test_read_timeout_does_not_discard(monkeypatch):
         transfer115._http_json("GET", "https://webapi.115.com/a")
     assert slow.closed is False
     assert len(created) == 1
+
+
+def test_set_cookie_from_a_never_sent_to_b(monkeypatch):
+    """A 账号响应里的 Set-Cookie 不进共享 jar，也不会出现在 B 的请求头。"""
+    client = transfer115._new_http_client()
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("cookie"))
+        return httpx.Response(
+            200, headers={"Set-Cookie": "leak=1; Path=/"}, json={"state": True})
+
+    client._transport = httpx.MockTransport(handler)
+    with transfer115._http_client_lock:
+        transfer115._http_client = client
+        transfer115._http_client_pid = os.getpid()
+    transfer115._http_json("GET", "https://115.com/a", cookie="UID=A")
+    transfer115._http_json("GET", "https://115.com/b", cookie="UID=B")
+    assert seen == ["UID=A", "UID=B"]
+    assert not list(client.cookies.jar), "共享 client 不得保存任何 Set-Cookie"
 
 
 def test_http_bytes_uses_shared_client(monkeypatch):
