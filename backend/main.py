@@ -1055,6 +1055,64 @@ else:
     logger.warning("前端构建产物不存在（%s），仅提供 API 服务", _FRONTEND_DIST)
 
 
+def _iter_route_endpoints(routes):
+    """递归展开路由表，产出每个端点函数（含被 include 的子路由与挂载的子应用）"""
+    for route in routes or ():
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            # 新版 FastAPI 的 include 是惰性的（_IncludedRouter），
+            # 真端点挂在 original_router.routes 上
+            yield from _iter_route_endpoints(getattr(original_router, "routes", ()))
+            continue
+        sub_routes = getattr(route, "routes", None)
+        if sub_routes:
+            yield from _iter_route_endpoints(sub_routes)
+        sub_app = getattr(route, "app", None)
+        sub_app_routes = getattr(sub_app, "routes", None)
+        if sub_app_routes:
+            yield from _iter_route_endpoints(sub_app_routes)
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is not None:
+            yield endpoint
+
+
+def _warm_endpoint_contexts(application) -> int:
+    """替全部端点预付 FastAPI「首请求提取端点上下文」的源码读取，返回预热数。
+
+    fastapi.routing 在每个端点第一次被请求时，会在请求路径（事件循环）上同步调
+    ``_extract_endpoint_context`` → ``inspect.getsourcelines``，把端点所在文件整份
+    读进来（linecache + tokenize），按端点缓存、只付一次。大文件在忙的机器上就是
+    0.16–0.22s 的循环空洞——CI 冒烟 hot_paths 第 5.2 节反复红在此（量测窗里第一个
+    请求替全站付了 backend/api/servers.py 的首读）。导入期还没有任何请求进来，
+    在这里一次性付清，首请求就不用再替全站卡一下。FastAPI 私有 API 不可用
+    （换版本）时静默跳过：退回框架自带的「首请求现付」，不影响功能。
+    """
+    try:
+        from fastapi.routing import _extract_endpoint_context
+    except Exception:
+        return 0
+    warmed = 0
+    seen: set[int] = set()
+    for endpoint in _iter_route_endpoints(getattr(application, "routes", ())):
+        if id(endpoint) in seen:
+            continue
+        seen.add(id(endpoint))
+        try:
+            _extract_endpoint_context(endpoint)
+            warmed += 1
+        except Exception:
+            continue
+    return warmed
+
+
+try:
+    _warmed_count = _warm_endpoint_contexts(app)
+    if _warmed_count:
+        logger.info("端点上下文预热完成：%d 个端点（首请求不再现读源码）", _warmed_count)
+except Exception:
+    logger.warning("端点上下文预热失败（不影响启动，首请求会自行提取）", exc_info=True)
+
+
 if __name__ == "__main__":
     import logging
 
