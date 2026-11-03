@@ -26,9 +26,12 @@ from backend.emby_server import models as em
 
 
 def _entry(vod_id, name, year="2021"):
+    import zlib
     return {"vod_id": vod_id, "vod_name": name, "vod_year": year,
             "type_id": 2, "type_name": "动作片", "vod_serial": "0",
-            "vod_time": "2024-05-01 10:00:00"}
+            "vod_time": "2024-05-01 10:00:00",
+            "vod_douban_id": str(
+                100000 + zlib.crc32(f"{name}|{year}".encode()) % 900000)}
 
 
 CLASS_TREE = [{"type_id": 1, "type_pid": 0, "type_name": "电影"},

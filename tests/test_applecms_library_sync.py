@@ -44,6 +44,12 @@ CLASS_TREE = [
 ]
 
 
+def _fake_douban(name, year):
+    """夹具豆瓣号：按片名+年份派生，同片跨源同号（认亲汇合口径）。"""
+    import zlib
+    return str(100000 + zlib.crc32(f"{name}|{year}".encode()) % 900000)
+
+
 def _entry(vod_id, name, *, year="2021", type_id=2, serial="0",
            vod_time="2024-05-01 10:00:00"):
     return {
@@ -51,6 +57,7 @@ def _entry(vod_id, name, *, year="2021", type_id=2, serial="0",
         "type_id": type_id, "type_name": "动作片", "vod_serial": serial,
         "vod_time": vod_time, "vod_pic": "http://img.example/x.jpg",
         "vod_content": "简介文本", "vod_class": "动作",
+        "vod_douban_id": _fake_douban(name, year),
     }
 
 

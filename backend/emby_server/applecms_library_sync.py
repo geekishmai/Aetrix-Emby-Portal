@@ -34,6 +34,24 @@
   现有 enrich 工人对 ``upstream_source_id`` 非空的行自动走「只走
   TMDB」补身份分支；对不上身份的行按现行货架规矩不上架，本模块
   不做任何货架过滤。
+- 先认亲、再落库、自动汇合（2026-11-03 轻便优先整改）：建**新行**
+  前先从同步已到手的载荷（电影=list 条目/地区分流 detail 提取、
+  剧集=detail）提取源站现成身份信号——豆瓣号解析复用
+  ``applecms_identity_harvest.parse_douban_id``（仓库唯一实现），
+  落账复用 ``identify_two_stage`` 的 ``_merge_external_id`` /
+  ``_douban_binding_dict`` / ``_upsert_stage_record``（与收割单
+  同一套，不另起第二套认亲逻辑）。口径：认得出且同库已有同身份
+  行 → 新副本只挂 ``upstream_item_mappings`` 汇合、不建新行；
+  认得出且无同身份行 → 正常建行且行上带身份（external_ids 豆瓣
+  号）；新副本豆瓣号与已有行身份冲突 → 投票矛盾，不汇合不建行
+  计 ``skipped_identity_conflict``；认不出（无任何可用信号）→
+  不建正式条目行、不挂映射、不留任何残留状态，计
+  ``skipped_no_identity``，下一轮同步源站补上信号后仍可重试
+  （整条跳过式落法：最小改动面，且源站可重供、不会丢片）。
+  存量行（同步前已在库的行）重见时行为不变：仍按标题+年份/
+  映射找行、仍挂映射；其行上无身份且本轮信号到手时只填空补上。
+  剧集季/集行跟随所属 series 的认亲结果：series 认不出整树不建，
+  集行不单独漏建或误杀。
 - 去重：标题+年份键（``aggregate_key_for``），一行多映射；行的
   ``upstream_source_id`` 是先到源（主来源），其余源只挂映射。
 - 电影库（movies）：剧集形态（``vod_serial`` 解析出集数 > 1）
@@ -93,6 +111,16 @@ from backend.emby_server import applecms_backfill as abf
 from backend.emby_server import applecms_fetcher as acf
 from backend.emby_server import applecms_library as acl
 from backend.emby_server import applecms_sync as acs
+from backend.emby_server.applecms_identity_harvest import (
+    BINDING_SOURCE as CMS_DOUBAN_BINDING_SOURCE,
+    parse_douban_id,
+)
+from backend.emby_server.identify_two_stage import (
+    _douban_binding_dict,
+    _external_id_of,
+    _merge_external_id,
+    _upsert_stage_record,
+)
 from backend.emby_server import models as em
 from backend.emby_server import upstream_aggregation as agg
 from backend.emby_server import upstream_import as uimp
@@ -145,6 +173,7 @@ def _zero_stats(library_id: int) -> Dict[str, object]:
         "skipped_short_drama": 0,
         "skipped_area": 0, "skipped_quality_gun": 0,
         "skipped_quality_lowdef": 0,
+        "skipped_no_identity": 0, "skipped_identity_conflict": 0,
         "detail_errors": 0, "detail_fetches": 0,
         "dedupe_hits": 0, "errors": [], "seen_by_source": {},
         # 剧集路径计数（电影库恒 0）：集行增/存量、无直链组跳过、
@@ -287,6 +316,7 @@ def detail_harvest(detail: dict) -> Dict[str, object]:
     播放地址**（vod_play_url/vod_play_from 不进缓存、不落库）。
     """
     return {
+        "douban_id": parse_douban_id(detail) or "",
         "poster_url": str(detail.get("vod_pic") or "").strip(),
         "area": str(detail.get("vod_area") or "").strip(),
         "category_name": str(detail.get("type_name") or "").strip(),
@@ -457,6 +487,69 @@ def _entry_bucket(db: Session, source, entry: dict, vod_id: str,
         stats["detail_errors"] += 1
         return None, None
     return acl.area_bucket(harvest.get("area")), harvest
+
+
+# ---------------------------------------------------------------------------
+# 先认亲（源站现成身份信号；解析与落账全复用收割单/识别段实现）
+# ---------------------------------------------------------------------------
+
+def _signal_douban_id(entry: dict, detail: Optional[dict] = None,
+                      harvest: Optional[dict] = None) -> Optional[str]:
+    """从同步已到手的载荷里取豆瓣号信号（不为认亲新发任何请求）。
+
+    顺序：detail（剧集已拉、地区分流已拉的权威载荷）→ detail
+    提取缓存 → list 条目。解析一律走收割单的 ``parse_douban_id``
+    （合法性口径全仓唯一：纯数字、非 "0" 占位）。
+    """
+    if detail is not None:
+        found = parse_douban_id(detail)
+        if found:
+            return found
+    if harvest:
+        raw = str(harvest.get("douban_id") or "").strip()
+        if raw and raw != "0" and raw.isdigit():
+            return raw
+    return parse_douban_id(entry)
+
+
+def _find_row_by_douban(db: Session, library, douban_id: str,
+                        item_type: str):
+    """同库按 external_ids.douban 找已有行（汇合锚点）。
+
+    先用 LIKE 缩候选（external_ids 是 JSON 文本，豆瓣号为纯数字、
+    无 LIKE 通配符），再用识别段的 ``_external_id_of`` 逐字核对，
+    不靠文本匹配下结论。只认未删除、未被合并的行。
+    """
+    pattern = f'%"douban": "{douban_id}"%'
+    candidates = (
+        db.query(em.MediaItem)
+        .filter(em.MediaItem.library_id == library.id,
+                em.MediaItem.item_type == item_type,
+                em.MediaItem.external_ids.like(pattern),
+                em.MediaItem.deleted_at.is_(None),
+                em.MediaItem.merged_into_id.is_(None))
+        .order_by(em.MediaItem.id)
+        .all())
+    for cand in candidates:
+        if _external_id_of(cand, "douban") == douban_id:
+            return cand
+    return None
+
+
+def _stamp_douban_identity(db: Session, row: em.MediaItem,
+                           douban_id: str) -> None:
+    """给行落豆瓣身份：只填空缺（_merge_external_id 口径）＋段记录。
+
+    与收割单落账同一形状：证据来源记 ``cms_vod_douban_id``。
+    行上已有不同豆瓣号时 _merge_external_id 只警告不覆盖，调用方
+    须已在认亲门处把冲突拦下，这里不再判冲突。
+    """
+    before = row.external_ids
+    _merge_external_id(row, "douban", douban_id)
+    if row.external_ids != before:
+        _upsert_stage_record(
+            db, row.id, "identified",
+            _douban_binding_dict(douban_id, CMS_DOUBAN_BINDING_SOURCE))
 
 
 # ---------------------------------------------------------------------------
@@ -653,16 +746,53 @@ def _process_entry(db: Session, library, source, entry: dict,
     if row is _OTHER_LIBRARY:
         stats["skipped_other_library"] += 1
         return
+    # 先认亲：信号只取已到手载荷（list 条目 / 地区 detail 提取）。
+    douban_id = _signal_douban_id(entry, harvest=harvest)
+    via_identity = False
+    if douban_id:
+        identity_row = _find_row_by_douban(db, library, douban_id, "movie")
+        if row is not None and identity_row is not None \
+                and identity_row.id != row.id:
+            # 标题键与身份键指向不同行：身份是强证据（聚合键同序），
+            # 但标题行若已带不同豆瓣号则是投票矛盾，不许强行汇合。
+            row_douban = _external_id_of(row, "douban")
+            if row_douban and row_douban != douban_id:
+                stats["skipped_identity_conflict"] += 1
+                return
+            row = identity_row
+            via_identity = True
+        elif row is None and identity_row is not None:
+            row = identity_row
+            via_identity = True
+        if row is not None and not via_identity:
+            row_douban = _external_id_of(row, "douban")
+            if row_douban and row_douban != douban_id:
+                # 同一行被另一源给了不同豆瓣号：投票矛盾，整条跳过。
+                stats["skipped_identity_conflict"] += 1
+                return
     if row is None:
+        if not douban_id:
+            # 认不出 → 不建正式行、不挂映射、不留残留；下轮源站
+            # 补上信号后同一 vod 仍可正常重试（整条跳过式落法）。
+            stats["skipped_no_identity"] += 1
+            return
         had_poster = False
         row = _create_row(db, library, source, vod_id, record)
         run_cache[key] = row
         stats["added"] += 1
+        _stamp_douban_identity(db, row, douban_id)
         if harvest and _fill_row_from_harvest(db, row, harvest):
             db.flush()
     else:
         had_poster = bool(row.poster_path or row.primary_image_url)
-        changed = _refresh_row(db, row, record)
+        if via_identity:
+            # 身份汇合：只填空合并，绝不按新副本改已有行标题/年份。
+            changed = _fill_row_from_record(db, row, record)
+        else:
+            changed = _refresh_row(db, row, record)
+        if douban_id and not _external_id_of(row, "douban"):
+            _stamp_douban_identity(db, row, douban_id)
+            changed = True
         if harvest and _fill_row_from_harvest(db, row, harvest):
             changed = True
         if changed:
@@ -750,6 +880,31 @@ def _process_series_entry(db: Session, library, source, entry: dict,
             "applecms 剧集无直链组跳过 library_id=%s source_id=%s "
             "vod_id=%s", library.id, source.id, vod_id)
         return
+    # 先认亲（季/集跟随 series）：信号取 detail 优先、list 条目兜底。
+    douban_id = _signal_douban_id(entry, detail=detail)
+    via_identity = False
+    if douban_id:
+        identity_row = _find_row_by_douban(db, library, douban_id, "series")
+        if row is not None and identity_row is not None \
+                and identity_row.id != row.id:
+            row_douban = _external_id_of(row, "douban")
+            if row_douban and row_douban != douban_id:
+                stats["skipped_identity_conflict"] += 1
+                return
+            row = identity_row
+            via_identity = True
+        elif row is None and identity_row is not None:
+            row = identity_row
+            via_identity = True
+        if row is not None and not via_identity:
+            row_douban = _external_id_of(row, "douban")
+            if row_douban and row_douban != douban_id:
+                stats["skipped_identity_conflict"] += 1
+                return
+    if row is None and not douban_id:
+        # series 认不出 → 整树不建（季/集行不单独漏建），下轮重试。
+        stats["skipped_no_identity"] += 1
+        return
     had_poster = bool(row.poster_path or row.primary_image_url) if row is not None else False
     if row is None:
         tree = acser.ensure_series_tree(db, library, source, record,
@@ -760,8 +915,11 @@ def _process_series_entry(db: Session, library, source, entry: dict,
             run_cache[key] = row
             # 剧行与电影行同口径：list 自带资料建行即填空（集行不填）。
             _fill_row_from_record(db, row, record)
+            _stamp_douban_identity(db, row, douban_id)
     else:
-        if _refresh_row(db, row, record):
+        if via_identity:
+            stats["existing"] += 1
+        elif _refresh_row(db, row, record):
             stats["updated"] += 1
         else:
             stats["existing"] += 1
@@ -769,6 +927,8 @@ def _process_series_entry(db: Session, library, source, entry: dict,
             stats["dedupe_hits"] += 1
         tree = acser.ensure_series_tree(db, library, source, record,
                                         detail, existing_series=row)
+        if douban_id and not _external_id_of(row, "douban"):
+            _stamp_douban_identity(db, row, douban_id)
     # 剧行海报只填空：detail 的 vod_pic 优先（非凡等源 list 不带图、
     # detail 才带），detail 没有再看 list 条目；集行不单独填，
     # 取图链自会回退剧图。
@@ -1034,6 +1194,8 @@ def _write_progress(db: Session, library, stats: dict,
         "skipped_area": stats["skipped_area"],
         "skipped_quality_gun": stats["skipped_quality_gun"],
         "skipped_quality_lowdef": stats["skipped_quality_lowdef"],
+        "skipped_no_identity": stats["skipped_no_identity"],
+        "skipped_identity_conflict": stats["skipped_identity_conflict"],
         "detail_errors": stats["detail_errors"],
         "detail_fetches": stats["detail_fetches"],
         "dedupe_hits": stats["dedupe_hits"],
