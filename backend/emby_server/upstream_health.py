@@ -208,6 +208,10 @@ class SourceHealthRecord:
     last_checked_at: Optional[float] = None
     hidden_at: Optional[float] = None  # 首次翻为 Unavailable 的时刻；成功清零
     next_probe_at: float = 0.0  # <= now 即到期；0 表示从未探过、立即到期
+    # 当前连续失败串的起点时刻（PA-078 熔断跨度门）：串内第一笔失败
+    # 的时刻，成功清零；上线前攒下计数、没起点的旧记录在下一次失败
+    # 时补盖（跨度从那一刻起算，不拿缺失字段当“已持续很久”放行）。
+    first_failure_at: Optional[float] = None
 
 
 @dataclass
@@ -299,6 +303,8 @@ def apply_source_result(
     - success：状态复位 Active、计数清零、hidden_at 清空、记 last_success_at。
     - failure：计数 +1、记失败原因与时刻；计数达到阈值才翻 Unavailable
       并记 hidden_at；已是 Unavailable 时只累计、不刷新 hidden_at。
+      失败串起点 first_failure_at 在串的第一笔失败时记下（计数为 0
+      或旧记录缺起点时），串内后续失败不刷新，成功时清空。
     - unknown：只推进 last_checked_at，其余字段一律不动。
     """
     record.last_checked_at = now
@@ -307,7 +313,11 @@ def apply_source_result(
         record.consecutive_unavailable_failures = 0
         record.last_success_at = now
         record.hidden_at = None
+        record.first_failure_at = None
     elif outcome.kind == OUTCOME_FAILURE:
+        if (record.consecutive_unavailable_failures <= 0
+                or record.first_failure_at is None):
+            record.first_failure_at = now
         record.consecutive_unavailable_failures += 1
         record.last_failure_kind = outcome.failure_kind
         record.last_failure_at = now
@@ -343,6 +353,23 @@ def apply_line_result(
     elif outcome.kind == OUTCOME_FAILURE and confirmed:
         record.availability_status = LINE_UNAVAILABLE
     return record
+
+
+def reset_source_health(store: HealthStore, source_key: str) -> bool:
+    """把某源的健康记录重置为无证据状态（PA-078：手动启用清零）。
+
+    管理员手动启用一个源时调用：停用前攒下的连续失败计数若不清零，
+    源刚复活就会被真实流量再喂一次 counted 失败顶回熔断阈值再停。
+    只在已有记录时写回一份全新记录（计数 0、状态 Active、失败串
+    起点清空、next_probe_at=0 立即到期）；无记录时什么都不做——
+    清零一个不存在的计数本就是 no-op，也不为每次启用凭空造记录。
+    返回是否实际重置。存储异常由 store 实现自吞（Redis 实现
+    fail-open），本函数不另包。
+    """
+    if store.get_source(source_key) is None:
+        return False
+    store.set_source(SourceHealthRecord(source_key=source_key))
+    return True
 
 
 def next_probe_due(
@@ -466,6 +493,7 @@ def _record_to_json(record: SourceHealthRecord) -> str:
         "last_checked_at": record.last_checked_at,
         "hidden_at": record.hidden_at,
         "next_probe_at": record.next_probe_at,
+        "first_failure_at": record.first_failure_at,
     })
 
 
@@ -489,6 +517,14 @@ def _record_from_json(key: str, raw: str) -> Optional[SourceHealthRecord]:
         next_probe_at = float(data.get("next_probe_at") or 0.0)
     except (ValueError, TypeError):
         return None
+    # 失败串起点（PA-078）：旧记录没这键、值被写坏都按无起点计，
+    # 不许因为一个新字段坏掉整条记录（跨度门对无起点从严起算）。
+    try:
+        raw_first_failure = data.get("first_failure_at")
+        first_failure_at = (None if raw_first_failure is None
+                            else float(raw_first_failure))
+    except (ValueError, TypeError):
+        first_failure_at = None
     return SourceHealthRecord(
         source_key=key,
         availability_state=data.get("availability_state", STATE_ACTIVE),
@@ -499,6 +535,7 @@ def _record_from_json(key: str, raw: str) -> Optional[SourceHealthRecord]:
         last_checked_at=data.get("last_checked_at"),
         hidden_at=data.get("hidden_at"),
         next_probe_at=next_probe_at,
+        first_failure_at=first_failure_at,
     )
 
 

@@ -425,12 +425,34 @@ def _set_import_visibility(db, source_id, import_enabled: bool) -> int:
 
 
 def enable_source(db, source):
-    """启用上游源（单独动作；启用本身不探活，健康状态仍是占位值）。"""
+    """启用上游源（单独动作；启用本身不探活，健康状态仍是占位值）。
+
+    PA-078：启用同时清零该源在健康存储里的熔断失败计数——不清的
+    话，源带着停用前攒下的遗留计数复活，真实流量再喂一次 counted
+    失败就直接顶回阈值被再停（乐子 19 遗留计数 2 即此形态）。清零
+    全程 fail-open：健康存储异常只记 warning，绝不挡启用本身。
+    """
     source.enabled = True
     source.updated_at = datetime.now()
     db.flush()
+    _reset_breaker_health_count(source)
     logger.info("上游源启用 id=%s name=%r", source.id, source.name)
     return source
+
+
+def _reset_breaker_health_count(source) -> None:
+    """手动启用时清零该源的熔断/健康失败计数（PA-078，fail-open）。
+
+    健康状态机在 upstream_health（它顶层 import 本模块，故这里
+    只能懒加载，避免循环 import）；计数存储口径与点播留痕同一份
+    RedisHealthStore、同一源键 str(source.id)。
+    """
+    try:
+        from backend.emby_server import upstream_health as uh
+        uh.reset_source_health(uh.RedisHealthStore(), str(source.id))
+    except Exception:  # noqa: BLE001 — 清零失败不许打断启用，见 enable_source
+        logger.warning("上游源启用清零熔断计数异常，已忽略 source_id=%s",
+                       getattr(source, "id", None), exc_info=True)
 
 
 def disable_source(db, source):

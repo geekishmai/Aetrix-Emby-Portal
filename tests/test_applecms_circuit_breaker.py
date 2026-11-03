@@ -10,7 +10,9 @@
 - 连续失败达阈值（env APPLECMS_CIRCUIT_BREAKER_THRESHOLD，默认与
   UPSTREAM_HEALTH_FAILURE_THRESHOLD 同值 3）自动 disable_source，
   只对 applecms 型源生效；未达阈值不误停；条目不存在不记失败；
-  手动 enable 后恢复可播；
+  手动 enable 后恢复可播；（PA-078 后：真停用另有跨度门与复核门
+  两道保险，本文件在保险满足条件下钉本体机制，保险本身见
+  test_cms_breaker_insurance.py；）
 - 留痕/熔断全程 fail-open，不改变取流成功地址与失败结构化错误。
 
 全离线：detail 抓取与探活一律桩注入，健康存储用内存实现。
@@ -80,6 +82,13 @@ def _env_on(monkeypatch):
     monkeypatch.delenv("APPLECMS_PARSE_LINES_ENABLED", raising=False)
     monkeypatch.delenv("APPLECMS_CIRCUIT_BREAKER_THRESHOLD", raising=False)
     monkeypatch.delenv("UPSTREAM_HEALTH_FAILURE_THRESHOLD", raising=False)
+    # PA-078 保险满足条件下的熔断本体口径：跨度门配 0、停用前复核
+    # 恒确认已死——本文件钉的是保险之内的计数/停用机制；保险本身
+    # （跨度门、复核门、手动启用清零）由 test_cms_breaker_insurance.py
+    # 钉死。
+    monkeypatch.setenv("APPLECMS_CIRCUIT_BREAKER_MIN_SPAN_SEC", "0")
+    monkeypatch.setattr(
+        up, "_cms_breaker_recheck_confirms_dead", lambda source: True)
 
 
 def _make_source(db, name, source_type="applecms"):
