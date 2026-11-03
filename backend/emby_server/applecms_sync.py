@@ -45,6 +45,9 @@
 - CMS 条目转 ``UpstreamCatalogRecord``：``title=vod_name``、
   ``year=vod_year`` 转 int 或 None、``provider_ids`` 为空；经
   ``aggregate_sources`` 聚合后按聚合键与本地候选的标题+年份键比对。
+  记录另透传源站自带元数据（海报/地区/评分/演职员/简介等，见
+  ``cms_entry_to_record``）：不参与配对，本模块不消费，只供 CMS
+  库同步工人的合行填空。
 - 配对成功：证据固定 ``'title+year'``、置信度封顶 0.7（CMS 无外部
   身份，0.7 即上限）；剧集按本地组成员顺序每集一行，
   ``episode_index`` 组内 1 起顺序编号（不从集标题文字解析）；
@@ -78,11 +81,13 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import math
 import os
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -249,13 +254,69 @@ def _cms_year(value: Any) -> Optional[int]:
     return None
 
 
+def _cms_score(value: Any) -> Optional[float]:
+    """vod_score 转 float 或 None。
+
+    CMS 的 ``0`` / ``0.0`` 是「暂无评分」占位（实测多源如此），
+    落成 0.0 分会把没评分的片显示成 0 分，故 <=0 一律按缺失处理；
+    非法值不猜，返回 None。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return score if 0 < score <= 10 else None
+
+
+def _cms_people(value: Any) -> tuple:
+    """vod_actor / vod_director 人名串 → 去重保序元组。
+
+    分隔符各源不一（半角/全角逗号、顿号、斜杠、分号都见过），
+    统一切分；空名丢弃。上限与 TMDB 演员表同口径（前 10 个）。
+    """
+    if not value:
+        return ()
+    parts = re.split(r"[,，、/;；]", str(value))
+    out: List[str] = []
+    for part in parts:
+        name = part.strip()
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= 10:
+            break
+    return tuple(out)
+
+
+def _cms_blurb(entry: dict) -> str:
+    """简略简介：优先 ``vod_blurb``，缺时退 ``vod_content``。
+
+    ``vod_content`` 常带 HTML 标签/实体，去标签、解实体、折叠
+    空白后截断；list 负载多数源根本不带这两个字段（只有 detail
+    才有），缺了就空——同步不为采集多打 detail 请求。
+    """
+    raw = str(entry.get("vod_blurb") or "").strip()
+    if not raw:
+        raw = str(entry.get("vod_content") or "").strip()
+    if not raw:
+        return ""
+    text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+    return re.sub(r"\s+", " ", text).strip()[:2000]
+
+
 def cms_entry_to_record(
     entry: dict, *, source_id: str, category_id: str = ""
 ) -> agg.UpstreamCatalogRecord:
     """CMS 条目转聚合记录。
 
-    只读 ``vod_id`` / ``vod_name`` / ``vod_year``。``vod_play_url``
+    配对只读 ``vod_id`` / ``vod_name`` / ``vod_year``。``vod_play_url``
    （播放地址）与 ``vod_douban_id``（绝不用于配对）刻意不读。
+    另把 list 负载现成带的源站元数据（海报/地区/分类名/备注/评分/
+    演员/导演/简介）透传到记录的同名字段：**不参与配对与聚合键**，
+    只供 CMS 库同步工人合行填空（见 UpstreamCatalogRecord 透传组
+    注释）；字段在各源有无不一（实测：非凡/豆瓣 list 几乎只有名与
+    备注，量子等源才带海报/评分/演职员），缺了就空。
     """
     if not isinstance(entry, dict):
         raise ValueError("cms entry must be a dict")
@@ -274,6 +335,14 @@ def cms_entry_to_record(
         production_year=_cms_year(entry.get("vod_year")),
         tmdb_id=None,
         imdb_id=None,
+        poster_url=str(entry.get("vod_pic") or "").strip(),
+        area=str(entry.get("vod_area") or "").strip(),
+        category_name=str(entry.get("type_name") or "").strip(),
+        remarks=str(entry.get("vod_remarks") or "").strip(),
+        score=_cms_score(entry.get("vod_score")),
+        actors=_cms_people(entry.get("vod_actor")),
+        directors=_cms_people(entry.get("vod_director")),
+        blurb=_cms_blurb(entry),
     )
 
 

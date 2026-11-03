@@ -158,6 +158,21 @@ class UpstreamCatalogRecord:
     # 两字段都缺时为 None，该记录不参与水位计算（拉取方按未证明
     # 已旧处理，不据此早停）。放末尾保位置构造兼容。
     last_content_added_at: Optional[str] = None
+    # 源站自带元数据（透传组，2026-11-02 多源合并填充）：苹果 CMS
+    # list 负载里现成带的海报/地区/分类名/备注/评分/演员/导演/简介，
+    # 由 ``applecms_sync.cms_entry_to_record`` 采集。**不参与聚合键、
+    # 不参与配对**（键与证据口径不变，见 aggregate_key_for）；消费方
+    # 是 CMS 库同步工人的合行填空——只填空缺、TMDB 仍是权威（行上
+    # 以 metadata_source='applecms' 标记为暂定填充，TMDB 命中后可
+    # 盖过）。Emby 型上游记录恒为空。放末尾保位置构造兼容。
+    poster_url: str = ""
+    area: str = ""
+    category_name: str = ""
+    remarks: str = ""
+    score: Optional[float] = None
+    actors: Tuple[str, ...] = ()
+    directors: Tuple[str, ...] = ()
+    blurb: str = ""
 
 
 def _provider_id(provider_ids: object, *names: str) -> Optional[str]:
