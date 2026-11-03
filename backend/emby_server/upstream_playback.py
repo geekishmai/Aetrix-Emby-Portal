@@ -186,6 +186,15 @@ UPSTREAM_PROBE_TIMEOUT_SEC = 10.0
 #: 仍用 UPSTREAM_PROBE_TIMEOUT_SEC，一字不动。
 CMS_PLAY_PROBE_TIMEOUT_SEC = 2.5
 
+#: CMS 同 vod 多候选逐个探活的上限（运维常量）：候选是同一条映射
+#: 同一个 vod 的平行播放组（同一内容的等价线路）。2026-11-03 生产
+#: 实证：某 vod 9 个全直链组里前 6 组探活 404、第 7 组才 200，旧
+#: 实现只探首组就把整条线路判死（用户端 404 无下文）。逐候选试到
+#: 首个可播即下发；上限按生产实见组数（9 组）留余量取 10——判死
+#: 地址通常亚秒级返回，真正吃时间的只有挂死主机（单候选探活最坏
+#: 4 跳 × 2.5 秒）；全灭时按首候选的错误口径收口。
+CMS_CANDIDATE_PROBE_LIMIT = 10
+
 #: 播放探活重定向跟随上限（跳，运维常量）：上游以 302 发流是常态
 #: （Emby stream → 网盘直链 → 对象存储签名链，生产实测两跳），
 #: 但跟随必须有界且逐跳复验，见 ``_default_http_range_probe``。
@@ -1018,19 +1027,27 @@ def _play_from_cms_detail(source, detail, episode_index, *,
                           soft_pass_403: bool = True) -> str:
     """由一份 detail 解析播放地址并探活下发（CMS 分支后半段）。
 
-    解析失败（``resolve_play`` 非 ok）抛 ``_CmsEvictableFailure``
-    （status/code 与既有口径逐字一致）；探活 403：``soft_pass_403``
+    解析失败（``resolve_play_candidates`` 非 ok）抛
+    ``_CmsEvictableFailure``（status/code 与既有口径逐字一致）；
+    解析成功后在同一 vod 的候选地址间逐个探活（上限
+    ``CMS_CANDIDATE_PROBE_LIMIT`` 个）：首个探活通过（或 403 软
+    放行，见下）的候选即下发并回填画质。候选全在客户端所选映射的
+    同一个 vod 内（CMS detail 的平行播放组是同一内容的等价线路），
+    不跨映射、不跨条目、不换 MediaSource——选线口径不变，只是同一
+    条线内首组被 CDN 判死时不再整线判死。探活 403：``soft_pass_403``
     为 True 时按既有软放行下发，为 False（detail 来自缓存）时抛
-    ``_CmsEvictableFailure`` 让调用方淘汰重解析；探活 404 同样抛
-    ``_CmsEvictableFailure``，其余探活状态走
-    ``_classify_probe_status`` 原样分类。成功时后台回填画质并返回地址（回填不等 302）。
+    ``_CmsEvictableFailure`` 让调用方淘汰重解析（保持缓存口径：
+    首个候选 403 即淘汰，不逐个试缓存里的旧地址）。候选全灭时抛
+    **首候选**的错误（404 仍包装为 ``_CmsEvictableFailure``，使
+    缓存淘汰＋重取重试的既有机制仍只触发一轮；其余状态走
+    ``_classify_probe_status`` 原样分类）。
     """
     from backend.emby_server import applecms_fetcher as acf
     try:
         episode = int(episode_index)
     except (TypeError, ValueError):
         episode = -1
-    result = acf.resolve_play(
+    result = acf.resolve_play_candidates(
         detail, episode,
         parse_lines_enabled=applecms_parse_lines_enabled(),
         parse_resolver=parse_resolver)
@@ -1049,40 +1066,46 @@ def _play_from_cms_detail(source, detail, episode_index, *,
             502, "upstream_unavailable",
             messages.get(reason, "该条目暂无直链可播"),
             source_id=source.id)
-    _, _group_name, address = result
+    candidates = result[1]
     probe = _default_http_range_probe if http_probe is None else http_probe
-    probe_status, retry_after = probe(
-        address, _source_headers(source), CMS_PLAY_PROBE_TIMEOUT_SEC)
-    if probe_status == 403:
-        if not soft_pass_403:
-            raise _CmsEvictableFailure(
-                403, "upstream_forbidden",
-                "上游拒绝了本次播放，请检查该源权限",
-                source_id=source.id)
-        # 探活软放行（CMS 分支专属，2026-11-02 定案）：多家 CMS 播放
-        # CDN 对数据中心 IP 一律 403——403 只证明「服务器这个 IP 被
-        # 拒」，不证明链死；detail 刚刚现取成功（源活着、条目在、
-        # 直链组在、集序号不越界）才是可用性信号。照常下发 302，
-        # 播放器在用户家里自拉。日志只记 id 不记地址。其余状态仍走
-        # 统一分类（404 判死 / 401 凭据 / 429 额度 / 5xx 不可用）；
-        # Emby/Jellyfin 分支不经这里，403 仍判 upstream_forbidden。
-        logger.info("cms_probe_soft_pass source_id=%s", source.id)
-        _capture_cms_quality_async(source, quality_mapping_id, detail, address,
-                             http_get_text=http_get_text)
+    first_error: Optional[UpstreamPlaybackError] = None
+    for _group_name, address in candidates[:CMS_CANDIDATE_PROBE_LIMIT]:
+        probe_status, retry_after = probe(
+            address, _source_headers(source), CMS_PLAY_PROBE_TIMEOUT_SEC)
+        if probe_status == 403:
+            if not soft_pass_403:
+                raise _CmsEvictableFailure(
+                    403, "upstream_forbidden",
+                    "上游拒绝了本次播放，请检查该源权限",
+                    source_id=source.id)
+            # 探活软放行（CMS 分支专属，2026-11-02 定案）：多家 CMS 播放
+            # CDN 对数据中心 IP 一律 403——403 只证明「服务器这个 IP 被
+            # 拒」，不证明链死；detail 刚刚现取成功（源活着、条目在、
+            # 直链组在、集序号不越界）才是可用性信号。照常下发 302，
+            # 播放器在用户家里自拉。日志只记 id 不记地址。其余状态仍走
+            # 统一分类（404 判死 / 401 凭据 / 429 额度 / 5xx 不可用）；
+            # Emby/Jellyfin 分支不经这里，403 仍判 upstream_forbidden。
+            logger.info("cms_probe_soft_pass source_id=%s", source.id)
+            _capture_cms_quality_async(source, quality_mapping_id, detail,
+                                       address, http_get_text=http_get_text)
+            return address
+        try:
+            _classify_probe_status(probe_status, source.id, retry_after)
+        except UpstreamPlaybackError as exc:
+            if probe_status == 404:
+                exc = _CmsEvictableFailure(
+                    exc.status, exc.code, exc.message,
+                    source_id=exc.source_id,
+                    retry_after=exc.retry_after)
+            if first_error is None:
+                first_error = exc
+            continue
+        logger.info("上游播放解析成功 source_id=%s", source.id)
+        _capture_cms_quality_async(source, quality_mapping_id, detail,
+                                   address, http_get_text=http_get_text)
         return address
-    try:
-        _classify_probe_status(probe_status, source.id, retry_after)
-    except UpstreamPlaybackError as exc:
-        if probe_status == 404:
-            raise _CmsEvictableFailure(
-                exc.status, exc.code, exc.message,
-                source_id=exc.source_id,
-                retry_after=exc.retry_after) from exc
-        raise
-    logger.info("上游播放解析成功 source_id=%s", source.id)
-    _capture_cms_quality_async(source, quality_mapping_id, detail, address,
-                         http_get_text=http_get_text)
-    return address
+    # resolve 口径保证 candidates 非空，全灭必有首候选错误。
+    raise first_error
 
 
 def _resolve_applecms_stream(source, vod_id: str, *,
