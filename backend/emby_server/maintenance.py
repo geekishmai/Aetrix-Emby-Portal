@@ -344,6 +344,51 @@ _JANITOR_STARTED = False
 _JANITOR_LOCK = threading.Lock()
 
 
+def repair_merged_enrich_status(db, *, dry_run: bool = False) -> dict:
+    """存量修复：已合并副本的 enrich_status 收终态（2026-11-04，38 条实证）。
+
+    `_claim_batch` 的 not_merged 谓词（`merged_into_id.is_(None)`）永久排除
+    副本行——合并发生在副本已排队（pending）或已失败停泊（retrying）之后时，
+    这些行永远不会再被认领，也不会从 backlog 消失。merge_versions_worker
+    现已在合并时收终态；本函数收口**存量**数据，幂等：
+
+    - 只动 `merged_into_id IS NOT NULL` 且 `enrich_status IN ('pending','retrying')`
+      且未删除的行；
+    - 终态记 done（主条目承接了元数据），同时清认领租约/退避时间。
+
+    ``dry_run=True``：只统计不写库（运维先看规模）。返回计数 dict。
+    """
+    from sqlalchemy import func
+
+    counts = {"scanned": 0, "repaired": 0, "by_status": {}}
+    q = (db.query(em.MediaItem.enrich_status,
+                  func.count(em.MediaItem.id))
+         .filter(em.MediaItem.deleted_at.is_(None),
+                 em.MediaItem.merged_into_id.isnot(None),
+                 em.MediaItem.enrich_status.in_(("pending", "retrying")))
+         .group_by(em.MediaItem.enrich_status))
+    for status, cnt in q.all():
+        counts["by_status"][status or ""] = int(cnt)
+        counts["scanned"] += int(cnt)
+    if dry_run or counts["scanned"] == 0:
+        return counts
+    rows = (db.query(em.MediaItem)
+            .filter(em.MediaItem.deleted_at.is_(None),
+                    em.MediaItem.merged_into_id.isnot(None),
+                    em.MediaItem.enrich_status.in_(("pending", "retrying")))
+            .all())
+    for item in rows:
+        item.enrich_claimed_at = None
+        item.enrich_claim_token = None
+        item.enrich_next_retry_at = None
+        item.enrich_status = "done"
+        counts["repaired"] += 1
+    if counts["repaired"]:
+        from backend.db_retry import commit_with_retry
+        commit_with_retry(db, label="合并副本 enrich 收口")
+    return counts
+
+
 def run_startup_maintenance(scan_owner: bool = True) -> dict:
     """启动时的一次性维护（必须在 init_db 之后调用）
 
@@ -391,6 +436,15 @@ def run_startup_maintenance(scan_owner: bool = True) -> dict:
         result["item_facets_backfilled"] = facets.ensure_backfill(db)
         result["item_facets_pruned"] = facets.prune_orphans(db)
         result["item_facets_ready"] = facets.ready(db)
+        # 存量修复：已合并副本的 enrich 终态收口（幂等，2026-11-04）。
+        # 不限 scan_owner：EA 也会读 backlog，两个进程都能安全收（幂等）。
+        try:
+            _merged_repair = repair_merged_enrich_status(db)
+            # 与其它计数同口径：取 repaired 数（dict → int），失败不影响启动
+            result["merged_enrich_repaired"] = int(_merged_repair["repaired"])
+        except Exception as exc:  # noqa: BLE001 — 修复失败不阻塞启动
+            logger.warning("启动维护（合并副本 enrich 收口）失败: %s", exc)
+            db.rollback()
     except Exception as exc:  # noqa: BLE001
         logger.warning("启动维护（数据库部分）失败: %s", exc)
         db.rollback()

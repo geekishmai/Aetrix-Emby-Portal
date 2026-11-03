@@ -421,6 +421,10 @@ def merge_group(db, group: List) -> int:
         if item.merged_into_id is not None:
             continue
         item.merged_into_id = primary.id
+        # 2026-11-04（38 条 retrying 副本实证）：副本 enrich 一律收终态。
+        # _claim_batch 的 not_merged 谓词（merged_into_id.is_(None)）会永久
+        # 排除副本行——留在 pending/retrying 的副本永远不会被认领，也不会
+        # 从 backlog 消失。主条目已 done（它承接了元数据），副本行终态跟随。
         # 合并跟随（进库一期）：被合并行的上游映射迁到主记录——映射
         # 读契约只认活行，不迁线路就凭空消失；冲突保留置信高者
         # （口径见 upstream_item_mappings.migrate_mappings）。
@@ -432,6 +436,10 @@ def merge_group(db, group: List) -> int:
         # P2 修复（完美审查 C-P2-1）：被合并条目元数据走主记录，enrich 直接记 done——
         # 否则 _claim_batch 用 merged_into_id.is_(None) 永久排除它们，而 health_report
         # 的 backlog 照计 pending/enriching：永远不会被处理，也永远不会从 backlog 消失。
+        if item.enrich_status in ("pending", "retrying"):
+            item.enrich_claimed_at = None
+            item.enrich_claim_token = None
+            item.enrich_next_retry_at = None
         item.enrich_status = "done"
         merged += 1
         logger.debug(
@@ -498,6 +506,11 @@ def _follow_series_episodes(db, group: List) -> None:
             main_ep = main_map.get(key)
             if main_ep is not None and main_ep.id != ep.id:
                 ep.merged_into_id = main_ep.id
+                if ep.enrich_status in ("pending", "retrying"):
+                    ep.enrich_claimed_at = None
+                    ep.enrich_claim_token = None
+                    ep.enrich_next_retry_at = None
+                ep.enrich_status = "done"
                 # 集跟随同口径：被合并集的上游映射迁到主集（见 merge_group）。
                 from backend.emby_server import upstream_item_mappings as _uim
                 _uim.migrate_mappings(db, ep.id, main_ep.id)
