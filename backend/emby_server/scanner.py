@@ -2645,6 +2645,10 @@ def iter_scan_sources(snap: "LibrarySnapshot", library, db: Session,
                                                     prefixes),
                                        prefixes),
                         db, library.id, failed_roots, check_empty)
+                except scan_cancel.ScanCancelled:
+                    # QA AI-2 P1：取消不是挂载故障，必须穿透宽捕获——
+                    # 否则会被记进 failed_roots、扫描继续跑，取消形同虚设。
+                    raise
                 except mount_lib.MountError as exc:
                     logger.warning("媒体库「%s」的挂载「%s」不可用：%s", snap.name, src.label, exc)
                     failed_roots.append(f"{src.label}: {exc}")
@@ -3829,6 +3833,9 @@ def _mount_dir_entries(ctx: "_ScanContext", scan_file: "ScanFile", dir_rel: str)
                 return ctx.mount_dir_cache[key]
         try:
             entries = scan_file.provider.list_dir(dir_rel)
+        except scan_cancel.ScanCancelled:
+            # 同上：目录列举里的取消检查点不能被「目录读不到」吞掉。
+            raise
         except mount_lib.MountError as exc:
             logger.warning("读取挂载目录失败，跳过：%s（%s）", dir_rel, exc)
             entries = []
@@ -4022,6 +4029,10 @@ def _result(handle, default=None):
     if isinstance(handle, Future):
         try:
             return handle.result()
+        except scan_cancel.ScanCancelled:
+            # QA AI-2 P1：取消从 IO 线程池里冒出来时，不许被「预取失败」
+            # 的宽捕获吞掉（目录列举的检查点可能就在池线程里触发）。
+            raise
         except Exception as exc:  # noqa: BLE001 — 单个文件的探测/刮削失败不该拖垮整库
             logger.warning("扫描预取任务失败：%s", exc)
             return default
@@ -6274,8 +6285,33 @@ def cancel_scan(db: Session, library: emby_models.Library, stats: Optional[dict]
     stats["canceled"] = True
     stats["removal_skipped"] = True
     error = "管理员取消：已扫描部分保留，未执行清理"
+    if run_id is not None:
+        # QA AI-2 P2：条件更新只改 running 行——取消与收尾并发时，绝不能
+        # 把已经 success/partial 的流水覆盖成 cancelled（审计被改写）。
+        res = db.execute(
+            update(emby_models.ScanRun)
+            .where(emby_models.ScanRun.id == int(run_id),
+                   emby_models.ScanRun.status == SCAN_STATUS_RUNNING)
+            .values(status=SCAN_STATUS_CANCELLED,
+                    finished_at=datetime.now(),
+                    duration_ms=stats.get("duration_ms"),
+                    stats=encode_scan_stats(stats),
+                    error=error[:500]))
+        try:
+            commit_with_retry(db, label="扫描取消收尾")
+        except Exception:
+            db.rollback()
+            raise
+        if not res.rowcount:
+            logger.warning(
+                "扫描取消收尾跳过：run=%s 已不在 running（并发收尾已写终态）",
+                run_id)
+            return "already_finished"
+        try:
+            prune_library_scan_runs(db, library.id)
+        except Exception:  # noqa: BLE001 — 回收失败不影响取消结果
+            logger.warning("取消后回收扫描流水失败", exc_info=True)
     _write_scan_state(db, library, SCAN_STATUS_CANCELLED, stats, error)
-    _finish_scan_run(db, run_id, SCAN_STATUS_CANCELLED, stats, error)
     logger.info("媒体库「%s」扫描已取消（run=%s），跳过清理",
                 getattr(library, "name", "?"), run_id)
     return SCAN_STATUS_CANCELLED
@@ -6297,14 +6333,27 @@ def request_cancel_run(db: Session, library_id: int,
                .order_by(emby_models.ScanRun.id.desc())
                .first())
         if run is not None:
-            if run.cancel_requested_at is None:
-                run.cancel_requested_at = datetime.now()
-                try:
-                    commit_with_retry(db, label="写入扫描取消请求")
-                except Exception:
-                    db.rollback()
-                    raise
-            return int(run.id)
+            # 条件更新：只改仍为 running 且尚未置过标志的行（幂等；不会
+            # 把刚收尾的 success/partial 行改脏）。
+            res = db.execute(
+                update(emby_models.ScanRun)
+                .where(emby_models.ScanRun.id == int(run.id),
+                       emby_models.ScanRun.status == SCAN_STATUS_RUNNING,
+                       emby_models.ScanRun.cancel_requested_at.is_(None))
+                .values(cancel_requested_at=datetime.now()))
+            try:
+                commit_with_retry(db, label="写入扫描取消请求")
+            except Exception:
+                db.rollback()
+                raise
+            if res.rowcount:
+                return int(run.id)
+            fresh = (db.query(emby_models.ScanRun.status)
+                     .filter(emby_models.ScanRun.id == int(run.id))
+                     .first())
+            if fresh is not None and fresh[0] == SCAN_STATUS_RUNNING:
+                return int(run.id)   # 已置过标志：幂等返回
+            # 已收尾：继续等下一轮（或超时）
         if time.monotonic() >= deadline:
             return None
         time.sleep(0.2)

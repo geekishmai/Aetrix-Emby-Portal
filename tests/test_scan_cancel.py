@@ -13,6 +13,7 @@
 9. 清理边界（清理入口取消 → cancelled；进入清理后不中断由设计保证）
 """
 import os
+import types
 import uuid
 
 os.environ.setdefault("DATABASE_TYPE", "sqlite")
@@ -53,6 +54,11 @@ def _guid():
 def _library(db, name="取消测试库"):
     lib = em.Library(guid=_guid(), name=name, collection_type="movies")
     db.add(lib)
+    db.commit()
+    # ci-local.db 跨 pytest 运行持久；SQLite 会复用被删库的 id，先清掉
+    # 该 id 的历史行（否则上一轮失败残留会污染本轮计数/唯一索引）。
+    db.query(em.ScanRun).filter(em.ScanRun.library_id == lib.id).delete()
+    db.query(em.MediaItem).filter(em.MediaItem.library_id == lib.id).delete()
     db.commit()
     return lib
 
@@ -427,6 +433,135 @@ def test_endpoint_queued_returns_canceled(monkeypatch):
     db = factory()
     lib = _library(db)
     monkeypatch.setattr(scan_queue, "cancel", lambda lib_id: "canceled")
+    req = _Request()
+    out = portal.cancel_queued_scan(lib.id, req, None, db)
+    assert out["state"] == "canceled"
+    assert req.state.audit_extra["phase"] == "queued"
+    db.close()
+
+
+# ---------------- QA AI-2 P1：宽捕获不得吞取消 ----------------
+
+def test_mount_dir_entries_propagates_cancel():
+    """目录列举的宽捕获（MountError/Exception）不许吞 ScanCancelled。"""
+    class Provider:
+        def list_dir(self, rel):
+            raise scan_cancel.ScanCancelled("sidecar_page")
+    sf = types.SimpleNamespace(
+        provider=Provider(), mount_id=3, dir_rel="/a", local_dir="",
+        stored_path="mount://3/a/x.mkv")
+    ctx = scanner._ScanContext(
+        snap=types.SimpleNamespace(collection_type="movies"),
+        lib_id=1, stats={})
+    with pytest.raises(scan_cancel.ScanCancelled):
+        scanner._mount_dir_entries(ctx, sf, "/a")
+
+
+def test_iter_scan_sources_guarded_propagates_cancel(monkeypatch):
+    """_guarded 的 except Exception 不许把取消记成 failed_roots。"""
+    from backend.database import SessionLocal
+    db = SessionLocal()
+    lib = _library(db, "取消宽捕获库")
+    try:
+        src = types.SimpleNamespace(
+            kind="pan115", label="挂载", provider=object(), path="",
+            subpath="/", source_row_id=None)
+        monkeypatch.setattr(
+            scanner.mount_sources, "read_library_sources",
+            lambda db_, library: ([src], []))
+        monkeypatch.setattr(
+            scanner, "_mount_files",
+            lambda *a, **k: (_ for _ in ()).throw(
+                scan_cancel.ScanCancelled("sidecar_dir")))
+        snap = types.SimpleNamespace(
+            name="库", limit_prefixes=(), library_id=lib.id)
+        failed_roots = []
+        label, files = next(scanner.iter_scan_sources(
+            snap, lib, db, failed_roots))
+        with pytest.raises(scan_cancel.ScanCancelled):
+            list(files)
+        assert failed_roots == [], "取消不能被记成来源失败"
+    finally:
+        _cleanup(db, lib)
+        db.close()
+
+
+# ---------------- QA AI-2 P2：条件更新 ----------------
+
+def test_cancel_scan_does_not_overwrite_finished_run():
+    factory = _memory_db()
+    db = factory()
+    lib = _library(db)
+    run = _running_run(db, lib)
+    run.status = scanner.SCAN_STATUS_SUCCESS
+    db.commit()
+    out = scanner.cancel_scan(db, lib, {"added": 1}, run.id)
+    assert out == "already_finished"
+    db.refresh(run)
+    assert run.status == scanner.SCAN_STATUS_SUCCESS, "不许覆盖已收尾流水"
+    db.refresh(lib)
+    assert lib.scan_status != scanner.SCAN_STATUS_CANCELLED
+    db.close()
+
+
+# ---------------- QA AI-2 P2：kill -9 的 ACK 窗口 ----------------
+
+class _FakeRedis:
+    def __init__(self, raws):
+        self.raws = list(raws)
+        self.srem_calls = []
+
+    def lrange(self, key, start, end):
+        return list(self.raws)
+
+    def lrem(self, key, count, raw):
+        if raw in self.raws:
+            self.raws.remove(raw)
+            return 1
+        return 0
+
+    def srem(self, key, member):
+        self.srem_calls.append((key, member))
+        return 1
+
+
+def test_cancel_processing_request_acks_payload(monkeypatch):
+    import json as _json
+    from backend.emby_server import scan_queue_redis as rq
+    raw = _json.dumps({"library_id": 7, "trigger": "manual"})
+    fake = _FakeRedis([raw])
+    monkeypatch.setattr(rq, "_redis", lambda: fake)
+    removed = rq.cancel_processing_request(7)
+    assert removed == 1
+    assert fake.raws == []
+    assert fake.srem_calls, "dedup 也要清"
+
+
+def test_endpoint_confirms_processing_on_running(monkeypatch):
+    factory = _memory_db()
+    db = factory()
+    lib = _library(db)
+    _running_run(db, lib)
+    monkeypatch.setattr(scan_queue, "cancel", lambda lib_id: "running")
+    called = []
+    monkeypatch.setattr(scan_queue, "mark_processing_cancelled",
+                        lambda lib_id: called.append(lib_id))
+    out = portal.cancel_queued_scan(lib.id, _Request(), None, db)
+    assert out["state"] == "cancelling"
+    assert called == [lib.id]
+    db.close()
+
+
+# ---------------- QA AI-2 P2：dequeue→begin 窗口 ----------------
+
+def test_endpoint_rechecks_queue_after_window(monkeypatch):
+    factory = _memory_db()
+    db = factory()
+    lib = _library(db)
+    outcomes = iter(["running", "canceled"])
+    monkeypatch.setattr(scan_queue, "cancel", lambda lib_id: next(outcomes))
+    monkeypatch.setattr(scanner, "request_cancel_run",
+                        lambda db_, lib_id, wait_sec=3.0: None)
     req = _Request()
     out = portal.cancel_queued_scan(lib.id, req, None, db)
     assert out["state"] == "canceled"

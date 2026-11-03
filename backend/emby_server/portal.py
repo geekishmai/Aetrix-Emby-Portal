@@ -2671,9 +2671,20 @@ def cancel_queued_scan(lib_id: int, request: Request,
         from backend.emby_server import scanner as _scanner
         run_id = _scanner.request_cancel_run(db, lib_id)
         if run_id is None:
+            # QA AI-2 P2：dequeue→begin 窗口里 3s 没等到 running run，
+            # 再查一次队列状态——任务退回排队就按排队取消，不能只回 409。
+            outcome2 = scan_queue.cancel(lib_id)
+            if outcome2 == "canceled":
+                request.state.audit_extra = {
+                    "outcome": "canceled", "phase": "queued"}
+                return {"success": True, "library_id": lib_id,
+                        "state": "canceled"}
             raise HTTPException(
                 status_code=409,
                 detail="扫描已结束或尚未进入可取消阶段，请稍后刷新")
+        # QA AI-2 P2（kill -9 窗口）：主动确认 Redis processing payload，
+        # 避免 worker 被强杀后重启把已取消的扫描捞回来重扫。
+        scan_queue.mark_processing_cancelled(lib_id)
         request.state.audit_extra = {
             "outcome": "cancelling", "phase": "running", "run_id": run_id}
         logger.info("扫描取消请求：库 id=%s run=%s 阶段=running（操作者 id=%s）",

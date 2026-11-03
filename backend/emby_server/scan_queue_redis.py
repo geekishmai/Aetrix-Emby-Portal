@@ -119,6 +119,37 @@ def _position_of(library_id: int) -> int | None:
     return None
 
 
+def cancel_processing_request(library_id: int) -> int:
+    """把该库在 processing 里的 payload 直接确认（终态，不重放）。
+
+    worker 被 kill -9 时 finally 的 ACK 不执行；取消端点必须主动清掉
+    processing，否则重启 ``recover_processing_queue`` 会把已取消的扫描
+    捞回来重扫（新 run 没有取消标志，取消意图丢失）。只删 processing
+    与 dedup；正在跑的 worker 收尾时 ACK 找不到 payload 也是安全的。
+    """
+    r = _redis()
+    if r is None:
+        return 0
+    library_id = int(library_id)
+    removed = 0
+    try:
+        for raw in r.lrange(REDIS_SCAN_PROCESSING_KEY, 0, -1):
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            if int(data.get("library_id", -1)) == library_id:
+                removed += int(r.lrem(REDIS_SCAN_PROCESSING_KEY, 1, raw) or 0)
+        r.srem(REDIS_SCAN_DEDUP_KEY, library_id)
+        if removed:
+            logger.info("取消已确认 Redis processing：库 id=%s，清理 %d 个 payload",
+                        library_id, removed)
+    except Exception as e:
+        logger.warning("取消确认 Redis processing 失败：库 id=%s: %s",
+                       library_id, e)
+    return removed
+
+
 def cancel_scan_request(library_id: int) -> str:
     """API 进程：从 Redis 队列取消排队中的扫描
 

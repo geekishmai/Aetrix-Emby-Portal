@@ -1784,6 +1784,9 @@ class RemoteMount(MountProvider):
                     rel, depth = fut_to_dir[fut]
                     try:
                         entries = fut.result()
+                    except scan_cancel.ScanCancelled:
+                        # 取消必须穿透「单个子目录失败」的宽捕获。
+                        raise
                     except Exception as e:  # noqa: BLE001 — 单个子目录失败不中断整库，统一收集后上报
                         logger.warning("%s 并行列目录失败 %s: %s", self.what, rel, e)
                         walk_errors.append(f"{rel}: {e}")

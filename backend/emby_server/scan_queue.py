@@ -453,6 +453,22 @@ def cancel(library_id: int) -> str:
     return "canceled"
 
 
+def mark_processing_cancelled(library_id: int) -> int:
+    """取消端点调用：把该库在 Redis processing 里的 payload 确认掉。
+
+    仅 Redis 桥接模式（API 角色）生效；单体模式没有 processing 队列。
+    异常内部消化：确认失败不影响取消标志本身（run 级 flag 已落库）。
+    """
+    try:
+        from backend.emby_server import scan_queue_redis as _rq
+        if _rq.is_redis_mode():
+            return _rq.cancel_processing_request(library_id)
+    except Exception:  # noqa: BLE001 — 确认失败不阻断取消
+        logger.warning("取消确认 Redis processing 失败（库 id=%s）",
+                       library_id, exc_info=True)
+    return 0
+
+
 def is_busy(library_id: int) -> bool:
     # 后端拆分：API 进程查 Redis 去重集合
     if AETRIX_ROLE == "api":
