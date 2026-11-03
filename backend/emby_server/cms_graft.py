@@ -1254,7 +1254,7 @@ def process_pair(db, dirty, sibling, *, mouth, stats=None):
 
         if isinstance(exc, UpstreamPlaybackError):
             return {"status": "failed", "reason": "fetch_failed",
-                    "detail": f"resolve {exc.error_code}"}
+                    "detail": f"resolve {exc.code}"}
         logger.warning("cms_graft process_pair error mapping=%s",
                        dirty.id, exc_info=True)
         return {"status": "failed", "reason": "process_error",
