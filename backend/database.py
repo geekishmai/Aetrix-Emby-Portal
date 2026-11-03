@@ -317,6 +317,37 @@ def _make_redis_client() -> "redis.Redis":
     )
 
 
+def make_redis_subscriber_client() -> Optional["redis.Redis"]:
+    """独立订阅客户端（pubsub 专用）：**不参与熔断计数**（2026-11-03）。
+
+    为什么不能复用 ``get_redis()``：
+    - 主客户端带 ``socket_timeout=REDIS_SOCKET_TIMEOUT``（默认 1s）。pubsub
+      的 ``listen()`` 是阻塞读，1s 无消息就抛 ``TimeoutError`` → 订阅线程
+      每轮「断开-重连」，日志刷屏且每轮泄漏一个未关闭的 pubsub 连接；
+    - 连接池被泄漏的连接占满后，主客户端的普通命令开始失败 →
+      ``redis_call`` 连续记失败 → 熔断器打开（REDIS_BREAKER_FAILURES=3）→
+      ``get_redis()`` 返回 None → pan115_guard 退回进程内限速；三进程各自
+      独立桶叠加（实测 ~4.4 次/秒，超过账号级预算）。
+    - 独立客户端 + ``socket_timeout=None``（阻塞读永不超时）+ 独立小连接池
+      （2 条）把订阅面与主链路彻底隔离；订阅失败只在本地重连，绝不调用
+      ``record_failure``，不推进熔断器。
+    """
+    if not REDIS_ENABLED:
+        return None
+    try:
+        return redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=REDIS_CONNECT_TIMEOUT,
+            socket_timeout=None,      # 订阅是阻塞读，不能有读超时
+            retry_on_timeout=False,
+            health_check_interval=0,
+            max_connections=2,
+        )
+    except Exception:  # noqa: BLE001 — 构造失败按不可用处理，订阅线程会重试
+        return None
+
+
 _reconnect_started = False
 _reconnect_lock = _threading.Lock()
 

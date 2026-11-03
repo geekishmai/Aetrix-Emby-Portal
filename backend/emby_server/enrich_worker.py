@@ -3313,7 +3313,7 @@ def _claim_group_atomic(db, q, now) -> list:
     try:
         db.query(em.MediaItem).filter(
             em.MediaItem.id.in_(cand_ids),
-            em.MediaItem.enrich_status == "pending",
+            em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
         ).update(
             {"enrich_status": "enriching",
              "enrich_claimed_at": now,  # claim 租约：janitor 据此回收僵尸行
@@ -3399,6 +3399,18 @@ def enrich_episode_quota_status(db) -> dict:
         "episode_allowed_now": (not mode) or (not night_enabled)
         or in_window or used < effective,
     }
+
+
+#: 可认领状态（2026-11-03 排查）：pending + 外部停泊的 retrying。
+#: 现网有 244 行 enrich_status='retrying'（代码从不写这个值，全仓只有计数器；
+#: 系人工 SQL 停泊到次日 18:00）。旧抢单谓词只认 'pending'，这批行即使到期
+#: 也永远不会被领取；纳入后按 next_retry_at 到期自动恢复。
+#:
+#: 语义确认（QA AE-3③）：retrying 且 next_retry_at 为空 = **立即到期**，
+#: 会被下一轮抢单直接领取——这是期望行为（与 pending+NULL 同口径：
+#: NULL 表示「无退避等待」）。停泊行必须显式写 next_retry_at 才会被推迟；
+#: 现网库 3 的停泊行均带 next_retry_at（次日 18:00），不受影响。
+_CLAIMABLE_STATUSES = ("pending", "retrying")
 
 
 def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
@@ -3505,7 +3517,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
     groups_q = (db.query(group_key.label("g"),
                          _func.max(em.MediaItem.date_added).label("latest"),
                          em.MediaItem.library_id.label("lib"))
-                .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+                .filter(em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
+                        due, unlocked,
                         not_episode, not_merged, not_ban_backfill, queue_pred)
                 # library_id 必须显式入组（PG 要求）：组键是全局 id，
                 # 同一组恒在同一库内，(group_key, library_id) 与 group_key 等价。
@@ -3517,7 +3530,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
         if len(claimed) >= limit:
             break
         q = (db.query(em.MediaItem)
-             .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+             .filter(em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
+                     due, unlocked,
                      not_episode, not_merged, not_ban_backfill, queue_pred,
                      group_key == gid)
              .order_by(

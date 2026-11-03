@@ -312,6 +312,20 @@ class MountCooldownError(MountError):
         self.retry_after = retry_after
 
 
+class MountTimeoutError(MountError):
+    """宿主调用截止时刻已过（Q&A AD-1）。
+
+    **不是冷却、不是凭据失效、也不是「源站不可用」**：115 账号可能完全
+    健康，只是本次调用被宿主/中继按截止时刻丢弃（未打到 115）。展示口径
+    「本次请求超时已丢弃，可重试」；不得触发冷却文案，也不得据此跳过
+    直链失效清理（Z-2 门只认冷却）。
+    """
+
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class MountAuthError(MountError):
     """挂载的凭据失效（Cookie / 令牌 / 密码）——调用方应提示重新配置"""
 
@@ -1371,6 +1385,9 @@ class Pan115Mount(MountProvider):
         from backend.emby_server import pan115_guard
         if isinstance(exc, pan115_guard.Pan115CooldownError):
             return MountCooldownError(str(exc), getattr(exc, "retry_after", None))
+        # QA AD-1：截止时刻已过 → 独立 MountTimeoutError（不是冷却）。
+        if isinstance(exc, pan115_guard.Pan115DeadlineExceeded):
+            return MountTimeoutError(str(exc), getattr(exc, "retry_after", None))
         return MountError(str(exc))
 
     # ---- 目录 ----
@@ -1886,6 +1903,11 @@ def test_mount(mount, db: Optional[Session] = None, library=None) -> dict:
         # 面板显示「账号限速冷却中，约 X 分钟后自动恢复」，禁止引导重配 Cookie。
         return {"ok": False, "message": str(exc), "auth_error": False,
                 "cooldown": True,
+                "retry_after": getattr(exc, "retry_after", None)}
+    except MountTimeoutError as exc:
+        # QA AD-1：宿主调用超时（请求已丢弃）——不是冷却、不是凭据失效。
+        return {"ok": False, "message": str(exc), "auth_error": False,
+                "timeout": True,
                 "retry_after": getattr(exc, "retry_after", None)}
     except MountError as exc:
         return {"ok": False, "message": str(exc), "auth_error": False}

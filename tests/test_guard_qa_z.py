@@ -39,7 +39,7 @@ def test_call_passthrough_guard_cooldown_not_pan115error(monkeypatch):
     client.ua = ""
     called = {}
 
-    def fake_before(cookie, kind):
+    def fake_before(cookie, kind, deadline=None):
         called["kind"] = kind
         raise pg.Pan115CooldownError("测试冷却", 1234.0)
 

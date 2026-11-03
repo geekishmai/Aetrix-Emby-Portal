@@ -44,6 +44,7 @@ import json
 import os
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
 
 # ---- 协议名（照抄 FMBY，不许改写） ----
@@ -125,6 +126,7 @@ ERROR_CODES: dict[str, int] = {
     "not_found": -32011,
     "cookie_expired": -32012,
     "throttled": -32016,
+    "deadline_exceeded": -32017,
     "remote_unavailable": -32013,
     "not_implemented": -32014,
     "timeout": -32015,
@@ -144,7 +146,13 @@ class ProviderRuntimeError(RuntimeError):
         self.retry_after = retry_after
 
     def as_error_dict(self) -> dict:
-        return {"code": self.code, "kind": self.kind, "message": str(self)}
+        # QA AD-3：retry_after 必须随错误信封跨进程传递——否则宿主侧
+        # MountCooldownError(retry_after=None)、api.py 的 Retry-After 头
+        # 永远不下发，Z-1 的「503+Retry-After」承诺在 sidecar 路径上不成立。
+        out = {"code": self.code, "kind": self.kind, "message": str(self)}
+        if self.retry_after is not None:
+            out["retry_after"] = float(self.retry_after)
+        return out
 
 
 def error_from_dict(data: dict) -> ProviderRuntimeError:
@@ -152,7 +160,38 @@ def error_from_dict(data: dict) -> ProviderRuntimeError:
     kind = str((data or {}).get("kind") or "internal")
     if kind not in ERROR_CODES:
         kind = "internal"
-    return ProviderRuntimeError(kind, str((data or {}).get("message") or kind))
+    retry_after = None
+    raw_ra = (data or {}).get("retry_after")
+    if raw_ra is not None:
+        try:
+            retry_after = max(0.0, float(raw_ra))
+        except (TypeError, ValueError):
+            retry_after = None
+    return ProviderRuntimeError(kind, str((data or {}).get("message") or kind),
+                                retry_after=retry_after)
+
+
+_DEADLINE_SIG_CACHE: dict[tuple, bool] = {}
+
+
+def _handler_accepts_deadline(handler, method: str, fn) -> bool:
+    """handler 方法是否显式接受 ``deadline`` 形参（签名探测，QA AD-2）。
+
+    按 (handler 类型, 方法名) 缓存——同一 sidecar 进程内签名不会变。
+    探测失败（内建函数/装饰器签名不可读）按「不接受」处理：宁可少传
+    一个可选参数，也不冒重调风险。
+    """
+    key = (type(handler), method)
+    hit = _DEADLINE_SIG_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        import inspect as _inspect
+        accepted = "deadline" in _inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        accepted = False
+    _DEADLINE_SIG_CACHE[key] = accepted
+    return accepted
 
 
 def build_manifest(provider: str, socket_path: str | None = None) -> dict:
@@ -232,7 +271,10 @@ class ProviderRuntimeClient:
     def call(self, method: str, params: dict | None = None) -> object:
         self._next_id += 1
         req = {"jsonrpc": "2.0", "id": self._next_id, "method": method,
-               "params": params or {}}
+               "params": params or {},
+               # 首扫 partial 修法②（QA AD-3 墙钟前提）：宿主与 sidecar 同容器
+               # 同内核时钟，time.time() 绝对值可比；跨主机部署不适用。
+               "deadline": time.time() + self.timeout_sec}
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(self.timeout_sec)
@@ -382,9 +424,17 @@ class ProviderRuntimeServer:
             raise ProviderRuntimeError("session_unknown", f"未知会话：{session_id!r}")
         return session
 
-    def _dispatch(self, method: str, params: dict) -> object:
+    def _dispatch(self, method: str, params: dict,
+                  deadline: float | None = None) -> object:
         if not isinstance(params, dict):
             raise ProviderRuntimeError("invalid_request", "params 不是对象")
+        # 修法②（QA AD-1）：宿主截止时刻已过 → 独立 kind ``deadline_exceeded``。
+        # **不是冷却**：账号可能完全健康，只是本次请求被丢弃；上层不得按
+        # throttled 展示、不得据此跳过直链失效清理（Z-2 门只认冷却）。
+        if deadline is not None and time.time() > deadline:
+            raise ProviderRuntimeError(
+                "deadline_exceeded",
+                "宿主调用超时，本次请求已丢弃（未打到 115）")
         if method == "manifest":
             return build_manifest(self.provider, self.socket_path)
         handler = self.handler
@@ -428,16 +478,22 @@ class ProviderRuntimeServer:
             fn = getattr(handler, method, None)
             if not callable(fn):
                 raise ProviderRuntimeError("not_implemented", f"handler 未实现 {method}")
+            # 修法②（QA AD-2）：**先探测签名**再决定是否传 deadline，绝不靠
+            # TypeError 猜——handler 内部抛出的 TypeError 若恰好含 "deadline"
+            # 字样会被误判为「旧签名」，重调一次 → 同一请求打两次 115。
+            _kw = ({"deadline": deadline}
+                   if (deadline is not None
+                       and _handler_accepts_deadline(handler, method, fn)) else {})
             if method == "list_page":
                 return fn(session, params.get("path") or "/",
-                          params.get("page_token"), params.get("page_size"))
+                          params.get("page_token"), params.get("page_size"), **_kw)
             if method == "stat":
                 return fn(session, params.get("path") or "/")
             if method in ("open_range", "resolve_display_asset"):
                 return fn(session, params.get("path") or "/",
-                          params.get("byte_offset", 0), params.get("byte_length"))
+                          params.get("byte_offset", 0), params.get("byte_length"), **_kw)
             if method in ("resolve_play_target",):
-                return fn(session, params.get("path") or "/")
+                return fn(session, params.get("path") or "/", **_kw)
             if method == "health":
                 return fn(session)
             raise ProviderRuntimeError("unknown_method", f"未分发的方法：{method}")
@@ -467,10 +523,17 @@ class ProviderRuntimeServer:
                 conn.sendall(json.dumps(resp).encode("utf-8"))
                 return
             req_id = req.get("id") if isinstance(req, dict) else None
+            deadline = None
+            if isinstance(req, dict):
+                try:
+                    deadline = float(req.get("deadline"))
+                except (TypeError, ValueError):
+                    deadline = None  # 老宿主没有 deadline 字段：保持原行为
             try:
                 if not isinstance(req, dict):
                     raise ProviderRuntimeError("invalid_request", "请求不是对象")
-                result = self._dispatch(str(req.get("method") or ""), req.get("params") or {})
+                result = self._dispatch(str(req.get("method") or ""),
+                                        req.get("params") or {}, deadline=deadline)
                 resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
             except ProviderRuntimeError as exc:
                 resp = {"jsonrpc": "2.0", "id": req_id, "error": exc.as_error_dict()}

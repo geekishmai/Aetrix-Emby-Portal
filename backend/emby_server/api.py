@@ -5468,6 +5468,15 @@ def _play_target(db: Session, item: em.MediaItem, *, variant=None):
         _headers = {"Retry-After": str(max(1, int(_ra)))} if _ra else None
         raise HTTPException(status_code=503, detail=str(exc),
                             headers=_headers) from exc
+    except mount_lib.MountTimeoutError as exc:
+        # QA AD-1：宿主调用截止已过（请求被丢弃、未打到 115）——
+        # 独立展示，**不是冷却**（不显示「账号冷却中」、不下发冷却语义头）；
+        # 客户端可立即重试（下一次是新请求、新截止时刻）。
+        _note_play_start_safe(
+            item, method="resolve", variant=variant, result="error",
+            error_kind="timeout",
+            resolve_ms=int((time.perf_counter() - _evt_t0) * 1000))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except mount_lib.MountError as exc:
         _note_play_start_safe(
             item, method="resolve", variant=variant, result="error",
