@@ -376,3 +376,42 @@ def test_queue_heat_order_and_demote_only(seed):
         assert seed["hot_clean"] not in ids      # 只收降权源
     finally:
         db.close()
+
+
+def test_queue_excludes_disabled_sources(seed):
+    # 停用中的源 resolve 必 not_found，不许进队列白跑
+    # （第一批实证：无尽停用期间 11 条全灭）。
+    db = SessionLocal()
+    try:
+        src = db.query(em.UpstreamSource).get(SRC_DIRTY)
+        src.enabled = False
+        db.commit()
+        queue = graft.build_candidate_queue(
+            db, demoted_source_ids={SRC_DIRTY}, limit=10)
+        assert queue == []
+    finally:
+        src = db.query(em.UpstreamSource).get(SRC_DIRTY)
+        src.enabled = True
+        db.commit()
+        db.close()
+
+
+def test_playlist_not_m3u8_rejected(monkeypatch):
+    # 源站把 HTML 页当清单回 → 入口就拦（第一批实证 rc=3 乱码段）。
+    monkeypatch.setattr(
+        graft, "fetch_with_route",
+        lambda url, headers, **kw: b"<!DOCTYPE html><html>verify</html>")
+    with pytest.raises(graft.FetchError, match="playlist_not_m3u8"):
+        graft.fetch_media_playlist_text(
+            "https://x/list.m3u8", {}, source_id=1, db=None)
+
+
+def test_segment_not_ts_rejected(monkeypatch, tmp_path):
+    # 段内容不是 TS/fMP4（HTML 错误页）→ 门口拦下，不进解码。
+    monkeypatch.setattr(
+        graft, "fetch_with_route",
+        lambda url, headers, **kw: b"<html>404</html>")
+    with pytest.raises(graft.FetchError, match="segment_not_ts"):
+        graft._download_segments(
+            [(5.0, "https://x/seg0.ts")], {}, source_id=1, db=None,
+            stats=None, work_dir=tmp_path, prefix="d", cover_sec=5.0)
