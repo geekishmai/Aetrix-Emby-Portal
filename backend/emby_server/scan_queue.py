@@ -1074,23 +1074,34 @@ def _run_task(task: ScanTask) -> None:
             task.error = "媒体库已被删除"
             return
         scan_stats = scan_library_sync(db, library, task.snapshot, trigger=task.trigger)
-        task.state = STATE_DONE
-        task.result = (library.scan_status or "success")
-        # 新片入库通知：只在成功/部分成功且本轮有新增时触发。
-        # maybe_notify_new_media 只是起一个 daemon 线程就返回，TG 投递再慢
-        # 也不会拖住扫描收尾；通知内部用独立 Session，不碰扫描的 Session。
-        if task.result in ("success", "partial"):
-            try:
-                from backend.emby_server import new_media_notify  # 延迟导入，见模块 docstring
+        if (scan_stats or {}).get("canceled"):
+            # 运行中取消（2026-11-03）：终态是 canceled，不是 failed/done；
+            # 运行中被合并进来的补扫范围也不许自动入队——管理员刚停了这一轮。
+            task.state = STATE_CANCELED
+            task.result = "cancelled"
+            task.error = "管理员取消"
+            task.pending_rescan_snapshot = None
+            task.pending_rescan_trigger = None
+            logger.info("扫描取消收尾：库 id=%s（丢弃运行中登记的补扫快照）",
+                        task.library_id)
+        else:
+            task.state = STATE_DONE
+            task.result = (library.scan_status or "success")
+            # 新片入库通知：只在成功/部分成功且本轮有新增时触发。
+            # maybe_notify_new_media 只是起一个 daemon 线程就返回，TG 投递再慢
+            # 也不会拖住扫描收尾；通知内部用独立 Session，不碰扫描的 Session。
+            if task.result in ("success", "partial"):
+                try:
+                    from backend.emby_server import new_media_notify  # 延迟导入，见模块 docstring
 
-                new_media_notify.maybe_notify_new_media(
-                    library_id=task.library_id,
-                    library_name=task.name,
-                    started_at=task.started_at,
-                    added_count=(scan_stats or {}).get("added", 0),
-                )
-            except Exception:  # noqa: BLE001 — 通知入口本身异常也不能影响扫描
-                logger.warning("新片入库通知入口异常（库 id=%s）", task.library_id, exc_info=True)
+                    new_media_notify.maybe_notify_new_media(
+                        library_id=task.library_id,
+                        library_name=task.name,
+                        started_at=task.started_at,
+                        added_count=(scan_stats or {}).get("added", 0),
+                    )
+                except Exception:  # noqa: BLE001 — 通知入口本身异常也不能影响扫描
+                    logger.warning("新片入库通知入口异常（库 id=%s）", task.library_id, exc_info=True)
     except Exception as exc:  # noqa: BLE001 — 后台线程的异常必须落到队列状态里
         # 诊断字段：线程名 + Session id，用于定位 Session 跨线程问题
         # （logger.exception 自带 traceback，级别为 error）

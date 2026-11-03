@@ -61,6 +61,7 @@ from sqlalchemy.orm import Session
 
 from backend.emby_server import disc_filter
 from backend.emby_server import models as em
+from backend.emby_server import scan_cancel
 from backend.emby_server.cpu_budget import capped_workers as _capped_workers
 # 远程 IO 计数与「扫描会话」标记（只依赖标准库，不会形成循环导入）
 from backend.emby_server import scan_progress as progress
@@ -1192,6 +1193,7 @@ class LocalMount(MountProvider):
             topdown=True,
             onerror=_onerr,
         ):
+            scan_cancel.checkpoint("local_dir")
             _dirnames[:] = [
                 d for d in _dirnames if not disc_filter.is_disc_subtree_dir(d)
             ]
@@ -1440,6 +1442,7 @@ class Pan115Mount(MountProvider):
         stack: list[tuple[str, str]] = [(root, self._cid_of(root))]
         seen: set[str] = set()
         while stack:
+            scan_cancel.checkpoint("mount_dir")
             rel, cid = stack.pop()
             if cid in seen and cid != self.root_cid:
                 continue  # 防目录环（115 正常不会出现，但扫描不能因此死循环）
@@ -1771,6 +1774,7 @@ class RemoteMount(MountProvider):
         walk_errors: list[str] = []
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="walk") as pool:
             while current:
+                scan_cancel.checkpoint("remote_level")
                 fut_to_dir = {
                     pool.submit(self._entries, rel): (rel, depth)
                     for rel, depth in current

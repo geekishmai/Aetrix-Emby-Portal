@@ -38,6 +38,7 @@ from typing import Iterator, Optional
 logger = logging.getLogger(__name__)
 
 from backend.emby_server import disc_filter
+from backend.emby_server import scan_cancel
 from backend.emby_server.mounts import (
     MountEntry,
     MountError,
@@ -190,6 +191,7 @@ class SidecarMountProvider(MountProvider):
         """单页列举：3 次尝试（0.5s/1s 退避）；全失败返回 None（调用方标记 partial）。"""
         last_exc = None
         for attempt in range(3):
+            scan_cancel.checkpoint("sidecar_page")
             try:
                 return self.client.list_page(self.session_id, rel, token)
             except ProviderRuntimeError as exc:
@@ -205,6 +207,7 @@ class SidecarMountProvider(MountProvider):
         seen: set[str] = set()
         partial: list[str] = []
         while stack:
+            scan_cancel.checkpoint("sidecar_dir")
             rel = stack.pop()
             if rel in seen:
                 continue

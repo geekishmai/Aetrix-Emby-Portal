@@ -2650,18 +2650,37 @@ def scan_queue_snapshot(staff: models.WebUser = Depends(require_staff), db: Sess
 
 
 @admin_emby_router.delete("/scan-queue/{lib_id}")
-def cancel_queued_scan(lib_id: int, staff: models.WebUser = Depends(require_staff)):
-    """取消一个**还在排队**的扫描（正在跑的不能取消：停了会留下半个库的状态）
+def cancel_queued_scan(lib_id: int, request: Request,
+                       staff: models.WebUser = Depends(require_staff),
+                       db: Session = Depends(get_db)):
+    """取消扫描：排队中直接移除；运行中写 run 级取消标志（协作式停止）。
 
-    写操作审计（v2.30.0）由 `emby_server/audit.py` 的中间件统一记录，
-    这里不再各自写一行 `_audit(...)`：端点会新增，而「记得补审计」不是一种机制。
+    运行中不再返回 409：返回 ``state=cancelling``，worker 在下一个检查点
+    （每目录/每页/每批，探针 2s 轮询）退出；已发出的 115 列目录请求不中断，
+    所以最坏延迟 ≈ 一次请求超时（列目录 20s）+ 2s。清理阶段一旦开始不中途停，
+    那时取消会返回 409「已结束或尚未进入可取消阶段」。
+
+    写操作审计（v2.30.0）由 `emby_server/audit.py` 的中间件统一记录；
+    端点通过 ``request.state.audit_extra`` 补 outcome / run_id / phase。
     """
     outcome = scan_queue.cancel(lib_id)
+    if outcome == "canceled":
+        request.state.audit_extra = {"outcome": "canceled", "phase": "queued"}
+        return {"success": True, "library_id": lib_id, "state": "canceled"}
     if outcome == "running":
-        raise HTTPException(status_code=409, detail="该媒体库正在扫描中，无法取消（请等它跑完）")
-    if outcome == "missing":
-        raise HTTPException(status_code=404, detail="该媒体库不在扫描队列里")
-    return {"success": True, "library_id": lib_id}
+        from backend.emby_server import scanner as _scanner
+        run_id = _scanner.request_cancel_run(db, lib_id)
+        if run_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="扫描已结束或尚未进入可取消阶段，请稍后刷新")
+        request.state.audit_extra = {
+            "outcome": "cancelling", "phase": "running", "run_id": run_id}
+        logger.info("扫描取消请求：库 id=%s run=%s 阶段=running（操作者 id=%s）",
+                    lib_id, run_id, getattr(staff, "id", "?"))
+        return {"success": True, "library_id": lib_id,
+                "state": "cancelling", "run_id": run_id}
+    raise HTTPException(status_code=404, detail="该媒体库不在扫描队列里")
 
 
 @admin_emby_router.post("/libraries/virtual")

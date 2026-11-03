@@ -129,8 +129,20 @@ def cancel_scan_request(library_id: int) -> str:
         return "missing"
     library_id = int(library_id)
     try:
-        # worker 消费时会先从 dedup 集合删除；如果 dedup 里没有，说明已在跑或不在队列
+        # dedup 只在排队时存在：worker 取走执行时会从 dedup 删除，任务此时在
+        # processing 里。dedup 没有 ≠ 不存在——先查 processing，运行中要返回
+        # "running"（由 API 写 run 级取消标志），不能误报 missing。
         if not r.sismember(REDIS_SCAN_DEDUP_KEY, library_id):
+            try:
+                for raw in r.lrange(REDIS_SCAN_PROCESSING_KEY, 0, -1):
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        continue
+                    if int(data.get("library_id", -1)) == library_id:
+                        return "running"
+            except Exception as e:
+                logger.warning(f"查询 Redis processing 失败：{e}")
             return "missing"
         # 从 list 里删除该库的所有排队项
         items = r.lrange(REDIS_SCAN_QUEUE_KEY, 0, -1)
