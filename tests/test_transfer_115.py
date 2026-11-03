@@ -485,7 +485,7 @@ class _FakeOSSClient:
     def __exit__(self, *exc):
         return False
 
-    def post(self, url, data=None, files=None, headers=None):
+    def post(self, url, data=None, files=None, headers=None, **kwargs):
         name, fileobj = files["file"]
         self.posted = {"url": url, "data": dict(data or {}),
                        "filename": name, "body": fileobj.read()}

@@ -30,6 +30,36 @@ def _reset_enrich_worker_caches():
 
 
 @pytest.fixture(autouse=True)
+def _reset_pan115_http_client():
+    """115 进程级共享 httpx.Client 逐测隔离。
+
+    生产里这是有意的 keep-alive 单例；pytest 同进程跑全量时，若不清空，
+    前一个用例 mock 的 httpx.Client 或真实连接会泄漏到后一个用例
+    （simple_upload 等用 monkeypatch httpx.Client 的测试会失效）。
+    """
+    try:
+        from backend.emby_server import transfer115 as _t115
+    except Exception:
+        yield
+        return
+    def _drop_and_close():
+        """取出当前共享 client 并关闭（不留连接池泄漏）。"""
+        with _t115._http_client_lock:
+            client = _t115._http_client
+            _t115._http_client = None
+            _t115._http_client_pid = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    _drop_and_close()          # 上一个用例残留的：先关掉，不留连接池泄漏
+    yield
+    _drop_and_close()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_transfer_stage_dir(tmp_path, monkeypatch):
     """跨 provider 源字节暂存是 worker 本地盘状态：测试间必须隔离。
 
