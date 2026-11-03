@@ -695,6 +695,15 @@ def build_upstream_stream_url(base_url: str, upstream_item_id: str, *,
     return f"{base}/Videos/{item}/stream?{urllib.parse.urlencode(params)}"
 
 
+def get_source_row(db, source_id: int):
+    """播放侧读源行唯一入口：api.py 等播放接线经本模块读源行，
+
+    不直连 upstream_sources（25-1 接线守卫：api.py 等四文件不 import
+    该模块；上游源读写仍只走 25-1，本模块只读）。
+    """
+    return us.get_source(db, source_id)
+
+
 def _source_headers(source) -> dict:
     """发往上游的请求头：源上配的 UA / Referer / 附加头（25-1 字段）。
 

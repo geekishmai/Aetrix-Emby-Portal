@@ -7449,10 +7449,113 @@ async def upstream_item_stream(
             mapping_id=_mapping_id)
     except _up.UpstreamPlaybackError as exc:
         return JSONResponse(status_code=exc.status, content=exc.to_body())
+    # 清单代理去广告（C 件）：有过滤规则的源改走清单代理下发
+    # （只代理清单、分段直连原 CDN）；代理任何一步失败回落到
+    # 下面的 302 直发，宁可带广告也不许播不了。
+    _proxy_resp = await _maybe_cms_playlist_proxy(
+        db, item, _mapping_id, _url, request, user)
     _note_mapped_upstream_play_start_safe(
         getattr(user, "id", None), item.id,
         int((time.perf_counter() - _t0) * 1000))
+    if _proxy_resp is not None:
+        return _proxy_resp
     return RedirectResponse(_url, status_code=302)
+
+
+async def _maybe_cms_playlist_proxy(db, item, mapping_id, url, request, user):
+    """取流口清单代理 engage 判定 + 一级清单组装；不 engage/失败回 None。"""
+    from backend.emby_server import cms_playlist_proxy as _proxy
+    from backend.emby_server import upstream_playback as _up
+    from backend.emby_server.async_db import run_db
+
+    if not _proxy.playlist_proxy_enabled():
+        return None
+    source_id = await run_db(
+        _proxy.source_id_for_mapping, db, item.id, mapping_id)
+    if source_id is None or not _proxy.engages(source_id, url):
+        return None
+    source = await run_db(_up.get_source_row, db, source_id)
+    headers = _up._source_headers(source) if source is not None else {}
+    base = _base_url(request)
+    q = request.query_params
+    uid_s, exp_s, sign_s = q.get("uid"), q.get("exp"), q.get("sign")
+    if not (uid_s and exp_s and sign_s):
+        # 无签名轨（Emby 令牌轨）时借唯一构造点现签一份，保证二级
+        # 端点始终走 play_sign 验签，不裸奔。
+        _b_url, exp_s, sign_s = _signed_local_stream_url(
+            item, base, user.id, db, None, with_sign=True)
+        uid_s = str(user.id)
+    msid = q.get("MediaSourceId") or ""
+    key_part = f"&api_key={q.get('api_key')}" if q.get("api_key") else ""
+
+    def _variant_url(absolute_variant: str) -> str:
+        locator = _proxy.make_locator(uid_s, item.guid, exp_s, absolute_variant)
+        return (
+            f"{base}/emby/Videos/{item.guid}/upstream/playlist"
+            f"?MediaSourceId={msid}{key_part}"
+            f"&uid={uid_s}&exp={exp_s}&sign={sign_s}"
+            f"&src={source_id}&u={locator}")
+
+    text = await run_in_threadpool(
+        _proxy.build_master_response_text, url, headers, _variant_url,
+        source_id=source_id, item_id=item.id)
+    if text is None:
+        return None
+    return Response(
+        content=text, media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-store"})
+
+
+@emby_router.get("/emby/Videos/{item_id}/upstream/playlist")
+@emby_router.get("/Videos/{item_id}/upstream/playlist")
+@release_db_before_response
+async def upstream_playlist_media(
+    item_id: str, request: Request,
+    user: models.WebUser = Depends(get_play_user),
+    db: Session = Depends(get_db),
+):
+    """CMS 清单代理二级端点：下发过滤后的 variant 媒体清单。
+
+    路由注册在 video_hls 通配之前；路径含 item_id，get_play_user
+    的 play_sign 验签分支照常触发。付费墙、绑定门禁、条目可见性
+    与取流口逐项同款复用。定位参数 u 经 HMAC 绑定 (uid, item,
+    exp, 目标地址)，对不上回 403；抓清单/处理失败回落 302 直发
+    目标原地址（带广告可播，不许播不了）。分段地址在清单里已
+    改写为原 CDN 绝对地址，播放器直连取段，本端点不碰分段字节。
+    """
+    from backend.emby_server import cms_playlist_proxy as _proxy
+    from backend.emby_server import upstream_playback as _up
+    from backend.emby_server.async_db import run_db
+
+    await run_db(ensure_playback_allowed, db, user)
+    from backend.emby_server import playback_gate as _gate
+    await run_db(_gate.ensure_binding_playback_allowed, db, user)
+    item = await run_db(_require_visible_item, db, user, item_id)
+    q = request.query_params
+    target = _proxy.read_locator(
+        q.get("u") or "", user.id, item_id, q.get("exp") or "")
+    if not target or not _proxy.is_m3u8_url(target):
+        return JSONResponse(status_code=403, content={
+            "code": "cms_playlist_locator_invalid",
+            "message": "清单定位参数无效"})
+    src_raw = q.get("src") or ""
+    source_id = int(src_raw) if src_raw.isdigit() else None
+    source = None
+    if source_id is not None:
+        source = await run_db(_up.get_source_row, db, source_id)
+        if source is not None and not source.enabled:
+            return JSONResponse(status_code=409, content={
+                "code": "upstream_source_disabled",
+                "message": "所选线路已不可用"})
+    headers = _up._source_headers(source) if source is not None else {}
+    text = await run_in_threadpool(
+        _proxy.build_media_response_text, target, headers,
+        source_id=source_id, item_id=item.id)
+    if text is None:
+        return RedirectResponse(target, status_code=302)
+    return Response(
+        content=text, media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-store"})
 
 
 @emby_router.get("/emby/videos/{item_id}/{transcode_path:path}")
