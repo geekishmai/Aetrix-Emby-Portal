@@ -185,6 +185,54 @@ def is_master_playlist(text: str) -> bool:
     return "#EXT-X-STREAM-INF" in (text or "")
 
 
+def apply_graft_segments(text, segments, make_url):
+    """把媒体清单头部分段地址换成借帧修复段（借帧线，2026-11-03）。
+
+    ``segments`` 是修复段表（按分段序号升序：[{"idx", "dur"}, …]，
+    idx 从 0 起连续——修复窗恒是清单前缀）。逐段核对清单 EXTINF
+    时长与修复时落库时长：容差 = max(0.75 秒，该段时长的 20%)；
+    任一段对不上（源站换版/清单已变）→ 整条放弃替换、原文返回
+    （fail-closed：宁可播原版，不许错位拼接）。清单分段数少于
+    修复段数同样放弃。返回 (text, stats)。与剪除（cms_ad_skip）
+    互斥：摘段会移位分段序号，调用方摘过段就不许再调本函数。
+    """
+    stats = {"graft_applied": False, "graft_segments": 0}
+    if not segments:
+        return text, stats
+    lines = (text or "").splitlines()
+    seg_ord = -1
+    pending_dur = None
+    plan: dict[int, str] = {}
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if line.startswith("#EXTINF:"):
+            try:
+                pending_dur = float(
+                    line[len("#EXTINF:"):].split(",", 1)[0])
+            except ValueError:
+                pending_dur = None
+            continue
+        if not line or line.startswith("#"):
+            continue
+        seg_ord += 1
+        if seg_ord < len(segments):
+            want = segments[seg_ord]
+            if int(want.get("idx", -1)) != seg_ord or pending_dur is None:
+                return text, stats
+            dur = float(want.get("dur") or 0.0)
+            if abs(pending_dur - dur) > max(0.75, dur * 0.2):
+                return text, stats
+            plan[i] = make_url(seg_ord)
+        pending_dur = None
+    if len(plan) != len(segments):
+        return text, stats
+    for i, new_uri in plan.items():
+        lines[i] = new_uri
+    stats["graft_applied"] = True
+    stats["graft_segments"] = len(plan)
+    return "\n".join(lines) + "\n", stats
+
+
 def rewrite_master_playlist(text: str, master_url: str, make_variant_url) -> str:
     """主清单改写：variant URI 换成本站二级端点地址，其余行原样。
 
@@ -252,9 +300,29 @@ def _apply_ad_skip(text, *, source_id, item_id, skip_seconds):
     return new_text
 
 
+def _apply_graft(text, *, source_id, item_id, graft_segments,
+                   make_graft_url, trimmed):
+    """借帧修复段替换接线：只在有 verified 修复段表且本轮没摘过段
+    （序号未移位）时应用；替换被时长核对否决时维持过滤后原文。"""
+    if not graft_segments or make_graft_url is None or trimmed:
+        return text
+    new_text, stats = apply_graft_segments(
+        text, graft_segments, make_graft_url)
+    if stats["graft_applied"]:
+        logger.info(
+            "cms_graft segments_applied source_id=%s item_id=%s "
+            "segments=%s", source_id, item_id, stats["graft_segments"])
+    else:
+        logger.info(
+            "cms_graft segments_rejected source_id=%s item_id=%s "
+            "(duration mismatch)", source_id, item_id)
+    return new_text
+
+
 def build_master_response_text(url: str, headers: dict, make_variant_url, *,
                                source_id=None, item_id=None,
-                               http_get_text=None, skip_seconds=0.0):
+                               http_get_text=None, skip_seconds=0.0,
+                               graft_segments=None, make_graft_url=None):
     """取流口一级处理：抓主清单并按形态产出代理清单文本。
 
     - 主清单（带 variant）：改写 variant 为二级端点地址后下发
@@ -283,7 +351,11 @@ def build_master_response_text(url: str, headers: dict, make_variant_url, *,
             "kept=%s dropped=%s dropped_duration=%s",
             source_id, item_id, stats["kept_segments"],
             stats["dropped_segments"], stats["dropped_duration"])
-        return new_text
+        return _apply_graft(new_text, source_id=source_id,
+                            item_id=item_id,
+                            graft_segments=graft_segments,
+                            make_graft_url=make_graft_url,
+                            trimmed=trimmed is not None)
     except Exception:  # noqa: BLE001 — 回落铁律：代理失败绝不挡播放
         log_fallback("process_error", source_id=source_id, item_id=item_id)
         return None
@@ -291,7 +363,8 @@ def build_master_response_text(url: str, headers: dict, make_variant_url, *,
 
 def build_media_response_text(url: str, headers: dict, *, source_id=None,
                               item_id=None, http_get_text=None,
-                              skip_seconds=0.0):
+                              skip_seconds=0.0,
+                              graft_segments=None, make_graft_url=None):
     """二级端点处理：抓 variant 媒体清单，过滤 + absolutize 后下发。
 
     skip_seconds>0（cms_ad_skip 高置信记录）时先按记录摘掉片头
@@ -321,7 +394,11 @@ def build_media_response_text(url: str, headers: dict, *, source_id=None,
             "kept=%s dropped=%s dropped_duration=%s",
             source_id, item_id, stats["kept_segments"],
             stats["dropped_segments"], stats["dropped_duration"])
-        return new_text
+        return _apply_graft(new_text, source_id=source_id,
+                            item_id=item_id,
+                            graft_segments=graft_segments,
+                            make_graft_url=make_graft_url,
+                            trimmed=trimmed is not None)
     except Exception:  # noqa: BLE001 — 回落铁律
         log_fallback("media_process_error",
                      source_id=source_id, item_id=item_id)

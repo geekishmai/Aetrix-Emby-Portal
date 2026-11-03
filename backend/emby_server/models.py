@@ -1261,6 +1261,53 @@ class CmsAdSkipDetection(Base):
                         nullable=False)
 
 
+class CmsGraftRepair(Base):
+    """CMS 片头印制广告「借帧修复」记账（2026-11-03 站主亲定产品化）。
+
+    一行 = 一条上游映射（upstream_item_mappings.id）的修复结论：
+    修复工人（emby_server/cms_graft_worker）把脏版片头条带用同片
+    干净版的同一帧像素贴回，产物分段落在数据卷
+    ``cms_graft/<mapping_id>/seg_*.ts``，本行记状态与段表。
+    播放路径只认 ``status='verified'`` 的行（修完必须经真取流
+    验证才许下发，见 emby_server/cms_graft.lookup_verified）；
+    其余状态一律当无修复、原样播（选线降权兜底）。证据只留
+    路径/短码，不存凭据。不加外键（照 UpstreamItemMapping
+    先例）：映射删了行留着供追溯。由 create_all 自动建表。
+    """
+
+    __tablename__ = "cms_graft_repairs"
+
+    __table_args__ = (
+        UniqueConstraint("mapping_id",
+                         name="uq_cms_graft_repair_mapping"),
+        Index("ix_cms_graft_repairs_source", "source_id"),
+        Index("ix_cms_graft_repairs_status", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mapping_id = Column(Integer, nullable=False)  # upstream_item_mappings.id
+    local_item_id = Column(Integer, nullable=False)  # emby_items.id
+    source_id = Column(Integer, nullable=False)  # upstream_sources.id
+    # queued / running / verified / repaired（修完未验，不下发）/
+    # skipped（不入选，reason 记因）/ failed / verify_failed
+    status = Column(String(30), nullable=False, default="queued")
+    # no_clean_sibling / band_too_long / watermark_or_overlong /
+    # align_failed / gate_failed / codec_unsupported / fetch_failed /
+    # sibling_dirty / probe_failed（短码，detail 里可带补充）
+    reason = Column(String(60), nullable=False, default="")
+    band_end_sec = Column(Float, nullable=True)  # 解码轴上带结束秒
+    band_family = Column(String(10), nullable=False, default="")  # A/B/C/D
+    strip_json = Column(Text, nullable=False, default="")  # {y0,y1,h}
+    sibling_mapping_id = Column(Integer, nullable=True)  # 借帧方映射
+    segments_json = Column(Text, nullable=False, default="")  # 段表 JSON
+    mouth_sec = Column(Float, nullable=True)  # 本次入选口子
+    worker_version = Column(String(20), nullable=False, default="")
+    detail = Column(String(500), nullable=False, default="")  # 短码/统计
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
+                        nullable=False)
+
+
 class AppleCMSDetailCache(Base):
     """苹果 CMS detail 抓取缓存（抓详情分流，2026-11-02）。
 

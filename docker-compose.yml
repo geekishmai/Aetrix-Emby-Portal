@@ -191,6 +191,41 @@ services:
     - ${RCLONE_MOUNT_PAUL:-/mnt/paul}:/mnt/paul:ro
     - ${RCLONE_CONFIG_DIR:-./rclone}:/config/rclone
     - ${RCLONE_SA_DIR:-/root/sa-accounts}:/sa-accounts
+  # 借帧修复工人（2026-11-03 第一批）：独立容器跑批、不进 api 进程。
+  # profiles 隔离：默认 up 不拉起，跑批时显式
+  # `docker compose --profile graft run --rm aetrix-graft`。
+  # network_mode=host 是硬要求：家宽出口 SOCKS 只听宿主机 loopback
+  # （127.0.0.1:11055），桥网够不到；代价是 DB 要走宿主机可达地址，
+  # 跑批时经 GRAFT_DATABASE_URL 注入（postgres 容器 IP 或发布端口）。
+  aetrix-graft:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      target: with-scripts
+    command:
+    - python
+    - -m
+    - backend.emby_server.cms_graft_worker
+    container_name: aetrix-graft
+    profiles:
+    - graft
+    network_mode: host
+    env_file:
+    - .env
+    environment:
+      AETRIX_ROLE: graft-worker
+      DATABASE_TYPE: postgresql
+      DATABASE_URL: ${GRAFT_DATABASE_URL:-}
+      CMS_GRAFT_DIR: /data/cms_graft
+      REDIS_ENABLED: 'false'
+    image: aetrix-backend:latest
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    volumes:
+    - aetrix_data:/data
   postgres:
     container_name: aetrix-postgres
     environment:

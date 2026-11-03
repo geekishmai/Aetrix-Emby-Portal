@@ -436,6 +436,26 @@ UPSTREAM_AGGREGATE_CONFIG_SCHEMA: dict[str, tuple] = {
     "upstream_aggregate_mapping_patrol_alert_pct": ("int", 0, 100),
 }
 
+# 借帧修复（cms_graft）家族：工人总开关/口子/并发/家宽路由全在这里，
+# 代码侧默认值在 emby_server/cms_graft（无行时用默认，照降权名单
+# 先例）。纯 SystemConfig 键，不进 env.example（#1527 先例）。
+CMS_GRAFT_CONFIG_SCHEMA: dict[str, tuple] = {
+    # 工人总开关（兼下发闸）：关 = 工人停跑、播放路径不查修复表。
+    "cms_graft_enabled": ("bool",),
+    # 片头口子（秒）：带长 ≤ 此值才入选（站主 2026-11-03 定 60）。
+    "cms_graft_mouth_sec": ("float", 5.0, 600.0),
+    # 工人总并发（直连路线）。
+    "cms_graft_concurrency": ("int", 1, 4),
+    # 家宽出口并发（单独限速，只抓片头分段）。
+    "cms_graft_home_concurrency": ("int", 1, 2),
+    # 家宽路由源名单（逗号分隔源 id）：拒服务器出口的源走家宽。
+    "cms_graft_home_source_ids": ("int_list", 1, 1000000),
+    # 单轮入选上限（第一批 500，不许自行扩全量）。
+    "cms_graft_batch_limit": ("int", 1, 5000),
+    # 热度口径：近 N 天起播量。
+    "cms_graft_heat_days": ("int", 1, 90),
+}
+
 
 def coerce_player_blacklist_rules(value: Any, *, strict: bool) -> list[dict]:
     """播放器黑名单规则结构归一：[{label, match[], exclude[]}]。
