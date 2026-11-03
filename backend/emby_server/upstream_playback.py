@@ -1246,13 +1246,73 @@ def _record_cms_stream_outcome(db, source, *, error_code=None,
                        getattr(source, "id", None), exc_info=True)
 
 
-def _mapping_health_sort_key(store, mapping, source):
+#: CMS 线路档位降权名单 SystemConfig 键（upstream_aggregate 家族，
+#: config_schema 登记为 int_list）：逗号分隔的源 id，名单内的源在
+#: 线路排序里沉到同健康层最后、只作兜底（2026-11-03 印制广告摸底
+#: 处置，用户亲点定版）。读取走 integrations.store 热读（60 秒 TTL
+#: ＋写时失效），与本模块 _system_config_bool 同口径，不另开配置通道。
+KEY_DEMOTED_SOURCE_IDS = "upstream_aggregate_demoted_source_ids"
+
+#: 降权名单的代码默认（无配置行时生效）＝2026-11-03 摸底定版的
+#: 毒档：红牛 14 / 光速 15 / IKUN 16 / 虎牙 18 / 鲸鱼 20 / 爱蛋 21 /
+#: 茅台 22 / 速博 24——片头字幕式赌博赞助带抽样 93%~100%。干净档
+#: （非凡 7 / 暴风 9 / 极速 10 / 如意 13）与未测未抽的源（无尽 11 /
+#: 电影天堂 12 / 优酷 17 / 乐子 19 / 豆瓣 23 / 飘零 25）不进名单
+#: ＝中性：不降权、也不提权，保持既有顺序。
+DEFAULT_DEMOTED_SOURCE_IDS = frozenset({14, 15, 16, 18, 20, 21, 22, 24})
+
+#: 「无配置行」哨兵：store.get_value 行不存在时原样回它，与「有行
+#: 但为空」（管理员显式清空＝降权关）区分开，见 demoted_source_ids。
+_DEMOTED_IDS_UNSET = "\x00upstream-demoted-source-ids-unset\x00"
+
+
+def demoted_source_ids(db) -> frozenset:
+    """读档位降权名单（源 id 集合），口径：
+
+    - 无配置行 → 代码默认（摸底毒档名单）；
+    - 有行 → 按行内逗号列表解析（全角逗号兼容、坏项跳过），空行
+      ＝显式清空（降权关），不回退默认；
+    - db=None 或读异常 → 代码默认：读失败不许把线路展示打挂，
+      更不许静默关掉已定版的降权。
+    """
+    if db is None:
+        return DEFAULT_DEMOTED_SOURCE_IDS
+    try:
+        from backend.integrations import store
+        raw = store.get_value(db, KEY_DEMOTED_SOURCE_IDS,
+                              _DEMOTED_IDS_UNSET)
+    except Exception:  # noqa: BLE001 — 配置读失败回默认，见 docstring
+        return DEFAULT_DEMOTED_SOURCE_IDS
+    if raw is None or raw == _DEMOTED_IDS_UNSET:
+        return DEFAULT_DEMOTED_SOURCE_IDS
+    out = set()
+    for part in str(raw).replace("，", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            n = int(part)
+        except ValueError:
+            continue
+        if n >= 1:
+            out.add(n)
+    return frozenset(out)
+
+
+def _mapping_health_sort_key(store, mapping, source,
+                             demoted_ids=frozenset()):
     """线路择优排序键（越小越靠前；同键靠稳定排序保持映射偏好序）。
 
-    分层：源健康已判不可用（含过期等效不可用）沉底；源有连续失败
-    或本线路已翻 unavailable 的次之；健康线路在前。层内先按连续
-    失败数升序、再按最近成功延迟升序。无记录 = 没有坏过的证据，
-    按健康计（与 is_source_available 的无记录当 Active 同口径）。
+    合成顺序（分层，靠前者优先）：
+    1. 健康层（可用性优先，既有口径一字不动）：源健康已判不可用
+       （含过期等效不可用）沉底；源有连续失败或本线路已翻
+       unavailable 的次之；健康线路在前。无记录 = 没有坏过的
+       证据，按健康计（与 is_source_available 的无记录当 Active
+       同口径）。
+    2. 档位降权（demoted_ids 名单内的源沉底）：只决定「同健康层
+       里谁排前」，排在健康层之后——死线/熔断线永远不会因为
+       档位干净被顶到活线前面；名单内的线不删、仍可播。
+    3. 既有择优：先按连续失败数升序、再按最近成功延迟升序。
     """
     record = store.get_source(str(source.id))
     line = store.get_line(_cms_line_key(source.id, mapping.id))
@@ -1264,11 +1324,12 @@ def _mapping_health_sort_key(store, mapping, source):
         tier = 1
     else:
         tier = 0
+    demoted = 1 if source.id in demoted_ids else 0
     failures = record.consecutive_unavailable_failures if record else 0
     if line is not None and line.consecutive_failures > failures:
         failures = line.consecutive_failures
     latency = line.last_latency_ms if line is not None else None
-    return (tier, failures,
+    return (tier, demoted, failures,
             latency if latency is not None else float("inf"))
 
 
@@ -1426,6 +1487,11 @@ def get_displayable_mappings(db, local_item_id):
     成为默认首位，其余线保留可手选；同分保持映射偏好序。健康
     记录读不到（Redis 故障等）时 fail-open 回偏好序原样，绝不
     因为择优把线路弄丢或把 PlaybackInfo 组装打挂。
+
+    档位降权（2026-11-03）：同一份排序键里健康层之后合成档位
+    （见 _mapping_health_sort_key 与 demoted_source_ids）——带
+    赌博赞助带的毒档源在同健康层内沉底、只作兜底，线不删、
+    仍可播；只有毒档线的条目照常全量下发。
     """
     out = []
     for mapping in uim.get_grouped_mappings(db, local_item_id):
@@ -1436,8 +1502,9 @@ def get_displayable_mappings(db, local_item_id):
     if len(out) > 1:
         try:
             store = _get_health_store()
+            demoted_ids = demoted_source_ids(db)
             out.sort(key=lambda pair: _mapping_health_sort_key(
-                store, pair[0], pair[1]))
+                store, pair[0], pair[1], demoted_ids))
         except Exception:  # noqa: BLE001 — 择优是补强，故障回偏好序
             logger.warning("上游线路择优排序异常，按映射偏好序下发",
                            exc_info=True)

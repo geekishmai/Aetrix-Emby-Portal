@@ -418,6 +418,14 @@ UPSTREAM_AGGREGATE_CONFIG_SCHEMA: dict[str, tuple] = {
     # 关时列表不出现、取流口 404。无行＝开（读取方默认 True，
     # 见 upstream_playback.detail_line_enabled）。
     "upstream_aggregate_detail_line_enabled": ("bool",),
+    # CMS 线路档位降权（2026-11-03 印制广告摸底处置，用户亲点）：
+    # 名单内的源在详情/PlaybackInfo 线路排序里沉到同健康层最后、
+    # 只作兜底（线不删、仍可播）。无行＝代码默认名单（红牛/光速/
+    # IKUN/虎牙/鲸鱼/爱蛋/茅台/速博，见 upstream_playback
+    # .DEFAULT_DEMOTED_SOURCE_IDS），空串删行回默认；读取唯一实现
+    # upstream_playback.demoted_source_ids（store 热读）。纯
+    # SystemConfig 键，不进 env.example。
+    "upstream_aggregate_demoted_source_ids": ("int_list", 1, 1000000),
     # O-09 映射抽样巡检（第 1、2 层常驻 janitor）：默认开、默认
     # 每 7 天一轮、每 evidence 层默认抽 30 条；不一致率超默认
     # 5% 响亮报红。读取唯一实现在 upstream_mapping_patrol，范围
