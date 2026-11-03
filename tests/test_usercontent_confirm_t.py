@@ -112,7 +112,7 @@ def test_video_stream_generic_302_has_confirm_t(monkeypatch):
                         lambda db, user: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, u, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(api, "_play_target", lambda db, it: target)
     # 开关走真实 reader：假 db 读失败 → fail-safe 默认开（与
     # test_drive_direct_play.py 同口径）。
@@ -131,7 +131,12 @@ def test_video_stream_generic_302_has_confirm_t(monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolate_play_events():
     play_events.reset_for_tests()
+    # 全量轮顺序隔离：前一个文件（test_shared_quota_pace）的进程内计数会
+    # 泄漏进来，video_stream 的起播配额把 302 分支打回 429。
+    from backend.emby_server import shared_quota_pace as _pace
+    _pace.reset_for_tests()
     yield
+    _pace.reset_for_tests()
     play_events.reset_for_tests()
 
 
@@ -185,7 +190,7 @@ def test_video_stream_fast302_has_confirm_t(monkeypatch, db):
                         lambda db_, u_: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db_, u_, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(play_sign, "check_referer",
                         lambda request, db_: None)
     monkeypatch.setattr(api, "_enforce_stream_limit",
@@ -243,11 +248,11 @@ def test_mounted_item_file_302_has_confirm_t(monkeypatch):
                         lambda db, user: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db_, u_, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(mount_routes, "_play_target",
                         lambda db, it: target)
-    resp = mount_routes.mounted_item_file(
-        "item", _request(), user=SimpleNamespace(id=1), db=object())
+    resp = asyncio.run(mount_routes.mounted_item_file(
+        "item", _request(), user=SimpleNamespace(id=1), db=object()))
     assert resp.status_code == 302
     loc = resp.headers["location"]
     assert loc == drive_auth.drive_usercontent_download_url(FID)

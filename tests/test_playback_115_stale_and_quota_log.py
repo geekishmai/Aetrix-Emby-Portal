@@ -302,7 +302,7 @@ def _stream_setup(monkeypatch, gate_verdict, alive="alive"):
     monkeypatch.setattr(api, "ensure_playback_allowed", lambda db, user: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, u, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate._request_uses_issued_play_sign",
         lambda request, db: False)
@@ -391,7 +391,7 @@ def test_video_stream_quota_409_logs_structured(monkeypatch, caplog):
     monkeypatch.setattr(api, "ensure_playback_allowed", lambda db, user: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, u, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate._request_uses_issued_play_sign",
         lambda request, db: False)

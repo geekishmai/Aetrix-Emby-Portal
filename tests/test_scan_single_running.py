@@ -174,7 +174,8 @@ CREATE TABLE emby_scan_runs (
     duration_ms INTEGER,
     stats TEXT,
     state_json TEXT,
-    error VARCHAR(500)
+    error VARCHAR(500),
+    cancel_requested_at DATETIME
 )
 """
 

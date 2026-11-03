@@ -802,7 +802,7 @@ def _stream_setup_quark(monkeypatch, *, switch_on=True,
                         lambda db, user: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, u, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate._request_uses_issued_play_sign",
         lambda request, db: False)

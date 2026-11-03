@@ -352,7 +352,7 @@ def _stream_setup(monkeypatch, db, *, ensure_mode, reconcile_action,
     monkeypatch.setattr(api, "ensure_playback_allowed", lambda db_, u_: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db_, u_, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate._request_uses_issued_play_sign",
         lambda request, db_: False)

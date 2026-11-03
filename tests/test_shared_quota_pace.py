@@ -270,7 +270,7 @@ def _stub_gates(monkeypatch, item):
     monkeypatch.setattr(api, "ensure_playback_allowed", lambda db_, u_: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db_, u_, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(play_sign, "check_referer", lambda request, db_: None)
     monkeypatch.setattr(api, "_enforce_stream_limit",
                         lambda db_, req, u_, it, iid: None)

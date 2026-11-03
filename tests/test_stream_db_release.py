@@ -115,7 +115,7 @@ def _patch_common(monkeypatch, api):
     # 且 _FakeDb 没有 query，门禁真跑会 AttributeError）。
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, user, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(api.play_sign, "check_referer", lambda *a, **k: None)
     return item
 
