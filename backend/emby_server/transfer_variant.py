@@ -5262,9 +5262,11 @@ class _HashingReader:
 #   盘仍按 job 归属各走各的——暂存绝不产生跨用户变体共用；
 # - 目的端 sha1 交叉核对（simple 回调为准、分片从严）仍在，暂存字
 #   节陈旧时由核对兜底，不会把错字节登记成副本；
-# - 清扫只看 mtime（TTL 外删）：进行中的暂存因持续写盘 mtime 新
-#   鲜、不会被误删；看门狗另有按任务引用判活/终态的清道
-#   （sweep_stage_orphans），活单文件绝不删。总量帽只在新建时
+# - TTL 清扫（_sweep_stages）跳过本进程注册表持有中的暂存、
+#   且读盘刷新 mtime：下载阶段持续写盘、长上传阶段持续读
+#   盘，活单暂存都不会被误删（PA-075）；看门狗另有按任务
+#   引用判活/终态的清道（sweep_stage_orphans），跨进程口
+#   径下活单文件绝不删、终态残留由它权威回收。总量帽只在新建时
 #   把关（拒绝新建、不删已有），避免删掉正在被读的文件；认领
 #   时另按盘上实占兜底护栏（_stage_guard_state），防新单堆满盘；
 # - 暂存文件只活在 worker 容器本地盘（默认 /tmp），容器重建即失，
@@ -5406,7 +5408,16 @@ class _SourceStage:
                     f"暂存未命中：[{start}, {end}] 前缀 {self._prefix}")
             with open(self.bin_path, "rb") as fh:
                 fh.seek(start)
-                return fh.read(end - start + 1)
+                data = fh.read(end - start + 1)
+            # 读盘即活引用（PA-075）：长上传整份读盘可持续数
+            # 小时、期间不再写盘，mtime 若冻结在下载完成时刻
+            # 会被 TTL 清扫当过期残留误删——每次读盘刷新
+            # mtime，活读中的暂存永远不「看起来过期」。
+            try:
+                os.utime(self.bin_path, None)
+            except OSError:
+                pass
+            return data
 
     def tee(self, start, data):
         """顺手暂存：只接受 start == 当前前缀的顺序写，其余忽略。"""
@@ -5442,11 +5453,22 @@ _STAGE_REGISTRY_LOCK = threading.Lock()
 
 
 def _sweep_stages(directory, ttl_sec):
-    """删 mtime 超 TTL 的暂存（.bin＋.json 成对删）。"""
+    """删 mtime 超 TTL 的暂存（.bin＋.json 成对删）。
+
+    本进程注册表持有中的暂存绝不删（PA-075）：执行器在整个
+    任务尝试期间经 _STAGE_REGISTRY 持有 stage，长上传整份
+    读盘数小时不再写盘、mtime 冻结，只看 TTL 会把活单暂存
+    误删。注册表是本进程口径；跨进程/重启后的残留由引用
+    清道（sweep_stage_orphans）权威回收，读盘刷新 mtime
+    （_SourceStage.read）再兜一层活读。"""
+    with _STAGE_REGISTRY_LOCK:
+        held_keys = set(_STAGE_REGISTRY)
     try:
         now = time.time()
         for name in os.listdir(directory):
             if not (name.startswith("st-") and name.endswith(".bin")):
+                continue
+            if name[3:-4] in held_keys:
                 continue
             path = os.path.join(directory, name)
             try:
@@ -5462,9 +5484,9 @@ def _sweep_stages(directory, ttl_sec):
 
 
 # ---- 暂存清道（按任务引用删残留，2026-11-02 磁盘事故单）----
-# _sweep_stages 只看 mtime TTL：长上传（整份暂存读盘上传可持续
-# 数小时、mtime 冻结在下载完成时刻）会越过 TTL 被误删，反之终
-# 态单的残留也要白等满 TTL。清道改按任务引用判定：非终态
+# _sweep_stages 是 mtime TTL 口径（PA-075 后已加注册表护栏与
+# 读盘刷新，只保本进程口径不误删），且终态单的残留要白等满
+# TTL。清道改按任务引用判定：非终态
 # （pending/running）跨单引用的暂存是活单文件——pending 的重
 # 试要复用暂存前缀与分片会话，running 的正在读写——绝不删；
 # 对应单已终态（done/failed）或根本不存在的才是残留，mtime
