@@ -403,6 +403,16 @@ def _repair_series_tmdb_loose(db, cfg) -> int:
     return repaired
 
 
+#: 副本行从主条目继承的展示字段（merge_group 与 repair_merged_enrich_status 同口径）
+_COPY_INHERIT_FIELDS = (
+    "name", "sort_name", "original_title", "overview", "tagline",
+    "production_year", "poster_path", "primary_image_url",
+    "backdrop_path", "backdrop_image_url", "genres", "studios",
+    "official_rating", "community_rating", "metadata_source",
+    "last_scraped_at",
+)
+
+
 def merge_group(db, group: List) -> int:
     """合并一组：选主记录，其余 merged_into_id 指向主记录。
 
@@ -441,6 +451,13 @@ def merge_group(db, group: List) -> int:
             item.enrich_claim_token = None
             item.enrich_next_retry_at = None
         item.enrich_status = "done"
+        # 2026-11-04 运营快照：29 条带尾巴副本的主条目全部干净——副本行
+        # 展示字段继承主条目（管理端列表/backlog 不再出现脏名；客户端本来
+        # 就走主条目，播放零影响）。主条目有值才覆盖。
+        for field in _COPY_INHERIT_FIELDS:
+            val = getattr(primary, field, None)
+            if val is not None and val != "":
+                setattr(item, field, val)
         merged += 1
         logger.debug(
             "多版本合并：%s (id=%d) → 主记录 %s (id=%d)",
@@ -511,6 +528,10 @@ def _follow_series_episodes(db, group: List) -> None:
                     ep.enrich_claim_token = None
                     ep.enrich_next_retry_at = None
                 ep.enrich_status = "done"
+                for field in _COPY_INHERIT_FIELDS:
+                    val = getattr(main_ep, field, None)
+                    if val is not None and val != "":
+                        setattr(ep, field, val)
                 # 集跟随同口径：被合并集的上游映射迁到主集（见 merge_group）。
                 from backend.emby_server import upstream_item_mappings as _uim
                 _uim.migrate_mappings(db, ep.id, main_ep.id)

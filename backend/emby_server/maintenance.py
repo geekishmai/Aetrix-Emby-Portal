@@ -354,10 +354,18 @@ def repair_merged_enrich_status(db, *, dry_run: bool = False) -> dict:
 
     - 只动 `merged_into_id IS NOT NULL` 且 `enrich_status IN ('pending','retrying')`
       且未删除的行；
-    - 终态记 done（主条目承接了元数据），同时清认领租约/退避时间。
+    - 终态记 done（主条目承接了元数据），同时清认领租约/退避时间；
+    - 展示字段继承主条目（2026-11-04 运营快照：29 条带尾巴副本的主条目全部
+      干净）——name / sort_name / original_title / overview / tagline /
+      production_year / poster_path / primary_image_url / backdrop_path /
+      backdrop_image_url / genres / studios / official_rating /
+      community_rating / metadata_source / last_scraped_at，主条目有值才覆盖
+      （副本行这些字段在展示上永远不可见：客户端走主条目，收口只为让
+      管理端列表/backlog 不再出现脏名）。
 
     ``dry_run=True``：只统计不写库（运维先看规模）。返回计数 dict。
     """
+    from backend.emby_server.merge_versions_worker import _COPY_INHERIT_FIELDS as _INHERIT_FIELDS
     from sqlalchemy import func
 
     counts = {"scanned": 0, "repaired": 0, "by_status": {}}
@@ -377,7 +385,28 @@ def repair_merged_enrich_status(db, *, dry_run: bool = False) -> dict:
                     em.MediaItem.merged_into_id.isnot(None),
                     em.MediaItem.enrich_status.in_(("pending", "retrying")))
             .all())
+    def _root(item):
+        """沿 merged_into 链找存活根（带环与断链保护；DB 逐环查，行数极小）。"""
+        seen = set()
+        node_id = item.merged_into_id
+        while node_id and node_id not in seen:
+            seen.add(node_id)
+            node = db.query(em.MediaItem).filter(
+                em.MediaItem.id == node_id).first()
+            if node is None or node.deleted_at is not None:
+                return None
+            if node.merged_into_id is None:
+                return node
+            node_id = node.merged_into_id
+        return None
+
     for item in rows:
+        primary = _root(item)
+        if primary is not None:
+            for field in _INHERIT_FIELDS:
+                val = getattr(primary, field, None)
+                if val is not None and val != "":
+                    setattr(item, field, val)
         item.enrich_claimed_at = None
         item.enrich_claim_token = None
         item.enrich_next_retry_at = None

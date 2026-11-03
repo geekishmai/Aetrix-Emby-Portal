@@ -190,3 +190,73 @@ def test_startup_maintenance_runs_repair(db, monkeypatch):
     assert result["merged_enrich_repaired"] == 1
     row = db.query(em.MediaItem).filter(em.MediaItem.guid == "copy2").first()
     assert row.enrich_status == "done"
+
+
+# ---------------- 展示字段继承 ----------------
+
+def test_merge_group_inherits_display_fields():
+    primary = SimpleNamespace(
+        id=1, merged_into_id=None, name="大象席地而坐",
+        sort_name="daxiangxidierzuo", original_title="大象席地而坐",
+        overview="简介", tagline=None, production_year=2018,
+        poster_path="/p.jpg", primary_image_url=None,
+        backdrop_path=None, backdrop_image_url=None,
+        genres="剧情", studios=None, official_rating=None,
+        community_rating=7.9, metadata_source="tmdb",
+        enrich_status="done", item_type="movie")
+    copy = SimpleNamespace(
+        id=2, merged_into_id=None, name="大象席地而坐 An Elephant Sitting Still H 265",
+        sort_name=None, original_title=None, overview=None, tagline=None,
+        production_year=None, poster_path=None, primary_image_url=None,
+        backdrop_path=None, backdrop_image_url=None, genres=None,
+        studios=None, official_rating=None, community_rating=None,
+        metadata_source=None, enrich_status="retrying",
+        enrich_claimed_at="x", enrich_claim_token="t",
+        enrich_next_retry_at="y", item_type="movie")
+    assert mvw.merge_group(None, [primary, copy]) == 1
+    assert copy.name == "大象席地而坐"
+    assert copy.overview == "简介"
+    assert copy.poster_path == "/p.jpg"
+    assert copy.community_rating == 7.9
+    assert copy.metadata_source == "tmdb"
+    assert copy.enrich_status == "done"
+    assert copy.enrich_claim_token is None
+    # 主条目为空的字段不覆盖（None 不写）
+    assert copy.tagline is None and copy.backdrop_path is None
+
+
+def test_repair_inherits_display_fields(db):
+    lib = em.Library(guid="l4", name="库", collection_type="movies")
+    db.add(lib)
+    db.commit()
+    primary = _movie(db, "primary", name="唐山大兄")
+    primary.overview = "简介"
+    primary.production_year = 1971
+    db.commit()
+    copy = _movie(db, "copy3", name="唐山大兄 The Big Boss H 265",
+                  merged_into_id=primary.id, enrich_status="retrying")
+    counts = maintenance.repair_merged_enrich_status(db)
+    assert counts["repaired"] == 1
+    db.refresh(copy)
+    assert copy.name == "唐山大兄"
+    assert copy.overview == "简介"
+    assert copy.production_year == 1971
+    assert copy.enrich_status == "done"
+
+
+def test_repair_follows_merge_chain_to_root(db):
+    """副本指向另一条已合并行：沿链找到存活根继承。"""
+    lib = em.Library(guid="l5", name="库", collection_type="movies")
+    db.add(lib)
+    db.commit()
+    root = _movie(db, "root", name="真正的主条目")
+    root.overview = "根简介"
+    mid = _movie(db, "mid", name="中间行", merged_into_id=root.id,
+                 enrich_status="done")
+    leaf = _movie(db, "leaf", name="叶子副本", merged_into_id=mid.id,
+                  enrich_status="retrying")
+    maintenance.repair_merged_enrich_status(db)
+    db.refresh(leaf)
+    assert leaf.name == "真正的主条目"
+    assert leaf.overview == "根简介"
+    assert leaf.enrich_status == "done"
