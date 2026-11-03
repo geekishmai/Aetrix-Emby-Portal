@@ -406,6 +406,50 @@ def test_playlist_not_m3u8_rejected(monkeypatch):
             "https://x/list.m3u8", {}, source_id=1, db=None)
 
 
+def test_parse_playlist_extracts_aes_key():
+    # AES-128 加密源（第一批 32 条 segment_not_ts 的真身）：清单
+    # 必须把密钥信息交给下载层，不许把密文当坏段。
+    text = ("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:7\n"
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"enc.key\","
+            "IV=0x00000000000000000000000000000000\n"
+            "#EXTINF:10.0,\nseg0.ts\n#EXTINF:10.0,\nseg1.ts\n")
+    segs, init, key = graft.parse_media_playlist(
+        text, "https://h/a/index.m3u8")
+    assert len(segs) == 2 and init is None
+    assert key["method"] == "AES-128"
+    assert key["key_url"] == "https://h/a/enc.key"
+    assert key["iv"] == bytes(16)
+    assert key["sequence"] == 7
+
+
+def test_download_segments_decrypts_aes(monkeypatch, tmp_path):
+    # 用 openssl 把一段假 TS 加密，下载层必须先解再落盘。
+    import subprocess as sp
+
+    key = bytes(range(16))
+    plain = bytes([0x47]) + b"A" * 47
+    enc = sp.run(["openssl", "enc", "-aes-128-cbc", "-K", key.hex(),
+                  "-iv", bytes(16).hex()], input=plain,
+                 capture_output=True, check=True).stdout
+    assert enc[0] != 0x47  # 密文确实看不出 TS 同步字节
+    monkeypatch.setattr(
+        graft, "fetch_with_route", lambda url, headers, **kw: enc)
+    paths, _tot = graft._download_segments(
+        [(5.0, "https://x/seg0.ts")], {}, source_id=1, db=None,
+        stats=None, work_dir=tmp_path, prefix="d", cover_sec=5.0,
+        key_info={"method": "AES-128", "key_url": "https://x/k",
+                  "iv": bytes(16), "sequence": 0},
+        key_bytes=key)
+    assert paths[0].read_bytes() == plain
+
+
+def test_fetch_key_bytes_rejects_other_methods():
+    with pytest.raises(graft.FetchError, match="unsupported_key_method"):
+        graft.fetch_key_bytes(
+            {"method": "SAMPLE-AES", "key_url": "https://x/k",
+             "iv": None, "sequence": 0}, {}, source_id=1, db=None)
+
+
 def test_segment_not_ts_rejected(monkeypatch, tmp_path):
     # 段内容不是 TS/fMP4（HTML 错误页）→ 门口拦下，不进解码。
     monkeypatch.setattr(
