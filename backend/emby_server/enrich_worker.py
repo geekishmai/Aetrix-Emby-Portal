@@ -1489,7 +1489,18 @@ def _tmdb_plan_for_item(item, nfo_data, kind, needs_repair):
     poster_path = getattr(item, "poster_path", None)
     primary_image_url = getattr(item, "primary_image_url", None)
 
-    # 1) NFO 中已有 tmdb_id：仅在需要补详情且客户端已配置时拉取
+    # 1) 路径里的 {tmdb-N} 标签（MoviePilot 整理产物，目录名形如
+    # 「霸王花 (1988) {tmdb-12345}」）：直接按 id 拉详情。文件名带发布尾巴
+    # （「H 265 10 bit HD」）时按名称搜常常搜不中，还会把已知 id 判成未识别。
+    # 2026-11-04（§14.16.1b，Claude 批准）：**path_tag 优先于 NFO**——目录标签
+    # 是整理时写入的权威身份，NFO 是按旧库生成的可能带旧错 id（生产实证：
+    # 194/208/408 的 NFO imdb 换算出上集/前作 id，目录 id 才是对片）。
+    path_tag = _path_tmdb_tag(item)
+    if path_tag and tmdb_client.configured and kind in ("series", "movie"):
+        return {"op": "details", "tmdb_id": path_tag, "why": "path_tag", "kind": kind,
+                "name": name or "", "year": production_year}
+
+    # 2) NFO 中已有 tmdb_id：仅在需要补详情且客户端已配置时拉取
     # 批2（刮削瘦身）：拉详情的理由收窄——缺 imdb_id/别名不再是理由
     # （那是文字字段，TMDB 按新口径不再负责补）；只留缺图与修图请求。
     if nfo_data and nfo_data.get("tmdb_id"):
@@ -1501,14 +1512,6 @@ def _tmdb_plan_for_item(item, nfo_data, kind, needs_repair):
             return {"op": "details", "tmdb_id": tmdb_id, "why": "nfo", "kind": kind,
             "name": name or "", "year": production_year}
         return {"op": "none"}
-
-    # 1.5) 路径里的 {tmdb-N} 标签（MoviePilot 整理产物，目录名形如
-    # 「霸王花 (1988) {tmdb-12345}」）：直接按 id 拉详情。文件名带发布尾巴
-    # （「H 265 10 bit HD」）时按名称搜常常搜不中，还会把已知 id 判成未识别。
-    path_tag = _path_tmdb_tag(item)
-    if path_tag and tmdb_client.configured and kind in ("series", "movie"):
-        return {"op": "details", "tmdb_id": path_tag, "why": "path_tag", "kind": kind,
-                "name": name or "", "year": production_year}
 
     # 2) 影视类：先查别名映射，命中则直接拉详情，否则按名称搜索
     # （v2.56.0 起 TMDB 为主：不再跳过豆瓣命中的条目，豆瓣只在 TMDB 未命中时兜底）
@@ -1775,8 +1778,12 @@ def _enrich_fetch_pre(item: Any, holder: Optional[dict] = None,
             raise
         except Exception:  # noqa: BLE001 — 非瞬态失败静默，不影响主流程
             pass
-    # NFO tmdb_id 无条件落 result（原 TMDB 段首行逻辑，前移以便批量规划）
-    if nfo_data and nfo_data.get("tmdb_id"):
+    # NFO tmdb_id 无条件落 result（原 TMDB 段首行逻辑，前移以便批量规划）。
+    # 2026-11-04（§14.16.1b）：path_tag 存在时**不落** NFO id——两者不一致时
+    # path_tag 胜（目录标签 200 时按它收口；404 时 stale 分支回退 search/
+    # 多源，现值保留），NFO 的旧错 id 不再覆盖。
+    _path_tag_wins = bool(_path_tmdb_tag(item))
+    if nfo_data and nfo_data.get("tmdb_id") and not _path_tag_wins:
         result["tmdb_id"] = str(nfo_data["tmdb_id"])
     needs_repair = bool(getattr(item, "repair_requested_at", None))
     tmdb_plan = _tmdb_plan_for_item(
