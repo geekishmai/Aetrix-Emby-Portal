@@ -332,6 +332,141 @@ def test_cms_item_one_source_per_mapping_with_quality(client, token, seed):
     assert line_b["Name"] == CMS_MOVIE
 
 
+def test_cms_line_without_quality_cache_still_has_video_stream(
+        client, token, seed):
+    """无画质缓存的 CMS 线路也必须带一条视频轨（2026-11-03 回归）。
+
+    Reflix 类按媒体规格选源的客户端把零轨道 MediaSource 判为
+    不可用、直接报「没有可用的源」；占位视频轨只报结构事实，
+    codec/宽高/码率一律不许编造（真值走取流回填的缓存分支）。
+    """
+    sources = _playback_sources(client, token, seed["cms"])
+    line_b = [s for s in sources
+              if s["Id"] == f"{seed['cms']}:upstream:{seed['map_b']}"][0]
+    videos = [s for s in line_b["MediaStreams"] if s["Type"] == "Video"]
+    assert len(videos) == 1
+    video = videos[0]
+    assert video["IsDefault"] is True
+    assert "Width" not in video and "Height" not in video
+    assert "Codec" not in video and "BitRate" not in video
+    # 有缓存的线路仍走真实参数，不被占位覆盖
+    line_a = [s for s in sources
+              if s["Id"] == f"{seed['cms']}:upstream:{seed['map_a']}"][0]
+    real = [s for s in line_a["MediaStreams"] if s["Type"] == "Video"][0]
+    assert real["Width"] == 3840 and real["Height"] == 2160
+
+
+# ---------------------------------------------------------------------------
+# 身份组聚合（2026-11-03 回归）：同片重复行线路互通
+# ---------------------------------------------------------------------------
+
+LIB_GRP = "身份组在线库"
+SRC_GA = "身份组源甲"
+SRC_GB = "身份组源乙"
+GRP_TMDB = "1518076"
+
+
+def _grp_cleanup(db):
+    for lib in db.query(em.Library).filter(
+            em.Library.name == LIB_GRP).all():
+        ids = [r[0] for r in db.query(em.MediaItem.id).filter(
+            em.MediaItem.library_id == lib.id).all()]
+        if ids:
+            db.query(em.UpstreamItemMapping).filter(
+                em.UpstreamItemMapping.local_item_id.in_(ids)).delete(
+                synchronize_session=False)
+            db.query(em.MediaItem).filter(
+                em.MediaItem.id.in_(ids)).delete(
+                synchronize_session=False)
+        db.query(em.Library).filter(
+            em.Library.id == lib.id).delete(synchronize_session=False)
+    for src in db.query(em.UpstreamSource).filter(
+            em.UpstreamSource.name.in_([SRC_GA, SRC_GB])).all():
+        db.delete(src)
+    db.commit()
+
+
+@pytest.fixture()
+def grp_seed():
+    """同 tmdb 身份的两行重复：一行一条线路；另置一行异身份对照。"""
+    db = SessionLocal()
+    _grp_cleanup(db)
+    lib = em.Library(guid=_guid(), name=LIB_GRP,
+                     collection_type="movies", is_enabled=True,
+                     kind="applecms")
+    db.add(lib)
+    db.flush()
+    src_a = em.UpstreamSource(name=SRC_GA, source_type="applecms",
+                              base_url="http://grp-a.example",
+                              enabled=True)
+    src_b = em.UpstreamSource(name=SRC_GB, source_type="applecms",
+                              base_url="http://grp-b.example",
+                              enabled=True)
+    db.add_all([src_a, src_b])
+    db.flush()
+    row1 = em.MediaItem(guid=_guid(), library_id=lib.id,
+                        item_type="movie", name="身份组片",
+                        tmdb_id=GRP_TMDB, production_year=2025,
+                        upstream_source_id=src_a.id, probe_status="done")
+    row2 = em.MediaItem(guid=_guid(), library_id=lib.id,
+                        item_type="movie", name="身份组片",
+                        tmdb_id=GRP_TMDB, production_year=2025,
+                        upstream_source_id=src_b.id, probe_status="done")
+    other = em.MediaItem(guid=_guid(), library_id=lib.id,
+                         item_type="movie", name="异身份片",
+                         tmdb_id="999999", production_year=2025,
+                         upstream_source_id=src_a.id, probe_status="done")
+    db.add_all([row1, row2, other])
+    db.flush()
+    map1 = em.UpstreamItemMapping(local_item_id=row1.id,
+                                  source_id=src_a.id,
+                                  upstream_item_id="201",
+                                  confidence=0.9, evidence="tmdb")
+    map2 = em.UpstreamItemMapping(local_item_id=row2.id,
+                                  source_id=src_b.id,
+                                  upstream_item_id="202",
+                                  confidence=0.8, evidence="tmdb")
+    map3 = em.UpstreamItemMapping(local_item_id=other.id,
+                                  source_id=src_a.id,
+                                  upstream_item_id="203",
+                                  confidence=0.9, evidence="tmdb")
+    db.add_all([map1, map2, map3])
+    db.commit()
+    data = {"row1": row1.guid, "row2": row2.guid, "other": other.guid,
+            "map1": map1.id, "map2": map2.id, "map3": map3.id}
+    db.close()
+    yield data
+    db = SessionLocal()
+    try:
+        _grp_cleanup(db)
+    finally:
+        db.close()
+
+
+def test_playbackinfo_aggregates_identity_sibling_lines(
+        client, token, grp_seed):
+    """打开任一重复行，PlaybackInfo 都带全身份组的线路。
+
+    2026-11-03《丛林猎凶》实证：代表行自身 2 线全死、活线在兄弟
+    行上，只读自身映射时客户端报「没有可用的源」。
+    """
+    for guid in (grp_seed["row1"], grp_seed["row2"]):
+        sources = _playback_sources(client, token, guid)
+        ids = {s["Id"] for s in sources}
+        assert f"{guid}:upstream:{grp_seed['map1']}" in ids
+        assert f"{guid}:upstream:{grp_seed['map2']}" in ids
+        # 异身份条目的线路绝不并入
+        assert f"{guid}:upstream:{grp_seed['map3']}" not in ids
+        # 每条线（含兄弟行的）都带视频轨，形态与自身线路一致
+        for s in sources:
+            assert any(st["Type"] == "Video"
+                       for st in s["MediaStreams"])
+    # 异身份条目自身只见自己的线路
+    sources = _playback_sources(client, token, grp_seed["other"])
+    assert {s["Id"] for s in sources} == {
+        f"{grp_seed['other']}:upstream:{grp_seed['map3']}"}
+
+
 def test_upstream_stream_endpoint_directed_and_hard_errors(
         client, token, seed, monkeypatch):
     calls = {}
@@ -526,3 +661,151 @@ def test_directed_resolve_hard_errors_no_fallback(stub_db):
             http_get=_stub_detail_get, http_probe=lambda *a: (200, None))
     assert ei.value.status == 404
     assert ei.value.code == "upstream_mapping_not_found"
+
+
+# ---------------------------------------------------------------------------
+# 身份组聚合（函数级）：组内定向/最佳解析 + 边界
+# ---------------------------------------------------------------------------
+
+def _grp_stub_seed(db):
+    """同 tmdb 身份三行：行一/行二各挂线路（且有一条同源同 vod 的
+    重复映射验去重）、行三无线路；外加同名无 tmdb 行作对照。"""
+    for sid, host in ((7, "a.example"), (8, "b.example")):
+        db.add(em.UpstreamSource(
+            id=sid, name=f"组桩源{sid}", source_type="applecms",
+            base_url=f"http://{host}", enabled=True,
+            user_agent="Mozilla/5.0 (test)"))
+    lib = em.Library(guid="lib-grp", name="组桩库",
+                     collection_type="movies", is_enabled=True,
+                     kind="applecms", upstream_source_ids="7,8")
+    db.add(lib)
+    db.flush()
+
+    def _movie(guid, tmdb):
+        row = em.MediaItem(guid=guid, library_id=lib.id,
+                           item_type="movie", name="组片",
+                           tmdb_id=tmdb, upstream_source_id=7,
+                           probe_status="done")
+        db.add(row)
+        db.flush()
+        return row
+
+    row1 = _movie("grp-1", "4242")
+    row2 = _movie("grp-2", "4242")
+    row3 = _movie("grp-3", "4242")
+    noname = _movie("grp-noname", None)
+    map1 = em.UpstreamItemMapping(local_item_id=row1.id, source_id=7,
+                                  upstream_item_id="101",
+                                  confidence=0.9, evidence="tmdb")
+    map2 = em.UpstreamItemMapping(local_item_id=row2.id, source_id=8,
+                                  upstream_item_id="55",
+                                  confidence=0.8, evidence="tmdb")
+    # 与 map1 同 (源, vod) 的重复映射：组内去重后只许出现一次
+    map_dup = em.UpstreamItemMapping(local_item_id=row2.id, source_id=7,
+                                     upstream_item_id="101",
+                                     confidence=0.7, evidence="tmdb")
+    map_noname = em.UpstreamItemMapping(
+        local_item_id=noname.id, source_id=7, upstream_item_id="101",
+        confidence=0.95, evidence="title+year")
+    db.add_all([map1, map2, map_dup, map_noname])
+    db.commit()
+    for mid in (map1.id, map2.id, map_dup.id, map_noname.id):
+        CacheManager.delete(up.cms_quality_cache_key(mid))
+    return row1, row2, row3, noname, map1, map2, map_dup, map_noname
+
+
+def test_grouped_mappings_merge_dedupe_and_boundaries(stub_db):
+    from backend.emby_server import upstream_item_mappings as uim
+    row1, row2, row3, noname, map1, map2, map_dup, map_noname = \
+        _grp_stub_seed(stub_db)
+    # 自身在前、兄弟续后、同（源, vod）去重
+    grouped = uim.get_grouped_mappings(stub_db, row1.id)
+    assert [m.id for m in grouped] == [map1.id, map2.id]
+    # 无自身线路的行也能看到全组线路
+    grouped3 = uim.get_grouped_mappings(stub_db, row3.id)
+    assert [m.id for m in grouped3] == [map1.id, map2.id]
+    # 同名但无 tmdb 身份：不进任何组（名字是启发式，播放不并线）
+    assert [m.id for m in uim.get_grouped_mappings(
+        stub_db, noname.id)] == [map_noname.id]
+    assert map_noname.id not in [m.id for m in grouped]
+    # 命中行已软删 → 整组不可见，不许靠兄弟行救活（软删走批量
+    # 更新：全局软删钩子会把已删行从 ORM 查询里藏掉，提交后过期
+    # 实例再读属性会 ObjectDeletedError，故先存 id、不再碰实例）
+    import datetime as _dt
+    row1_id = row1.id
+    stub_db.query(em.MediaItem).filter(
+        em.MediaItem.id == row1_id).update(
+        {"deleted_at": _dt.datetime.now()}, synchronize_session=False)
+    stub_db.commit()
+    assert uim.get_grouped_mappings(stub_db, row1_id) == []
+
+
+def test_grouped_resolve_directed_and_best(stub_db):
+    row1, row2, row3, noname, map1, map2, map_dup, map_noname = \
+        _grp_stub_seed(stub_db)
+    probe = lambda *a: (200, None)  # noqa: E731
+    # 定向解析兄弟行上的映射（展示下发了就必须认）
+    url = up.resolve_mapped_upstream_stream(
+        stub_db, row1.id, mapping_id=map2.id,
+        http_get=_stub_detail_get, http_probe=probe,
+        http_get_text=_stub_text_get)
+    assert url == "https://cdn-b.example/master.m3u8"
+    # 无自身线路的行走最佳口径 → 落到组内偏好序首位（行一的甲源）
+    url = up.resolve_mapped_upstream_stream(
+        stub_db, row3.id, http_get=_stub_detail_get, http_probe=probe)
+    assert url == "https://cdn-a.example/movie.mp4"
+    # 组外条目（无 tmdb 同名行）的映射定向解析仍硬 404
+    with pytest.raises(up.UpstreamPlaybackError) as ei:
+        up.resolve_mapped_upstream_stream(
+            stub_db, row1.id, mapping_id=map_noname.id,
+            http_get=_stub_detail_get, http_probe=probe)
+    assert ei.value.status == 404
+    assert ei.value.code == "upstream_mapping_not_found"
+
+
+def test_grouped_mappings_episode_via_series_identity(stub_db):
+    """集的聚合经所属 series 的 tmdb 身份成组，季集号必须相同。"""
+    from backend.emby_server import upstream_item_mappings as uim
+    db = stub_db
+    db.add(em.UpstreamSource(
+        id=7, name="集桩源", source_type="applecms",
+        base_url="http://a.example", enabled=True,
+        user_agent="Mozilla/5.0 (test)"))
+    lib = em.Library(guid="lib-ep", name="集桩库",
+                     collection_type="tvshows", is_enabled=True,
+                     kind="applecms", upstream_source_ids="7")
+    db.add(lib)
+    db.flush()
+
+    def _series(guid):
+        row = em.MediaItem(guid=guid, library_id=lib.id,
+                           item_type="series", name="组剧",
+                           tmdb_id="777", probe_status="done")
+        db.add(row)
+        db.flush()
+        return row
+
+    def _episode(guid, series, ep_no):
+        row = em.MediaItem(guid=guid, library_id=lib.id,
+                           item_type="episode", name=f"第{ep_no}集",
+                           series_id=series.id, season_number=1,
+                           episode_number=ep_no, probe_status="done")
+        db.add(row)
+        db.flush()
+        return row
+
+    s1, s2 = _series("eps-s1"), _series("eps-s2")
+    ep1 = _episode("eps-1", s1, 1)
+    ep1_dup = _episode("eps-1d", s2, 1)
+    ep2_dup = _episode("eps-2d", s2, 2)
+    map_ep = em.UpstreamItemMapping(
+        local_item_id=ep1.id, source_id=7, upstream_item_id="e101",
+        confidence=0.9, evidence="tmdb", episode_index=1)
+    db.add(map_ep)
+    db.commit()
+    CacheManager.delete(up.cms_quality_cache_key(map_ep.id))
+    # 兄弟 series 下的同季同集行能看到这条线路
+    assert [m.id for m in uim.get_grouped_mappings(
+        db, ep1_dup.id)] == [map_ep.id]
+    # 集号不同不并
+    assert uim.get_grouped_mappings(db, ep2_dup.id) == []

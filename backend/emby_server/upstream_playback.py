@@ -1382,11 +1382,14 @@ def detail_line_enabled(db) -> bool:
 def get_displayable_mapping(db, local_item_id):
     """列表展示口径的映射读取：返回 ``(mapping, source)`` 或 None。
 
-    命中 get_best_mapping 且源存在、已启用才算可展示；映射指向的源
+    身份组（``get_grouped_mappings``，自身 + 同 tmdb 身份重复行）
+    偏好序首位映射且源存在、已启用才算可展示；映射指向的源
     已删/已停用时线路不出现（取流口复验同口径，见
-    resolve_mapped_upstream_stream）。
+    resolve_mapped_upstream_stream）。无重复行时组内首位与
+    get_best_mapping 逐字等价。
     """
-    mapping = uim.get_best_mapping(db, local_item_id)
+    grouped = uim.get_grouped_mappings(db, local_item_id)
+    mapping = grouped[0] if grouped else None
     if mapping is None:
         return None
     source = us.get_source(db, mapping.source_id)
@@ -1403,6 +1406,12 @@ def get_displayable_mappings(db, local_item_id):
     与 get_displayable_mapping 逐字一致（映射层 O-10 校验先行，
     再逐条验源存在且启用），偏好序即列表展示序（最佳在前）。
 
+    映射集合走映射层的身份组读口（``get_grouped_mappings``）：同
+    一部片的未合并重复行（同库同 tmdb 身份）线路一并下发——只读
+    命中行自身映射时，代表行线路全死、同片兄弟行的活线路永远
+    到不了客户端（2026-11-03《丛林猎凶》实证）。MediaSource 的
+    Id 仍挂命中条目的 guid + 映射 id，定向解析同口径认组内映射。
+
     择优排序（播放优化 B 件）：返回前按既有健康记录稳定排序——
     不可用/连续失败的线路沉底、延迟低且成功率高的排前面、最优线
     成为默认首位，其余线保留可手选；同分保持映射偏好序。健康
@@ -1410,7 +1419,7 @@ def get_displayable_mappings(db, local_item_id):
     因为择优把线路弄丢或把 PlaybackInfo 组装打挂。
     """
     out = []
-    for mapping in uim.get_all_mappings(db, local_item_id):
+    for mapping in uim.get_grouped_mappings(db, local_item_id):
         source = us.get_source(db, mapping.source_id)
         if source is None or not source.enabled:
             continue
@@ -1525,17 +1534,25 @@ def resolve_mapped_upstream_stream(db: Session, local_item_id: int, *,
 
     ``mapping_id`` 定向口径（站主 2026-11-02 亲定，FMBY 形态）：
     播放器点选了具体某条线路（MediaSourceId 带映射 id）时，只解
-    析那一条映射——映射不存在、已不属于本条目、或按读契约已不可
-    见（源停用/条目已死），一律 404 upstream_mapping_not_found
-    硬报错，**绝不偷偷换到最佳映射**。不带 mapping_id 的旧形态
-    （MediaSourceId 只到 ``:upstream``）保持原最佳映射口径。
+    析那一条映射——映射不存在、不属于本条目的身份组、或按读契约
+    已不可见（源停用/条目已死），一律 404
+    upstream_mapping_not_found 硬报错，**绝不偷偷换到最佳映射**。
+    不带 mapping_id 的旧形态（MediaSourceId 只到 ``:upstream``）
+    保持最佳映射口径。
+
+    身份组口径（2026-11-03）：映射集合与展示侧
+    :func:`get_displayable_mappings` 同源——走映射层
+    ``get_grouped_mappings``（自身 + 同库同 tmdb 身份的未合并
+    重复行）。展示下发了哪条线路，定向解析就必须认哪条；最佳
+    口径同样取组内偏好序首位（无重复行时与 get_best_mapping
+    逐字等价，自身无有效映射时才落到兄弟行）。
     """
     if not detail_line_enabled(db):
         raise UpstreamPlaybackError(
             404, "upstream_line_disabled", "上游线路未开启")
     if mapping_id is not None:
         mapping = None
-        for row in uim.get_all_mappings(db, local_item_id):
+        for row in uim.get_grouped_mappings(db, local_item_id):
             if row.id == mapping_id:
                 mapping = row
                 break
@@ -1543,7 +1560,8 @@ def resolve_mapped_upstream_stream(db: Session, local_item_id: int, *,
             raise UpstreamPlaybackError(
                 404, "upstream_mapping_not_found", "所选线路已不可用")
     else:
-        mapping = uim.get_best_mapping(db, local_item_id)
+        grouped = uim.get_grouped_mappings(db, local_item_id)
+        mapping = grouped[0] if grouped else None
         if mapping is None:
             raise UpstreamPlaybackError(
                 404, "upstream_mapping_not_found", "该条目暂无上游线路")

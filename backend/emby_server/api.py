@@ -1479,9 +1479,10 @@ def _synthetic_cms_base_source(item, mapping, base: str,
     备注画质标记，见 upstream_playback.read_cms_quality）叠成
     Bitrate 与一条视频轨摘要；缓存带 media playlist 分段时长
     （duration_sec）且本地行时长为空时，再用它填 RunTimeTicks。
-    没缓存就只有空壳——参数缺失只是
-    展示粗糙，点播不受影响。Size 永远不报：m3u8 推不出文件
-    大小，不编造。
+    没缓存时除空壳外再补一条无参数的视频轨占位（见函数尾）：
+    零轨道的 MediaSource 会被按媒体规格选源的三方客户端判为
+    不可用（2026-11-03 Reflix 实证），不再只是「展示粗糙」。
+    Size 永远不报：m3u8 推不出文件大小，不编造。
     """
     from backend.emby_server import upstream_playback as _up
     dto = _media_source(item, base, api_key, db, synthesize=True)
@@ -1513,6 +1514,24 @@ def _synthetic_cms_base_source(item, mapping, base: str,
         dto["MediaStreams"] = [_strip_nulls(video)] + rest
         dto["DefaultAudioStreamIndex"] = _default_audio_stream_index(
             dto["MediaStreams"])
+    if not any((s.get("Type") or "").lower() == "video"
+               for s in dto["MediaStreams"]):
+        # 无画质缓存（或缓存只有带宽/时长、没宽高）时补一条视频轨
+        # 占位：Emby 官方形态里 MediaSource 恒带视频轨，按媒体
+        # 规格选源的三方聚合客户端（Reflix 类）会把零轨道的源
+        # 直接判为不可用、报「没有可用的源」（2026-11-03 实证：
+        # 同一片有缓存的线路带真实视频轨、无缓存线路零轨道）。
+        # 占位只报结构事实（这是一条视频线路、默认轨），codec /
+        # 宽高 / 码率一律不编造——真值等取流回填画质缓存后走
+        # 上面的叠加分支替换本占位。
+        used = {s.get("Index") for s in dto["MediaStreams"]}
+        index = 0
+        while index in used:
+            index += 1
+        dto["MediaStreams"] = [{
+            "Index": index, "Type": "Video",
+            "IsDefault": True, "IsForced": False, "IsExternal": False,
+        }] + dto["MediaStreams"]
     return dto
 
 
