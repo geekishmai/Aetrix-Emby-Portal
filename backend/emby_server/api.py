@@ -753,7 +753,9 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
         # 本地条目排在主源之后，托管行（无本地主源）线路即全部
         # 来源、base_source 传 None 走合成口径（与 PlaybackInfo
         # 托管分支一致）。
-        # 与主源同一签名口径：签名轨只给已有 active 绑定的用户；
+        # 签名轨判定走 playback_gate.sign_allowed_for_item 单一入口：
+        # 已绑定恒签；未绑定只有条目免门禁（无界/CMS 库，2026-11-03
+        # 改定）时才签，本地条目未绑定仍不给签（与此前口径一致）。
         # 线路地址只回本服务取流口，(source_id, upstream_item_id)
         # 不下发，点播时取流口现查映射复验。
         # 进库一期（2026-11-01）：不再要求 file_path——上游托管行没有
@@ -766,8 +768,8 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
                 item,
                 dto["MediaSources"][0] if dto["MediaSources"] else None,
                 base, user_id, db, api_key,
-                with_sign=bool(user_id)
-                and _gate_mod.has_active_binding(db, user_id))
+                with_sign=_gate_mod.sign_allowed_for_item(
+                    db, user_id, item))
             if _up_lines:
                 dto["MediaSources"].extend(_up_lines)
                 dto["MediaSourceCount"] = len(dto["MediaSources"])
@@ -5781,8 +5783,10 @@ async def playback_info(
     await run_db(ensure_playback_allowed, db, user)
     # 播放门禁（2026-10-26 用户亲定硬规矩，无开关）：名下无 active 绑定
     # 的用户不发放播放地址；浏览、搜索、详情页不受影响（本函数只管下发）。
+    # 2026-11-03 改定：无界（CMS）库条目免绑定，判定走 playback_gate
+    # 的 binding_required_for_item 单一入口（本地/挂载库原样）。
     from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user)
+    await run_db(_gate.ensure_binding_playback_allowed_for_item, db, user, item)
     _pt.mark("auth")
     # 按需媒体信息探测：远程文件缺 codec 时入队，后台限流探测，不阻塞播放（v2.51.0）
     try:
@@ -7372,9 +7376,13 @@ async def upstream_stream(
     from backend.emby_server.async_db import run_db
     await run_db(ensure_playback_allowed, db, user)
     # 播放门禁（2026-10-26 用户亲定硬规矩）：上游 302 本次调用即新下发，
-    # 无条件过门禁（无已下发链接消费一说）。
+    # 无条件过门禁（无已下发链接消费一说）。2026-11-03 改定：本口按
+    # 源+上游条目寻址，经映射反查本地条目判定——全属无界（CMS）库
+    # 条目时免绑定（playback_gate.binding_required_for_upstream 单一
+    # 入口），其余原样。
     from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user)
+    await run_db(_gate.ensure_binding_playback_allowed_for_upstream,
+                 db, user, source_id, upstream_item_id)
     _msid = (getattr(request, "query_params", None) or {}).get("mediaSourceId")
     _ep_raw = (getattr(request, "query_params", None) or {}).get("episode")
     try:
@@ -7412,18 +7420,21 @@ async def upstream_item_stream(
     结构化错误明示失败、不回落任何其它线路；通过后走既有上游解析
     （先探后 302）并记 provider=upstream 起播事件。鉴权与播放门禁
     与显式上游口 upstream_stream 逐项同款（get_play_user +
-    ensure_playback_allowed + 无条件绑定门禁）；条目可见性走
-    _require_visible_item 护栏。路由注册在 video_hls 通配之前，
-    不会被 {transcode_path} 吞掉。
+    ensure_playback_allowed + 绑定门禁，CMS 库条目免绑定）；条目
+    可见性走 _require_visible_item 护栏。路由注册在 video_hls
+    通配之前，不会被 {transcode_path} 吞掉。
     """
     from backend.emby_server import upstream_playback as _up
     from backend.emby_server.async_db import run_db
     await run_db(ensure_playback_allowed, db, user)
-    # 播放门禁（2026-10-26 用户亲定硬规矩）：本次调用即新下发，
-    # 无条件过门禁（与 upstream_stream 同口径）。
-    from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user)
     item = await run_db(_require_visible_item, db, user, item_id)
+    # 播放门禁（2026-10-26 用户亲定硬规矩）：本次调用即新下发，
+    # 无条件过门禁（与 upstream_stream 同口径）。2026-11-03 改定：
+    # 无界（CMS）库条目免绑定——按条目判定须先拿到条目，故可见性
+    # 护栏提到门禁之前（与 PlaybackInfo 同序；本地条目判定不变）。
+    from backend.emby_server import playback_gate as _gate
+    await run_db(_gate.ensure_binding_playback_allowed_for_item,
+                 db, user, item)
     # 定向解析（多线形态）：MediaSourceId 带映射 id 时只解那一条，
     # 形态对不上（别条目的 id / 非上游 id / id 段非数字）直接 404
     # 硬报错——选错不偷偷换线。不带或只到 :upstream 的旧形态走
@@ -7528,9 +7539,12 @@ async def upstream_playlist_media(
     from backend.emby_server.async_db import run_db
 
     await run_db(ensure_playback_allowed, db, user)
-    from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user)
     item = await run_db(_require_visible_item, db, user, item_id)
+    # 绑定门禁与取流口同口径（2026-11-03 改定：无界库条目免绑定，
+    # 判定走 playback_gate 单一入口；先拿条目再判定）。
+    from backend.emby_server import playback_gate as _gate
+    await run_db(_gate.ensure_binding_playback_allowed_for_item,
+                 db, user, item)
     q = request.query_params
     target = _proxy.read_locator(
         q.get("u") or "", user.id, item_id, q.get("exp") or "")
