@@ -1222,6 +1222,45 @@ class UpstreamItemMapping(Base):
                         nullable=False)
 
 
+class CmsAdSkipDetection(Base):
+    """CMS 片头印制广告检测结果（广告剪除试点，2026-11-03）。
+
+    一行 = 一条上游映射（upstream_item_mappings.id）的一次现行
+    检测结论：后台检测把片头抽帧后按「静止段 + 已知赞助卡指纹」
+    双信号判定，结果记在这里供清单代理剪除时查（高置信 ad 才
+    剪，见 emby_server/cms_ad_skip）。证据只留帧文件路径与短码
+    说明，不存视频字节、不存任何凭据。不加外键（照
+    UpstreamItemMapping 先例）：映射删了行留着供追溯。由
+    create_all 自动建表，老库无需 ALTER。
+    """
+
+    __tablename__ = "cms_ad_skip_detections"
+
+    __table_args__ = (
+        UniqueConstraint("mapping_id",
+                         name="uq_cms_ad_skip_detection_mapping"),
+        Index("ix_cms_ad_skip_detections_source", "source_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mapping_id = Column(Integer, nullable=False)  # upstream_item_mappings.id
+    local_item_id = Column(Integer, nullable=False)  # emby_items.id
+    source_id = Column(Integer, nullable=False)  # upstream_sources.id
+    # ad / clean / static_unknown / insufficient / fetch_blocked / failed
+    status = Column(String(30), nullable=False, default="pending")
+    skip_seconds = Column(Float, nullable=True)  # 建议剪除的片头时长（仅 ad）
+    ad_start = Column(Float, nullable=True)
+    ad_end = Column(Float, nullable=True)
+    confidence = Column(Float, nullable=False, default=0.0)
+    detector_version = Column(String(20), nullable=False, default="")
+    seed_name = Column(String(100), nullable=False, default="")  # 命中的指纹名
+    evidence_path = Column(String(300), nullable=False, default="")  # 证据帧路径
+    detail = Column(String(500), nullable=False, default="")  # 短码/失败原因
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
+                        nullable=False)
+
+
 class AppleCMSDetailCache(Base):
     """苹果 CMS detail 抓取缓存（抓详情分流，2026-11-02）。
 
