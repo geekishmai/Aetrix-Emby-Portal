@@ -30,6 +30,14 @@
      （这就是改动前的形态，先证明测量方法有效）；
    - 现在：一次 0.35 秒的慢写走真实路由进来，心跳空洞 < 0.15s，而且会话与观看进度
      确实写进去了（活儿真干了，只是不在循环上）。
+
+墙钟口径（2026-11-03 修）：路线量测一律连采 3 次、取最小空洞定罪
+（``measure_sampled``）。单次最坏空洞会被 CI runner 的调度抖动污染——进程
+被饿死时连纯 ``time.sleep`` 的线程都同幅迟到，量到的不是循环被堵而是进程
+没拿到 CPU（main 自身的冒烟就这样以 0.222s 误红过，同轮其他三节只有
+0.012–0.015s）。取最小放不过真阻塞：慢写每次请求都在，真压回循环必然
+次次 ≥0.28s——第 3 节开头的「采样自证」就钉这条。阈值仍是 0.15s，不许
+靠调大数字凑绿。
 """
 import asyncio
 import os
@@ -315,6 +323,36 @@ async def measure(awaitable_factory):
     return elapsed, gap
 
 
+GAP_LIMIT = 0.15      # 心跳空洞阈值（与历史口径一致，不许靠调大数字凑绿）
+GAP_SAMPLES = 3       # 路线量测的连采次数（见 measure_sampled 的口径说明）
+
+
+async def measure_sampled(awaitable_factory, samples: int = GAP_SAMPLES):
+    """同一请求连采 samples 次，返回 (耗时列表, 空洞列表, 最小空洞)。
+
+    为什么取最小而不是单次定罪：单次「最坏空洞」量到的不只是事件循环被堵，
+    还有进程被调度饿死——共享 CI runner 上邻居抢 CPU 时，连一根纯
+    ``time.sleep`` 的线程都同幅迟到（2026-11-03 仪器化实证：压满 CPU 时
+    见证线程与循环心跳的迟到逐窗几乎相等）。这类抖动是偶发的，而要守的
+    回归是**确定性**的：0.35s 慢写每次请求都在，真压回事件循环必然次次
+    出现 ≥0.28s 空洞。所以取最小只放过偶发抖动、放不过真阻塞——第 3 节
+    开头有自证：真阻塞走同一套采样判定，最小空洞仍须 ≥0.28s。
+    """
+    elapsed_list: list[float] = []
+    gaps: list[float] = []
+    for _ in range(samples):
+        elapsed, gap = await measure(awaitable_factory)
+        elapsed_list.append(elapsed)
+        gaps.append(gap)
+    return elapsed_list, gaps, min(gaps)
+
+
+def _gap_detail(gaps: list[float], worst_before: float) -> str:
+    """采样明细：每个样本都摆出来，不许只报那个定罪的最小值"""
+    return (f"心跳空洞样本={['%.3f' % g for g in gaps]}，取最小={min(gaps):.3f}s"
+            f"（阈值 {GAP_LIMIT:.2f}s；改动前 ≈ {worst_before:.2f}s）")
+
+
 async def blocking_baseline() -> float:
     """基线自证：同步活儿直接跑在事件循环上（改动前就是这个形态）"""
     watch = LoopWatch()
@@ -332,6 +370,16 @@ async def section_hot_path():
     check("基线自证：同步写库跑在事件循环上会卡住全站（心跳空洞 ≥0.3s）",
           gap >= SLOW_WRITE * 0.8, f"心跳空洞={gap:.3f}s")
 
+    # 3.2 再自证采样判定不放过真阻塞：同样的同步活儿压在循环上连采 3 次，
+    #     取最小仍须 ≥0.28s（路线量测的定罪口径就是这个最小值）
+    async def _blocking() -> None:
+        time.sleep(SLOW_WRITE)
+
+    _, _bgaps, _bmin = await measure_sampled(_blocking)
+    check("采样自证：真阻塞连堵 3 次，最小空洞仍 ≥0.3s（取最小不放过真阻塞）",
+          _bmin >= SLOW_WRITE * 0.8,
+          f"心跳空洞样本={['%.3f' % g for g in _bgaps]}，取最小={_bmin:.3f}s")
+
     real_record = compat_routes._record_progress          # noqa: SLF001
 
     def slow_record(request, user, db, body):
@@ -348,7 +396,10 @@ async def section_hot_path():
                 box["resp"] = await api.post("/Sessions/Playing/Progress",
                                              headers=H, json=REPORT)
 
-            elapsed, gap = await measure(report)
+            # 同一上报连采 3 次（同位置重报是幂等的）：取最小空洞定罪，
+            # 且每次耗时都须 ≥0.28s——证明每个样本都真背着 0.35s 慢写在量
+            elapsed_list, gaps, gap = await measure_sampled(report)
+            elapsed = min(elapsed_list)
     finally:
         compat_routes._record_progress = real_record      # noqa: SLF001
 
@@ -356,9 +407,9 @@ async def section_hot_path():
     check("进度上报 → 200", resp is not None and resp.status_code == 200,
           f"HTTP {getattr(resp, 'status_code', '—')}")
     check("慢写确实发生了（0.35s 的活儿没被跳过）", elapsed >= SLOW_WRITE * 0.8,
-          f"耗时={elapsed:.3f}s")
-    check("这 0.35s 里事件循环保持响应（心跳空洞 < 0.15s）", gap < 0.15,
-          f"心跳空洞={gap:.3f}s（改动前 ≈ {SLOW_WRITE:.2f}s）")
+          f"耗时样本={['%.3f' % e for e in elapsed_list]}，最小={elapsed:.3f}s")
+    check("这 0.35s 里事件循环保持响应（心跳空洞 < 0.15s）", gap < GAP_LIMIT,
+          _gap_detail(gaps, SLOW_WRITE))
 
     with SessionLocal() as db:
         session = (db.query(em.PlaybackSession)
@@ -426,13 +477,24 @@ async def section_seek_notify():
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as api:
-            async def submit():
-                box["resp"] = await api.post(
-                    "/api/user/media-seek", headers=PORTAL_H,
-                    json={"movie_name": SEEK_NAME, "type": "movie"},
-                )
+            # 连采 3 次：求片同名会去重（409）、且占每日额度（默认 5 条），
+            # 所以样本 2/3 换名字——每次都是走全程的真提交（慢落库都在）；
+            # 语义断言仍只认样本 1（SEEK_NAME 那条），box 里也只留样本 1 的响应
+            sample_no = {"n": 0}
 
-            elapsed, gap = await measure(submit)
+            async def submit():
+                sample_no["n"] += 1
+                n = sample_no["n"]
+                name = SEEK_NAME if n == 1 else f"{SEEK_NAME}·采样{n}"
+                resp = await api.post(
+                    "/api/user/media-seek", headers=PORTAL_H,
+                    json={"movie_name": name, "type": "movie"},
+                )
+                if n == 1:
+                    box["resp"] = resp
+
+            elapsed_list, gaps, gap = await measure_sampled(submit)
+            elapsed = min(elapsed_list)
     finally:
         notif_mod._persist_staff_messages = real_persist      # noqa: SLF001
 
@@ -440,9 +502,9 @@ async def section_seek_notify():
     check("求片提交 → 200", resp is not None and resp.status_code == 200,
           f"HTTP {getattr(resp, 'status_code', '—')} {getattr(resp, 'text', '')[:120]}")
     check("慢落库确实发生了（0.35s 的通知活儿没被跳过）", elapsed >= SLOW_WRITE * 0.8,
-          f"耗时={elapsed:.3f}s")
-    check("这 0.35s 里事件循环保持响应（心跳空洞 < 0.15s）", gap < 0.15,
-          f"心跳空洞={gap:.3f}s（改动前 ≈ {SLOW_WRITE:.2f}s）")
+          f"耗时样本={['%.3f' % e for e in elapsed_list]}，最小={elapsed:.3f}s")
+    check("这 0.35s 里事件循环保持响应（心跳空洞 < 0.15s）", gap < GAP_LIMIT,
+          _gap_detail(gaps, SLOW_WRITE))
 
     with SessionLocal() as db:
         row = (db.query(models.MovieRequest)
@@ -578,7 +640,10 @@ async def section_probe_layer():
                     box["resp"] = await api.post(f"/api/admin/servers/{target_id}/test",
                                                  headers=admin_h)
 
-                elapsed, gap = await measure(hit_probe)
+                # 连采 3 次取最小（口径见 measure_sampled）：体检重打是幂等的，
+                # 每次都带着 0.35s 慢写——每次耗时都须 ≥0.28s 才算量得真
+                elapsed_list, gaps, gap = await measure_sampled(hit_probe)
+                elapsed = min(elapsed_list)
         finally:
             registry.probe_server = real_probe
             node_lib.fetch_node_identity = real_identity
@@ -587,9 +652,9 @@ async def section_probe_layer():
         check("服务器体检 → 200", resp is not None and resp.status_code == 200,
               f"HTTP {getattr(resp, 'status_code', '—')}")
         check("慢写确实发生了（0.35s 的落库没被跳过）", elapsed >= PROBE_SLEEP * 0.8,
-              f"耗时={elapsed:.3f}s")
-        check("这 0.35s 里事件循环保持响应（心跳空洞 < 0.15s）", gap < 0.15,
-              f"心跳空洞={gap:.3f}s（改动前 ≈ {PROBE_SLEEP:.2f}s）")
+              f"耗时样本={['%.3f' % e for e in elapsed_list]}，最小={elapsed:.3f}s")
+        check("这 0.35s 里事件循环保持响应（心跳空洞 < 0.15s）", gap < GAP_LIMIT,
+              _gap_detail(gaps, PROBE_SLEEP))
 
         with SessionLocal() as db:
             row = (db.query(models.RemoteServer)
@@ -630,7 +695,9 @@ async def section_probe_layer():
                     box["resp"] = await api.post("/api/admin/emby/servers/mounts/refresh",
                                                  headers=admin_h)
 
-                elapsed, gap = await measure(hit_mounts)
+                # 连采 3 次取最小（口径见 measure_sampled）：快照重写是幂等的
+                elapsed_list, gaps, gap = await measure_sampled(hit_mounts)
+                elapsed = min(elapsed_list)
         finally:
             mount_health.fetch_ea_health = real_fetch
             mount_health.write_ea_health = real_write
@@ -639,9 +706,9 @@ async def section_probe_layer():
         check("挂载体检 → 200", resp is not None and resp.status_code == 200,
               f"HTTP {getattr(resp, 'status_code', '—')} {getattr(resp, 'text', '')[:120]}")
         check("慢快照确实写了（0.35s 没被跳过）", elapsed >= PROBE_SLEEP * 0.8,
-              f"耗时={elapsed:.3f}s")
-        check("这 0.35s 里事件循环保持响应（心跳空洞 < 0.15s）", gap < 0.15,
-              f"心跳空洞={gap:.3f}s（改动前 ≈ {PROBE_SLEEP:.2f}s）")
+              f"耗时样本={['%.3f' % e for e in elapsed_list]}，最小={elapsed:.3f}s")
+        check("这 0.35s 里事件循环保持响应（心跳空洞 < 0.15s）", gap < GAP_LIMIT,
+              _gap_detail(gaps, PROBE_SLEEP))
         with SessionLocal() as db:
             snapshot = mount_health.read_ea_health(db, realm_id)
             ids = [m.get("id") for m in (snapshot.get("mounts") or []) if isinstance(m, dict)]
