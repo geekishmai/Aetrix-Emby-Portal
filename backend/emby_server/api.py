@@ -6185,6 +6185,16 @@ async def playback_info(
             "ErrorCode": "NoCompatibleStream",
             "ErrorMessage": _pi_quota_error,
         })
+    # 起播取链预取（2026-11-04 原型，默认关）：stream 请求的 play_target
+    # 段（换链全链，冒烟实测 4.4s）在这里提前跑——客户端 PlaybackInfo 与
+    # stream 之间通常有 1-5s 间隙，预取命中三层缓存后 play_target≈0。
+    # 只对 mount:// 条目、走既有 resolve_play_target（115 调用次数不变，
+    # 只是把 stream 时的那次提前）；开关 PLAY_TTFB_PREFETCH_ENABLED 默认 0。
+    try:
+        from backend.emby_server import play_prefetch as _pp
+        _pp.try_prefetch(db, item)
+    except Exception:  # noqa: BLE001 — 预取是纯增益
+        pass
     return _strip_nulls({
         "MediaSources": sources,
         "PlaybackVariants": _playback_variants,
