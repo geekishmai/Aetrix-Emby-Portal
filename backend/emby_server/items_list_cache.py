@@ -39,6 +39,10 @@
 ``items_list_cache_ttl_seconds``（默认 300，范围 10~3600）、
 ``items_list_cache_max_ids``（默认 5000，范围 100~50000）。
 读法与 items_dedup_cache 同风格（store 热读，读失败回默认）。
+
+本模块尾部另有一层「计数缓存」（/Items/Counts 导航计数与 Views 库
+ChildCount）：与本层共用同一开关/TTL/Redis 后端/数据版本号，失效与
+新鲜度口径逐字一致，见该节注释。
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import json
 import logging
 import struct
 import threading
@@ -533,6 +538,89 @@ def put_cached_page(db: Session, query_params, lib_ids: list[int],
         # 计数放最后：旧后端替身可能没有 incr，_do 会吞掉异常，
         # 不影响上面的 set/zadd/淘汰语义。
         c.incr(f"{_STATS_PREFIX}put")
+        return True
+
+    _dedup._do(_op, False)
+
+
+# ---------------- 计数缓存（/Items/Counts 导航计数、Views 库 ChildCount） ----------------
+#
+# 为什么单独有这一层：计数类全表 COUNT(*) 是 PG 的稳定热源——生产实测
+# （2026-11-03，pg_stat_statements + 容器内实测）/Items/Counts 一次请求
+# 要跑两条带身份门子句的全表计数、每条约 13s；Views 在身份门开时每个库
+# 一条现算计数（约 0.5s/条）。而计数的输入只有「条目数据 + 可见范围 +
+# 门开关形态」，条目数据一变就该失效——与 ID 清单缓存里 total 的失效
+# 口径完全同构。故本层不新造机制：同一开关（items_list_cache_enabled）、
+# 同一 TTL、同一 Redis 后端（_dedup._do）、同一套数据版本号
+# （items_dedup_version_lib_<库id>，全部条目写路径都会 bump）。
+# 新鲜度契约与 ID 清单一致：走应用写路径的变更靠版本号即刻失效；
+# 不走 bump 的残余写路径（运维手工改库等）由条目 TTL 兜底（默认 300s）。
+# fail-open：开关关 / TTL<=0 / Redis 异常 / 值损坏 → 调用方现行实时计数，
+# 请求不受影响。键空间天然有界（范围×形态变体 + 每库一条），不做索引淘汰。
+
+_COUNTS_KEY_PREFIX = "items:counts:v1"
+_COUNTS_MAGIC = "IC1:"
+
+
+def _counts_key(lib_ids: list[int], versions: dict, variant: str) -> str:
+    lib_ids = sorted({int(i) for i in (lib_ids or [])})
+    scope_hash = hashlib.sha1(",".join(map(str, lib_ids)).encode()).hexdigest()[:12]
+    ver = "|".join(f"{lid}={versions.get(lid, '0')}" for lid in lib_ids)
+    ver_hash = hashlib.sha1(ver.encode()).hexdigest()[:16]
+    return f"{_COUNTS_KEY_PREFIX}:a{scope_hash}:{variant}:v{ver_hash}"
+
+
+def get_cached_counts(db: Session, lib_ids: Optional[list[int]],
+                      variant: str) -> Optional[dict]:
+    """读计数缓存：命中返回 payload dict；miss/禁用/异常/损坏返回 None。
+
+    ``lib_ids=None`` = 作用域未知（scope_lib_ids 读库失败），整层
+    fail-closed 不读不写，与 ID 清单缓存同一纪律。
+    """
+    if lib_ids is None or not cache_enabled(db):
+        return None
+    if cache_ttl_seconds(db) <= 0:
+        return None
+    versions = _dedup.read_data_versions(db, lib_ids)
+    key = _counts_key(lib_ids, versions, variant)
+    raw = _dedup._do(lambda c: c.get(key), None)
+    if raw is None:
+        return None
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if not str(raw).startswith(_COUNTS_MAGIC):
+            return None
+        payload = json.loads(str(raw)[len(_COUNTS_MAGIC):])
+    except Exception:  # noqa: BLE001 值损坏按 miss 处理（fail-open）
+        return None
+    if not isinstance(payload, dict):
+        return None
+    _bump_stat("counts_hit")
+    return payload
+
+
+def put_cached_counts(db: Session, lib_ids: Optional[list[int]],
+                      variant: str, payload: dict) -> None:
+    """写计数缓存：失败静默（不影响请求）。``lib_ids=None`` 不写（同上）。"""
+    if lib_ids is None or not cache_enabled(db):
+        return
+    ttl = cache_ttl_seconds(db)
+    if ttl <= 0:
+        return
+    try:
+        val = _COUNTS_MAGIC + json.dumps(
+            {str(k): int(v) for k, v in dict(payload).items()},
+            separators=(",", ":"), sort_keys=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("计数缓存序列化失败: %s", exc)
+        return
+    versions = _dedup.read_data_versions(db, lib_ids)
+    key = _counts_key(lib_ids, versions, variant)
+
+    def _op(c):
+        c.set(key, val, ex=ttl)
+        c.incr(f"{_STATS_PREFIX}counts_put")
         return True
 
     _dedup._do(_op, False)

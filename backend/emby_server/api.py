@@ -2362,12 +2362,22 @@ def _library_item_count(db, lib) -> int:
         # 身份门开时缓存列是全量口径（含未绑定条目），Views 的 ChildCount
         # 必须与点进去的列表同口径，只数已绑定行——走实时计数（与本函数
         # 缓存为空时的既有回退同路径、同成本），不能用缓存列。
-        return soft_delete.count_visible(
+        # 计数缓存（2026-11-03 计数治理）：这条现算带身份门子句、每库约
+        # 0.5s，Views 一次请求要按库数跑一轮——结果只随该库条目数据
+        # 变化，走与列表 total 同一套版本号失效 + TTL 兜底（见
+        # items_list_cache「计数缓存」节），命中时不再逐库现算。
+        _cnt_variant = "child:g1"
+        _cached = _list_cache.get_cached_counts(db, [lib.id], _cnt_variant)
+        if _cached is not None:
+            return int(_cached.get("n", 0))
+        _n = soft_delete.count_visible(
             db,
             em.MediaItem.library_id == lib.id,
             em.MediaItem.item_type.in_(["movie", "series"]),
             identity_gate.identity_clause(),
         )
+        _list_cache.put_cached_counts(db, [lib.id], _cnt_variant, {"n": _n})
+        return _n
     if lib.item_count is not None:
         return lib.item_count
     # count_visible 而非 Query.count()：后者数得到已下架的条目（软删除可见性过滤
@@ -3555,7 +3565,13 @@ def _query_items(request: Request, user: models.WebUser, db: Session, base: str)
                         # R4（2026-10-18）：dropped 恒为 query 的子集（T/E/N 分支都从 query
                         # 里圈出），故 count(kept) = count(query) - len(dropped)，数学精确
                         # 相等。省掉 16k NOT IN 的 COUNT（生产实测 ~100ms）。
-                        total = query.order_by(None).count() - (len(dropped) if dropped else 0)
+                        # 计数形态走 Core COUNT(*)（PA-035 同款）：Query.count() 会把
+                        # 全列实体查询包成子查询再数（pg_stat_statements 里的
+                        # count(*) FROM (SELECT <全列> ...) 形态），PG 侧无法对部分
+                        # 索引做 index-only 扫描且白读宽列；Core 形结果逐行等价。
+                        total = (query.order_by(None)
+                                 .with_entities(func.count()).scalar() or 0) - (
+                                     len(dropped) if dropped else 0)
                     # 未命中时顺手回填：一条 id-only 全量排序查询的成本被后续命中摊薄。
                     # 排序口径与上面的 page_ids 查询逐字一致（含 id 决胜键），结果天然一致。
                     # 只在 want_total=true 时回填：缓存的 total 必须是真实 kept 总数，
@@ -3767,8 +3783,10 @@ def get_latest(request: Request, user: models.WebUser = Depends(get_emby_user),
 @emby_router.get("/emby/Items/Counts")
 @emby_router.get("/Items/Counts")
 def items_counts(user: models.WebUser = Depends(get_emby_user), db: Session = Depends(get_db)):
-    # 一次 GROUP BY 顶掉三个 item_type 计数（客户端启动时就会问这个端点），
-    # 总数也走 Core 的 COUNT(*)（不再让 ORM 把实体包一层子查询）。
+    # 一次 GROUP BY 顶掉三个 item_type 计数（客户端启动时就会问这个端点）；
+    # 总数由 GROUP BY 结果汇总（item_type 列非空，Σ各类型行数与全量
+    # COUNT(*) 数学等价），不再为总数单独跑一遍全表扫描——旧实现一次
+    # 请求两条全表计数，生产实测每条约 13s（2026-11-03 计数治理）。
     # 计数同样按可见范围收：否则客户端导航栏显示 120 部、点进去只有 40 部。
     allowed = _library_scope(db, user)
     # 身份门（货架面）：计数必须与列表同口径，未绑定条目不计——否则
@@ -3777,15 +3795,25 @@ def items_counts(user: models.WebUser = Depends(get_emby_user), db: Session = De
     # 跟随 series）；三期开关开启时，电影/剧集计数改为「代表组数」
     # （与列表 TotalRecordCount 同源：同分层身份键只计一组；集与其它
     # 类型不去重，仍按行数；总数 = 组数 + 集行数 + 其它类型行数）。
-    _gate_clause = (identity_gate.identity_clause()
-                    if identity_gate.gate_enabled() else None)
+    _gate_on = identity_gate.gate_enabled()
+    _phase3_on = identity_gate.phase3_enabled()
+    _gate_clause = identity_gate.identity_clause() if _gate_on else None
+    # 计数缓存：与列表 total 共用同一套基础设施（版本号失效 + TTL 兜底
+    # + fail-open，见 items_list_cache「计数缓存」节）。计数的全部输入
+    # （条目数据、可见范围、门形态）都在键里，命中时本端点不打 emby_items。
+    _cnt_libs = _list_cache.scope_lib_ids(db, allowed)
+    _cnt_variant = f"nav:g{1 if _gate_on else 0}:p{1 if _phase3_on else 0}"
+    _cached = _list_cache.get_cached_counts(db, _cnt_libs, _cnt_variant)
+    if _cached is not None:
+        movie_c = int(_cached.get("movie", 0))
+        series_c = int(_cached.get("series", 0))
+        episode_c = int(_cached.get("episode", 0))
+        item_c = int(_cached.get("total", 0))
+        return _items_counts_payload(movie_c, series_c, episode_c, item_c)
     _by_type_q = db.query(em.MediaItem.item_type, func.count()).filter(
-        em.MediaItem.is_hidden == False)  # noqa: E712
-    _total_q = db.query(func.count()).select_from(em.MediaItem).filter(
         em.MediaItem.is_hidden == False)  # noqa: E712
     if _gate_clause is not None:
         _by_type_q = _by_type_q.filter(_gate_clause)
-        _total_q = _total_q.filter(_gate_clause)
     by_type = dict(
         _scope_items(_by_type_q, allowed)
         .group_by(em.MediaItem.item_type)
@@ -3794,8 +3822,8 @@ def items_counts(user: models.WebUser = Depends(get_emby_user), db: Session = De
     movie_c = int(by_type.get("movie", 0))
     series_c = int(by_type.get("series", 0))
     episode_c = int(by_type.get("episode", 0))
-    item_c = int(_scope_items(_total_q, allowed).scalar() or 0)
-    if identity_gate.phase3_enabled():
+    item_c = int(sum(int(v) for v in by_type.values()))
+    if _phase3_on:
         # 三期代表组对齐：已绑定行只认 tmdb/imdb 两层身份键（弱键组
         # 在货架面本就不出现，故分层键与列表代表组一一对应；与
         # dedup_key 的分组结果无关，不改分页去重层）。组键含库 id——
@@ -3836,6 +3864,16 @@ def items_counts(user: models.WebUser = Depends(get_emby_user), db: Session = De
         series_c = int(group_by_type.get("series", 0))
         item_c = movie_c + series_c + episode_c + row_others
 
+    _list_cache.put_cached_counts(
+        db, _cnt_libs, _cnt_variant,
+        {"movie": movie_c, "series": series_c,
+         "episode": episode_c, "total": item_c})
+    return _items_counts_payload(movie_c, series_c, episode_c, item_c)
+
+
+def _items_counts_payload(movie_c: int, series_c: int,
+                          episode_c: int, item_c: int) -> dict:
+    """Items/Counts 的固定返回形（缓存命中与现算共用，保证逐字一致）。"""
     return {
         "MovieCount": movie_c,
         "SeriesCount": series_c,
