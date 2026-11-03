@@ -219,3 +219,93 @@ def test_concurrent_reads_and_refills_are_locked():
     assert not errors
     assert results == [50] * 8
     assert len(h._dir_cache[(st.scope, "0")][1]) == 50
+
+
+# ---------------- AH P2：not_found 负缓存 ----------------
+
+def test_negative_cache_skips_repeat_resolution():
+    """路径解析失败后短期记负缓存：重复解析不再打 115。"""
+    pages = {"0": [{"name": "媒体库", "is_dir": True, "cid": "10"}],
+             "10": []}
+    h = _handler(pages)
+    st = _upsert(h)
+    from backend.emby_server.provider_runtime import ProviderRuntimeError
+    with pytest.raises(ProviderRuntimeError):
+        h._cid_of(st, "/媒体库/不存在")
+    n1 = len(st.client.calls)
+    with pytest.raises(ProviderRuntimeError):
+        h._cid_of(st, "/媒体库/不存在")
+    assert len(st.client.calls) == n1, "负缓存期内不应再发 list"
+
+
+def test_negative_cache_expires_and_recovers():
+    """负缓存到期后重新解析；目录出现后解析成功并清负缓存。"""
+    pages = {"0": [{"name": "媒体库", "is_dir": True, "cid": "10"}],
+             "10": []}
+    h = _handler(pages)
+    st = _upsert(h)
+    from backend.emby_server.provider_runtime import ProviderRuntimeError
+    with pytest.raises(ProviderRuntimeError):
+        h._cid_of(st, "/媒体库/新目录")
+    # 到期：手拨负缓存时间戳
+    key = (st.scope, "/媒体库/新目录")
+    with h._cache_lock:
+        h._negative_cache[key] = time.monotonic() - h._negative_ttl - 1
+    # 目录出现了
+    st.client.pages["10"] = [{"name": "新目录", "is_dir": True, "cid": "20"}]
+    assert h._cid_of(st, "/媒体库/新目录") == "20"
+    assert not h._negative_hit(st.scope, "/媒体库/新目录")
+
+
+def test_locate_negative_cache_for_files():
+    """文件级 not_found 也进负缓存。"""
+    pages = {"0": [{"name": "媒体库", "is_dir": True, "cid": "10"}],
+             "10": [{"name": "剧", "is_dir": True, "cid": "20"}],
+             "20": []}
+    h = _handler(pages)
+    st = _upsert(h)
+    from backend.emby_server.provider_runtime import ProviderRuntimeError
+    with pytest.raises(ProviderRuntimeError):
+        h._locate(st, "/媒体库/剧/无此文件.mkv")
+    n1 = len(st.client.calls)
+    with pytest.raises(ProviderRuntimeError):
+        h._locate(st, "/媒体库/剧/无此文件.mkv")
+    assert len(st.client.calls) == n1
+
+
+# ---------------- AH P2：空目录不再清链 ----------------
+
+def test_empty_listing_keeps_cid_cache():
+    """空目录（真实空目录）不再清 cid 链：下一轮解析直接命中缓存。"""
+    pages = {"0": [{"name": "媒体库", "is_dir": True, "cid": "10"}],
+             "10": [{"name": "空季", "is_dir": True, "cid": "20"}],
+             "20": []}
+    h = _handler(pages)
+    st = _upsert(h)
+    # 第一次 list_page：解析出 cid=20 并列出（空）
+    h.list_page(_Session("s1"), "/媒体库/空季", None, None)
+    n_after_first = len(st.client.calls)
+    assert (st.scope, "/媒体库/空季") in h._cid_cache, "cid 缓存应保留"
+    # 第二次 list_page：零新增调用（旧实现会清链 → 重解析祖先）
+    h.list_page(_Session("s1"), "/媒体库/空季", None, None)
+    assert len(st.client.calls) == n_after_first
+
+
+# ---------------- AH P2：淘汰先淘汰浅层 ----------------
+
+def test_eviction_prefers_shallow_dirs():
+    """超限淘汰：浅层（根/一级）先被淘汰，深层保留。"""
+    h = _handler({})
+    st = _upsert(h)
+    h._dir_cache_ttl = 300.0
+    h._cache_max_dirs = 4
+    # 预填 4 个深层 + 触发浅层回填 → 浅层应先被淘汰
+    for depth in range(3, 7):
+        cid = str(1000 + depth)
+        h._dir_cache[(st.scope, "/" * depth + "deep")] = (
+            time.monotonic() + 300, [])
+    # 回填浅层（触发淘汰）
+    h._raw_list(st, "0")
+    assert (st.scope, "0") not in h._dir_cache, "浅层（根）应先被淘汰"
+    deep_keys = [k for k in h._dir_cache if k[1].startswith("////")]
+    assert len(deep_keys) >= 3, "深层应尽量保留"

@@ -141,6 +141,12 @@ class P115SidecarHandler:
             "P115_SIDECAR_CID_CACHE_SEC", self._dir_cache_ttl, 0.0)
         self._cache_max_dirs = env_int(
             "P115_SIDECAR_CACHE_MAX_DIRS", 4096, 16, 100000)
+        # not_found 负缓存（2026-11-04 AH P2）：路径解析失败后短期记「不存在」，
+        # 期间重复解析不再打 115（播放器对死链常连探多次）。TTL 短（默认 60s），
+        # 目录移动/新建场景下最多延迟 60s 可见。
+        self._negative_cache: dict[tuple[str, str], float] = {}
+        self._negative_ttl = env_float(
+            "P115_SIDECAR_NEGATIVE_CACHE_SEC", 60.0, 0.0)
 
     # ---- 会话 ----
     def session_upsert(self, session_id: str, data: dict) -> None:
@@ -223,6 +229,47 @@ class P115SidecarHandler:
             for cid in stale_cids:
                 self._dir_cache.pop((scope, cid), None)
 
+    def _negative_hit(self, scope: str, rel: str) -> bool:
+        """负缓存命中（路径近期确认过不存在）；0 TTL 或过期 = 未命中。"""
+        if self._negative_ttl <= 0:
+            return False
+        now = time.monotonic()
+        with self._cache_lock:
+            stamp = self._negative_cache.get((scope, rel))
+            return bool(stamp is not None and now - stamp < self._negative_ttl)
+
+    def _negative_put(self, scope: str, rel: str) -> None:
+        """记录「该路径不存在」；同时淘汰过期负缓存项。"""
+        if self._negative_ttl <= 0:
+            return
+        now = time.monotonic()
+        with self._cache_lock:
+            self._negative_cache[(scope, rel)] = now
+            if len(self._negative_cache) > self._cache_max_dirs:
+                expired = [k for k, t in self._negative_cache.items()
+                           if now - t >= self._negative_ttl]
+                for k in expired:
+                    self._negative_cache.pop(k, None)
+                # 仍超限：清一半最旧的
+                if len(self._negative_cache) > self._cache_max_dirs:
+                    ordered = sorted(self._negative_cache.items(),
+                                     key=lambda kv: kv[1])
+                    for k, _t in ordered[:len(ordered) // 2]:
+                        self._negative_cache.pop(k, None)
+
+    def _negative_clear(self, scope: str, rel: str) -> None:
+        """清掉某路径的负缓存（目录重新出现/创建后调用）。"""
+        with self._cache_lock:
+            self._negative_cache.pop((scope, rel), None)
+
+    @staticmethod
+    def _ancestor_rels(rel: str) -> list:
+        """rel 的祖先链 + 自身（浅 → 深）：负缓存清理用。"""
+        rel = "/" + (rel or "").lstrip("/")
+        rel = rel.rstrip("/") or "/"
+        parts = [p for p in rel.split("/") if p]
+        return ["/" + "/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+
     def _raw_list(self, state: _SessionState, cid: str,
                   deadline: float | None = None,
                   fresh: bool = False) -> list[dict]:
@@ -249,12 +296,24 @@ class P115SidecarHandler:
             with self._cache_lock:
                 self._dir_cache[key] = (now + self._dir_cache_ttl, list(items))
                 if len(self._dir_cache) > self._cache_max_dirs:
-                    # 淘汰最早过期的一半（过期优先）
-                    ordered = sorted(self._dir_cache.items(),
-                                     key=lambda kv: kv[1][0])
-                    for k, _v in ordered[:max(1, len(ordered) // 2)]:
-                        self._dir_cache.pop(k, None)
+                    self._evict_dir_cache_locked(state.scope)
         return items
+
+    def _evict_dir_cache_locked(self, scope: str) -> None:
+        """超限时淘汰一半目录缓存（须持 _cache_lock）。
+
+        AH P2：**先淘汰浅层（根目录/一级分类目录）**。深层目录整轮扫描
+        只问一次，其列表当轮内就该被消费；浅层目录下一轮还会再问。旧实现
+        按「最早过期」淘汰，大库超限时热点根目录先被挤出去 → 下一轮从根
+        重新解析整条祖先链（又一批 list）。排序键 (深度, 过期)：深度小
+        （浅）的排前面 = 先淘汰。
+        """
+
+        ordered = sorted(self._dir_cache.items(),
+                         key=lambda kv: (kv[0][1].count("/") if kv[0][1] not in ("", "/") else 0,
+                                         kv[1][0]))
+        for k, _v in ordered[:max(1, len(ordered) // 2)]:
+            self._dir_cache.pop(k, None)
 
     def _cid_of(self, state: _SessionState, rel: str,
                 deadline: float | None = None,
@@ -267,6 +326,9 @@ class P115SidecarHandler:
                 hit = self._cid_cache.get((state.scope, rel))
                 if hit is not None and hit[0] > now:
                     return hit[1]
+        if self._negative_hit(state.scope, rel):
+            raise ProviderRuntimeError(
+                "not_found", f"115 上找不到目录：{rel}（近期已确认不存在）")
         cid = state.root_cid
         prefix = ""
         for part in [p for p in rel.split("/") if p]:
@@ -287,8 +349,10 @@ class P115SidecarHandler:
                 None,
             )
             if child is None:
-                # AE-3②：路径不存在 → 清该前缀（可能目录被移动/改名）
+                # AE-3②：路径不存在 → 清该前缀（可能目录被移动/改名）；
+                # AH P2：记负缓存，短期重复解析不再打 115。
                 self._drop_cid_chain(state.scope, prefix)
+                self._negative_put(state.scope, rel)
                 raise ProviderRuntimeError("not_found", f"115 上找不到目录：{rel}")
             cid = str(child.get("cid") or "")
             if self._cid_cache_ttl > 0:
@@ -299,6 +363,8 @@ class P115SidecarHandler:
             with self._cache_lock:
                 self._cid_cache[(state.scope, rel)] = (
                     now + self._cid_cache_ttl, cid)
+        # 解析成功 = 路径存在：负缓存作废（目录被新建/移动回来的场景）
+        self._negative_clear(state.scope, rel)
         return cid
 
     def _locate(self, state: _SessionState, rel: str,
@@ -308,6 +374,9 @@ class P115SidecarHandler:
         if rel in state.pick_cache:
             return {"pickcode": state.pick_cache[rel], "name": os.path.basename(rel)}
         parent, _, name = rel.rpartition("/")
+        if self._negative_hit(state.scope, rel):
+            raise ProviderRuntimeError(
+                "not_found", f"115 上找不到文件：{rel}（近期已确认不存在）")
         for item in self._raw_list(
                 state,
                 self._cid_of(state, parent or "/", deadline=deadline, fresh=fresh),
@@ -315,6 +384,7 @@ class P115SidecarHandler:
             if item.get("name") == name and not item.get("is_dir"):
                 return {"pickcode": str(item.get("pickcode") or ""), "name": name,
                         "size": int(item.get("size") or 0)}
+        self._negative_put(state.scope, rel)
         raise ProviderRuntimeError("not_found", f"115 上找不到文件：{rel}")
 
     @staticmethod
@@ -349,10 +419,13 @@ class P115SidecarHandler:
         size = DEFAULT_PAGE_SIZE if page_size is None else int(page_size)
         size = max(1, min(size, MAX_PAGE_SIZE))
         items = self._raw_list(state, cid, deadline=deadline, fresh=fresh)
-        if not items and rel != "/":
-            # AE-3②：解析出的 cid 列不出任何条目——可能是目录已移动/重命名的
-            # 死 cid；清缓存让下次调用重新解析（空目录只是多一次解析，无副作用）。
-            self._drop_cid_chain(state.scope, rel)
+        # AH P2（空目录清链放大）：不再「列空即清链」。真实空目录（常见：
+        # 空季目录、刚建的分类目录）每轮都会命中这里，旧实现把 cid 链清掉
+        # → 下一轮重解析又要 list 祖先链，放大成「空目录数 × 深度」次 list。
+        # 现在只信任 cid 缓存本身：cid 是解析时从父列表核实的；目录被移动/
+        # 重命名的失效场景由 not_found 重试路径（_locate_with_retry →
+        # _drop_cid_chain）兜底，不在这里预防性清。
+        # _drop_cid_chain(state.scope, rel)  # 已移除，见上注释
         page = items[offset:offset + size]
         entries = [self._entry(item, rel) for item in page]
         nxt = offset + size
@@ -441,6 +514,10 @@ class P115SidecarHandler:
             if exc.kind != "not_found":
                 raise
             self._drop_cid_chain(state.scope, rel)
+            # AH P2：负缓存也要一起清（祖先链 + 自身），否则重试会被
+            # 「近期已确认不存在」直接顶回来，自愈失效。
+            for part_rel in self._ancestor_rels(rel):
+                self._negative_clear(state.scope, part_rel)
             return self._locate(state, rel, deadline=deadline)
 
     def resolve_play_target(self, session, path: str,
