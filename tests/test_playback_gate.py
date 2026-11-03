@@ -93,16 +93,60 @@ def test_gate_allows_active_drive(db):
 
 def test_gate_blocks_active_pan115_only(db):
     # 夸克/115 绑定线已下线（2026-11-02 删除单）：只剩 115 绑定
-    # 的用户视为无绑定，门禁拦截。
+    # 的用户视为无绑定，门禁拦截；文案走下线专用句（2026-11-03
+    # 收敛单：明说已下线、请改绑 Drive，不用笼统提示）。
     user = _user(db, "u1")
     _binding(db, user.id, "active", provider="pan115")
-    _assert_blocked(db, user.id)
+    _assert_blocked_with_removed_message(db, user.id)
 
 
 def test_gate_blocks_active_quark_only(db):
     user = _user(db, "u1")
     _binding(db, user.id, "active", provider="quark")
+    _assert_blocked_with_removed_message(db, user.id)
+
+
+def _assert_blocked_with_removed_message(db, user_id):
+    user = db.query(base_models.WebUser).filter(
+        base_models.WebUser.id == user_id).first()
+    with pytest.raises(HTTPException) as excinfo:
+        gate.ensure_binding_playback_allowed(db, user)
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == gate.GATE_MESSAGE_REMOVED_PROVIDER
+    assert excinfo.value.detail != gate.GATE_MESSAGE
+
+
+def test_gate_removed_provider_message_for_active_pan115(db):
+    # 名下有已下线 115 绑定（存量 active 行）被拦时，提示必须明说
+    # 这条线已下线、请改绑 Drive，不许只给笼统的绑定提示
+    # （2026-11-03 存量收敛单）。
+    user = _user(db, "u1")
+    _binding(db, user.id, "active", provider="pan115")
+    _assert_blocked_with_removed_message(db, user.id)
+
+
+def test_gate_removed_provider_message_for_expired_quark(db):
+    # 已下线 provider 的行不论什么状态都算"存在已下线绑定"：
+    # 过期夸克行同样拿新提示。
+    user = _user(db, "u1")
+    _binding(db, user.id, "expired", provider="quark")
+    _assert_blocked_with_removed_message(db, user.id)
+
+
+def test_gate_plain_message_when_only_drive_invalid(db):
+    # 只有 Drive 失效行、没有任何已下线绑定的用户，仍拿原提示，
+    # 不许误报"115/夸克已下线"。
+    user = _user(db, "u1")
+    _binding(db, user.id, "invalid", provider="drive")
     _assert_blocked(db, user.id)
+
+
+def test_gate_removed_provider_does_not_block_active_drive(db):
+    # 有已下线绑定但同时有 active Drive 绑定的用户照常放行。
+    user = _user(db, "u1")
+    _binding(db, user.id, "active", provider="pan115", label="旧115")
+    _binding(db, user.id, "active", provider="drive", label="谷歌盘")
+    gate.ensure_binding_playback_allowed(db, user)
 
 
 def test_gate_allows_active_among_invalid(db):

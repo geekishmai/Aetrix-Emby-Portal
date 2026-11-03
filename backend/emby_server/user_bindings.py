@@ -107,6 +107,14 @@ PROVIDER_QUARK = "quark"
 REMOVED_PROVIDERS = (PROVIDER_PAN115, PROVIDER_QUARK)
 REMOVED_PROVIDER_MESSAGE = "该网盘已下线，请改绑 Google Drive。"
 
+#: 存量收敛落盘档位（2026-11-03 收敛单）：已下线 provider 的存量
+#: active 行统一落 invalid + last_error_kind="provider_removed"
+#: （档位名与转存域 PROVIDER_REMOVED_KIND 同名同义、终态不可用），
+#: 用户端文案就是 REMOVED_PROVIDER_MESSAGE 本句，不另编新文案；
+#: 凭据行由收敛脚本按 _mark_failed 同口径同步落同一档位。
+ERROR_KIND_TO_STATUS["provider_removed"] = "invalid"
+BINDING_ERROR_MESSAGES["provider_removed"] = REMOVED_PROVIDER_MESSAGE
+
 
 class BindingError(RuntimeError):
     """绑定操作失败（带可分类的 kind，供调用方定状态码与文案）。
