@@ -111,9 +111,12 @@ class _FakeHttp:
 
 
 def _movie_entry(vod_id, name, pic=PIC_A, **kw):
+    import zlib
     entry = {"vod_id": vod_id, "vod_name": name, "vod_year": "2021",
              "type_id": 2, "type_name": "动作片", "vod_serial": "0",
-             "vod_time": "2024-05-01 10:00:00"}
+             "vod_time": "2024-05-01 10:00:00",
+             "vod_douban_id": str(
+                 100000 + zlib.crc32(f"{name}|2021".encode()) % 900000)}
     if pic is not None:
         entry["vod_pic"] = pic
     entry.update(kw)
@@ -188,10 +191,13 @@ def test_series_sync_fills_series_poster_from_detail(db):
              "vod_time": "2024-05-01 10:00:00"}  # list 条目无图（非凡形态）
     page = {"code": 1, "page": 1, "pagecount": 1, "limit": 20, "total": 1,
             "class": CLASS_TREE_TV, "list": [entry]}
+    import zlib
     detail = {"vod_id": 202, "vod_name": "庆余年", "vod_year": "2019",
               "vod_play_from": "直链线路",
               "vod_play_url": "第1集$https://cdn.example.com/e1.m3u8",
-              "vod_pic": PIC_A}
+              "vod_pic": PIC_A,
+              "vod_douban_id": str(
+                  100000 + zlib.crc32("庆余年|2019".encode()) % 900000)}
     stats = als.sync_library(db, lib, http_get=_FakeHttp(
         page, details={"202": detail}), sleep_fn=lambda s: None)
     series = (db.query(em.MediaItem)

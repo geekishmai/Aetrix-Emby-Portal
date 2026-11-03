@@ -47,11 +47,17 @@ CLASS_TREE = [
 ]
 
 
+def _fake_douban(name, year):
+    import zlib
+    return str(100000 + zlib.crc32(f"{name}|{year}".encode()) % 900000)
+
+
 def _entry(vod_id, name, *, year="2021", area=None):
     entry = {
         "vod_id": vod_id, "vod_name": name, "vod_year": year,
         "type_id": 2, "type_name": "动作片", "vod_serial": "0",
         "vod_time": "2024-05-01 10:00:00",
+        "vod_douban_id": _fake_douban(name, year),
     }
     if area is not None:
         entry["vod_area"] = area
@@ -64,6 +70,7 @@ def _detail(vod_id, name, *, year="2021", area="", **extra):
         "vod_area": area, "type_name": "动作片",
         "vod_play_from": "直链线路",
         "vod_play_url": "第1集$https://cdn.example.com/x.m3u8",
+        "vod_douban_id": _fake_douban(name, year),
     }
     detail.update(extra)
     return detail

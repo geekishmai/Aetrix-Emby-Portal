@@ -30,9 +30,12 @@ CLASS_TREE = [{"type_id": 1, "type_pid": 0, "type_name": "电影"},
 
 
 def _entry(vod_id, name, year="2021"):
+    import zlib
     return {"vod_id": vod_id, "vod_name": name, "vod_year": year,
             "type_id": 2, "type_name": "动作片", "vod_serial": "0",
-            "vod_time": "2024-05-01 10:00:00"}
+            "vod_time": "2024-05-01 10:00:00",
+            "vod_douban_id": str(
+                100000 + zlib.crc32(f"{name}|{year}".encode()) % 900000)}
 
 
 PAGES = {
@@ -96,16 +99,15 @@ def test_full_chain_sync_identity_playback(db):
             .filter(em.MediaItem.name == "沙丘").one())
     anon = (db.query(em.MediaItem)
             .filter(em.MediaItem.name == "无名之辈").one())
-    # 2) 身份：同步后两行都没身份 → 货架判据不上架（用户口径：
-    #    不豁免，没身份就等 TMDB 补上）
-    assert identity_gate.is_bound_row(dune) is False
-    assert identity_gate.is_bound_row(anon) is False
-    # 模拟 enrich 补身份的结果（enrich 对 upstream 行自动走 TMDB
-    # 搜索补 tmdb_id，这一步在生产由 enrich 工人完成）
+    # 2) 身份（2026-11-03 先认亲口径）：同步建行即带源站豆瓣号，
+    #    货架判据（external_ids 任一来源非空即已绑定）直接认已绑定；
+    #    无信号的片根本不建行（见 test_applecms_lightweight_ingest）。
+    assert identity_gate.is_bound_row(dune) is True
+    assert identity_gate.is_bound_row(anon) is True
+    # enrich 后续补 TMDB 身份不冲突（豆瓣号只填空、TMDB 另列落）
     dune.tmdb_id = "438631"
     db.commit()
     assert identity_gate.is_bound_row(dune) is True
-    assert identity_gate.is_bound_row(anon) is False
     # 3) 点播：映射定位 (源， vod_id) → detail 现取 → 探活 403
     #    软放行照常出地址（播放单口径）
     mapping = uim.get_best_mapping(db, dune.id)

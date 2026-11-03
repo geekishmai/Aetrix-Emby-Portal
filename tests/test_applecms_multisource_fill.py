@@ -84,10 +84,13 @@ CLASS_TREE = [
 
 
 def _entry(vod_id, name, **kw):
+    import zlib
     entry = {
         "vod_id": vod_id, "vod_name": name, "vod_year": "2021",
         "type_id": 2, "type_name": "动作片", "vod_serial": "0",
         "vod_time": "2024-05-01 10:00:00",
+        "vod_douban_id": str(
+            100000 + zlib.crc32(f"{name}|2021".encode()) % 900000),
     }
     entry.update(kw)
     return entry

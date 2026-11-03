@@ -58,9 +58,12 @@ def _entry(vod_id, name, *, year="2019", type_id=2,
 
 def _detail(vod_id, name, episodes, *, year="2019"):
     """episodes: [(集标题, 地址), ...] 组成单个直链组。"""
+    import zlib
     play_url = "#".join(f"{t}${a}" for t, a in episodes)
     return {"vod_id": vod_id, "vod_name": name, "vod_year": year,
-            "vod_play_from": "直链线路", "vod_play_url": play_url}
+            "vod_play_from": "直链线路", "vod_play_url": play_url,
+            "vod_douban_id": str(
+                100000 + zlib.crc32(f"{name}|{year}".encode()) % 900000)}
 
 
 def _eps(prefix, count):

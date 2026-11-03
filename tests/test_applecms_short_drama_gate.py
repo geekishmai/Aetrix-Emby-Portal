@@ -90,6 +90,7 @@ def test_is_short_drama_evidence_fields():
 
 def _entry(vod_id, name, *, year="2021", type_id=2, type_name="动作片",
            serial="0", vod_class="动作", vod_remarks=""):
+    import zlib
     return {
         "vod_id": vod_id, "vod_name": name, "vod_year": year,
         "type_id": type_id, "type_name": type_name, "vod_serial": serial,
@@ -97,6 +98,8 @@ def _entry(vod_id, name, *, year="2021", type_id=2, type_name="动作片",
         "vod_pic": "http://img.example/x.jpg",
         "vod_content": "简介文本", "vod_class": vod_class,
         "vod_remarks": vod_remarks,
+        "vod_douban_id": str(
+            100000 + zlib.crc32(f"{name}|{year}".encode()) % 900000),
     }
 
 
@@ -171,9 +174,12 @@ def test_movie_sync_skips_short_drama_and_counts(db):
 # ---------------------------------------------------------------------------
 
 def _detail(vod_id, name, episodes, **extra):
+    import zlib
     play_url = "#".join(f"{t}${a}" for t, a in episodes)
     d = {"vod_id": vod_id, "vod_name": name, "vod_year": "2019",
-         "vod_play_from": "直链线路", "vod_play_url": play_url}
+         "vod_play_from": "直链线路", "vod_play_url": play_url,
+         "vod_douban_id": str(
+             100000 + zlib.crc32(f"{name}|2019".encode()) % 900000)}
     d.update(extra)
     return d
 
