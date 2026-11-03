@@ -88,6 +88,7 @@ from typing import Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from backend.emby_server import applecms_backfill as abf
 from backend.emby_server import applecms_fetcher as acf
 from backend.emby_server import applecms_library as acl
 from backend.emby_server import applecms_sync as acs
@@ -140,7 +141,9 @@ def _zero_stats(library_id: int) -> Dict[str, object]:
         "added": 0, "updated": 0, "existing": 0, "mapped": 0,
         "pages": 0, "skipped_category": 0, "skipped_series_shape": 0,
         "skipped_invalid": 0, "skipped_other_library": 0,
-        "skipped_area": 0, "detail_errors": 0, "detail_fetches": 0,
+        "skipped_area": 0, "skipped_quality_gun": 0,
+        "skipped_quality_lowdef": 0,
+        "detail_errors": 0, "detail_fetches": 0,
         "dedupe_hits": 0, "errors": [], "seen_by_source": {},
         # 剧集路径计数（电影库恒 0）：集行增/存量、无直链组跳过、
         # detail 已消失跳过（detail 请求失败共用上面的 detail_errors）。
@@ -572,6 +575,25 @@ def _process_entry(db: Session, library, source, entry: dict,
                    series_mode: bool = False, area_bucket_cfg: str = "",
                    http_get=None, headers: Optional[dict] = None,
                    do_sleep=None, delay: float = 0.0) -> None:
+    vod_id = str(entry.get("vod_id") or "").strip()
+    if not vod_id:
+        stats["skipped_invalid"] += 1
+        return
+    # 质量门（枪版/低清）：与扩抓 lane、智能补源同一套判据
+    # （applecms_backfill.version_quality_block，仓库内唯一落点）。
+    # 分类/短剧门仍走 type_map 白名单，本处不重复拦。门在 seen
+    # 登记与剧集 detail 拉取之前：命中项不建行、不耗 detail、
+    # 不进 seen（与 lane 把命中条目置空后走 skipped_invalid
+    # 的语义一致，只是计数键分开）。
+    version_block = abf.version_quality_block(
+        str(entry.get("vod_name") or entry.get("name") or ""),
+        str(entry.get("vod_remarks") or ""))
+    if version_block == "bad_version":
+        stats["skipped_quality_gun"] += 1
+        return
+    if version_block == "low_quality":
+        stats["skipped_quality_lowdef"] += 1
+        return
     if series_mode:
         # 剧集路径独立成段：电影路径逐字不动（回归口径）。地区
         # 细拆走白名单口径，本路径不接 cms_area_bucket 校验。
@@ -579,10 +601,6 @@ def _process_entry(db: Session, library, source, entry: dict,
             db, library, source, entry, stats, run_cache,
             type_map=type_map, tops=tops, seen=seen, http_get=http_get,
             headers=headers, do_sleep=do_sleep, delay=delay)
-        return
-    vod_id = str(entry.get("vod_id") or "").strip()
-    if not vod_id:
-        stats["skipped_invalid"] += 1
         return
     seen.append(vod_id)
     top = _entry_top_category(entry, tops)
@@ -942,6 +960,8 @@ def _write_progress(db: Session, library, stats: dict,
         "skipped_invalid": stats["skipped_invalid"],
         "skipped_other_library": stats["skipped_other_library"],
         "skipped_area": stats["skipped_area"],
+        "skipped_quality_gun": stats["skipped_quality_gun"],
+        "skipped_quality_lowdef": stats["skipped_quality_lowdef"],
         "detail_errors": stats["detail_errors"],
         "detail_fetches": stats["detail_fetches"],
         "dedupe_hits": stats["dedupe_hits"],

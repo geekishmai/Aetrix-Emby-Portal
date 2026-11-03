@@ -103,12 +103,16 @@ SHORT_DRAMA_TOKENS = ("短剧", "微短剧", "竖屏", "竖版")
 #: 非内容分类：解说/预告/花絮/资讯不收（2026-11-02 15:05 质量门）。
 NON_CONTENT_TOKENS = ("解说", "预告片", "预告", "花絮", "资讯")
 #: 枪版类标记（片名/备注）：中文词 + 英文词边界（CAM/TC/TS 单
-#: 独出现才算，嵌在英文单词里不算）。
-BAD_VERSION_CN_TOKENS = ("枪版", "抢先版", "抢先看")
+#: 独出现才算，嵌在英文单词里不算）。与扩抓 lane
+#: （cms_full_run4.qfail）同口径：裸「抢先」已含「抢先版/
+#: 抢先看」，「影院版」亦属枪版信号。
+BAD_VERSION_CN_TOKENS = ("枪版", "抢先", "影院版")
 # 英文标记的边界不能用 \b：汉字在正则里算词字符，「CAM版」这类
 # 中英相邻写法 \b 不成立。改用「两侧不是 ASCII 字母」的环视。
+# 词表与扩抓 lane 一致（含 HDTS/TELESYNC/TELECINE）。
 _BAD_VERSION_EN_RE = re.compile(
-    r"(?<![A-Za-z])(CAM|HDTC|TC|TS)(?![A-Za-z])", re.IGNORECASE)
+    r"(?<![A-Za-z])(CAM|TC|TS|HDTS|HDTC|TELESYNC|TELECINE)(?![A-Za-z])",
+    re.IGNORECASE)
 #: 明确低清标记：只认明确写出的，无信号不猜杀。
 LOW_QUALITY_CN_TOKENS = ("标清", "低清")
 _LOW_QUALITY_EN_RE = re.compile(
@@ -168,6 +172,28 @@ def _is_short_drama_entry(entry: dict, short_ids) -> bool:
     return False
 
 
+def version_quality_block(name: str = "", remarks: str = "") -> Optional[str]:
+    """片名/备注级枪版/低清判定（与 quality_gate_reject 同判据）。
+
+    只查枪版/低清两层，不含分类/短剧层，供同步侧
+    （applecms_library_sync._process_entry）复用——仓库内唯一
+    落点，不另造第二套。无信号不杀：名与备注皆空时返回 None。
+    返回 ``bad_version`` / ``low_quality``，未命中返回 None。
+    """
+    text = f"{name or ''} {remarks or ''}"
+    for token in BAD_VERSION_CN_TOKENS:
+        if token in text:
+            return "bad_version"
+    if _BAD_VERSION_EN_RE.search(text):
+        return "bad_version"
+    for token in LOW_QUALITY_CN_TOKENS:
+        if token in text:
+            return "low_quality"
+    if _LOW_QUALITY_EN_RE.search(text):
+        return "low_quality"
+    return None
+
+
 def quality_gate_reject(type_name: str = "", name: str = "",
                         remarks: str = "", *, vod_class: str = "",
                         short_ids=None, type_id=None) -> Optional[str]:
@@ -195,17 +221,9 @@ def quality_gate_reject(type_name: str = "", name: str = "",
     for token in NON_CONTENT_TOKENS:
         if token in (type_name or ""):
             return "non_content"
-    text = f"{name or ''} {remarks or ''}"
-    for token in BAD_VERSION_CN_TOKENS:
-        if token in text:
-            return "bad_version"
-    if _BAD_VERSION_EN_RE.search(text):
-        return "bad_version"
-    for token in LOW_QUALITY_CN_TOKENS:
-        if token in text:
-            return "low_quality"
-    if _LOW_QUALITY_EN_RE.search(text):
-        return "low_quality"
+    blocked = version_quality_block(name, remarks)
+    if blocked is not None:
+        return blocked
     return None
 
 
