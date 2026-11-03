@@ -177,17 +177,35 @@ def main(argv=None) -> int:
                     counters["entered"] += 1
             wall0 = time.time()
             cpu0 = time.process_time()
-            if home_involved:
-                with home_sem:
+            try:
+                if home_involved:
+                    with home_sem:
+                        result = cms_graft.process_candidate(
+                            session, cand,
+                            mouth=cms_graft.mouth_sec(session),
+                            stats=stats,
+                            verdict=verdicts.get(cand["mapping_id"]))
+                else:
                     result = cms_graft.process_candidate(
                         session, cand, mouth=cms_graft.mouth_sec(session),
                         stats=stats,
                         verdict=verdicts.get(cand["mapping_id"]))
-            else:
-                result = cms_graft.process_candidate(
-                    session, cand, mouth=cms_graft.mouth_sec(session),
-                    stats=stats,
-                    verdict=verdicts.get(cand["mapping_id"]))
+            except Exception as exc:  # noqa: BLE001 — 单条崩不许丢账
+                logger.warning("candidate crashed mapping=%s: %s",
+                               cand["mapping_id"], exc, exc_info=True)
+                try:
+                    cms_graft.upsert_repair(
+                        session, mapping_id=cand["mapping_id"],
+                        local_item_id=cand["local_item_id"],
+                        source_id=cand["source_id"], status="failed",
+                        reason="process_error",
+                        detail=f"{type(exc).__name__}: {exc}"[:200])
+                    session.commit()
+                except Exception:  # noqa: BLE001 — 补账再失败只剩日志
+                    session.rollback()
+                result = {"mapping_id": cand["mapping_id"],
+                          "status": "failed", "reason": "process_error",
+                          "heat": cand.get("heat")}
             _record(result, time.time() - wall0,
                     time.process_time() - cpu0)
             with counters_lock:

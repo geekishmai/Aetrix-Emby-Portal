@@ -149,6 +149,27 @@ def test_frame_similarity_outside_strip():
     assert graft.outside_similarity(base, diff, strip) > 12.0
 
 
+def test_process_pair_resolve_error_is_fetch_failed(monkeypatch):
+    # 回归（第一批首跑实证）：resolve 抛 UpstreamPlaybackError 时
+    # 必须落 failed/fetch_failed，不许在异常处理器里二次崩掉丢账
+    from types import SimpleNamespace
+
+    from backend.emby_server.upstream_playback import (
+        UpstreamPlaybackError)
+
+    def _boom(db, mapping):
+        raise UpstreamPlaybackError(
+            404, "upstream_mapping_not_found", "所选线路已不可用")
+
+    monkeypatch.setattr(graft, "resolve_stream", _boom)
+    dirty = SimpleNamespace(id=1, local_item_id=2, source_id=14)
+    sibling = SimpleNamespace(id=3, local_item_id=2, source_id=9)
+    out = graft.process_pair(None, dirty, sibling, mouth=60.0)
+    assert out["status"] == "failed"
+    assert out["reason"] == "fetch_failed"
+    assert "upstream_mapping_not_found" in out["detail"]
+
+
 def test_host_ok_breaker():
     assert graft.host_ok(4_000_000, 10.0) is True     # KB, load1
     assert graft.host_ok(1_000_000, 10.0) is False    # 可用内存 <1.5GB
