@@ -1463,6 +1463,12 @@ def _path_tmdb_tag(item) -> Optional[str]:
     return found[-1] if found else None
 
 
+#: path_tag 死号降级标记（QA AW P2-2）：进程内 set，详情 404 的 id 记进来，
+#: 后续 _tmdb_plan_for_item 对同一 id 直接走 search（不烧 details）。
+#: 进程生命周期（重启清零）——TMDB 死号可能恢复，重启后重验一次。
+_PATH_TAG_DEAD: set = set()
+
+
 def _tmdb_plan_for_item(item, nfo_data, kind, needs_repair):
     """根据 item 与 nfo 规划 TMDB 操作（纯函数，无网络调用）。
 
@@ -1497,6 +1503,11 @@ def _tmdb_plan_for_item(item, nfo_data, kind, needs_repair):
     # 194/208/408 的 NFO imdb 换算出上集/前作 id，目录 id 才是对片）。
     path_tag = _path_tmdb_tag(item)
     if path_tag and tmdb_client.configured and kind in ("series", "movie"):
+        if path_tag in _PATH_TAG_DEAD:
+            # 死号降级（QA AW P2-2）：本进程已确认该 id 404，直接按名称搜索
+            return {"op": "search", "name": name or "", "year": production_year,
+                    "kind": kind, "existing_id": getattr(item, "tmdb_id", None),
+                    "year_from_name_suffix": suffix_year_used}
         return {"op": "details", "tmdb_id": path_tag, "why": "path_tag", "kind": kind,
                 "name": name or "", "year": production_year}
 
@@ -1568,8 +1579,12 @@ def _run_tmdb_batch(indexed_plans):
         if plan["op"] == "search":
             r2_keys.append(key)
             r2_queries.append((plan["name"], plan["year"], plan["kind"]))
-        elif plan["op"] == "details" and plan.get("why") == "alias":
-            # r1 未命中且非瞬时错误 → stale，用 plan 里的 name/year/kind 回退 search
+        elif plan["op"] == "details" and plan.get("why") in ("alias", "path_tag"):
+            # r1 未命中且非瞬时错误 → stale，用 plan 里的 name/year/kind 回退
+            # search。QA AW P2-1：path_tag 此前不在回退清单里——目录标签是
+            # 死号（§14.16.1b 取证 398/1102/1155）时整条目直接判 none，
+            # 白白丢一次按名称命中的机会。path_tag plan 携带 name/year，
+            # 与 alias 同形，直接并入。
             if r1_details.get(key) is None and key not in r1_transient:
                 r2_keys.append(key)
                 r2_queries.append((plan["name"], plan["year"], plan["kind"]))
@@ -1659,6 +1674,11 @@ def _apply_tmdb_plan_result(result, item, plan, out, kind):
             progress.note_stage("enrich_alias_stale")
             logger.warning("alias tmdb_id=%s stale (TMDB 404), fallback to search name=%r",
                            plan["tmdb_id"], item.name)
+            # QA AW P2-2：死号降级标记——后续轮次（同进程内）对同一
+            # path_tag 不再发 details 请求（直接按 plan 里的 name/year 走
+            # search），省 TMDB 配额；进程重启清零（TMDB 死号可能复活）。
+            if plan.get("why") == "path_tag":
+                _PATH_TAG_DEAD.add(str(plan["tmdb_id"]))
             result["tmdb_hit"] = out["hit"]
             if out["hit"] and out["hit"].get("id"):
                 result["tmdb_id"] = str(out["hit"]["id"])
