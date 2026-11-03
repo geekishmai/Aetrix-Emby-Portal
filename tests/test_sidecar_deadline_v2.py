@@ -250,3 +250,14 @@ def test_host_request_carries_deadline(monkeypatch):
     assert req["method"] == "list_page"
     assert req["deadline"] - before == pytest.approx(7.0, abs=1.0)
     assert ei.value.kind == "timeout"
+
+
+def test_guard_deadline_cap_exceeded_is_deadline_not_cooldown(monkeypatch):
+    """排队上限被 deadline 收紧后超限：抛 Pan115DeadlineExceeded，不冒冷却语义"""
+    monkeypatch.setattr(pg, "_gcra_wait", lambda key, rate, burst, now: 1.5)
+    with pytest.raises(pg.Pan115DeadlineExceeded):
+        pg.before_call("ck-dl-cap", "list", deadline=time.time() + 2.0)
+    # 没有 deadline 时超过自身上限仍是本机限速排队超时
+    monkeypatch.setattr(pg, "_gcra_wait", lambda key, rate, burst, now: 10_000.0)
+    with pytest.raises(pg.Pan115CooldownError):
+        pg.before_call("ck-dl-cap2", "list")
