@@ -1105,12 +1105,21 @@ def _start_encoder(out_path, seg_path, info):
 
 
 def graft_window(dirty_seg_paths, clean_paths, info, *, strip_full,
-                 offset_frames, band_end_sec, out_dir: Path):
-    """贴帧主pass：逐段解码脏版、全清配对、门控贴回、逐段出 TS。
+                 offset_frames, band_end_sec, out_dir: Path,
+                 seg_durations=None):
+    """贴帧主pass：整窗解码脏版、全清配对、门控贴回、逐段出 TS。
 
     返回 (segments, counters)：segments=[{idx, dur(EXTINF 由上层
     填), file, frames, bytes}]；任一「带在场帧」三路皆不过 →
     抛 GraftError('gate_failed')（整条不修，fail-closed）。
+
+    解码口径铁律（第一批 gate_failed 39 条的真因）：脏版必须与
+    净版一样走**整窗拼接解码**，不许逐段单独解码——源站切片的
+    时间戳基线带偏移，fps 重采样在单文件解码与拼接解码下会
+    错开一帧级相位（生产实证同序号帧差 13.7、拼接侧为 0），
+    配对一滑门控必挂。逐段输出靠 seg_durations×fps 的帧预算
+    切分同一条帧流（末段吃到流尽；边界 ±1 帧被下游时长容差
+    吸收，配对序号不受影响）。
     """
     fps = float(info["fps"])
     width, height = int(info["width"]), int(info["height"])
@@ -1134,14 +1143,22 @@ def graft_window(dirty_seg_paths, clean_paths, info, *, strip_full,
     segments = []
     global_idx = -1
     out_dir.mkdir(parents=True, exist_ok=True)
+    dirty_gen = decode_frames(dirty_seg_paths, width=width,
+                              height=height, fps=fps, gray=False)
     for seg_idx, seg_path in enumerate(dirty_seg_paths):
         tmp_out = out_dir / f"seg_{seg_idx:03d}.ts.tmp"
         encoder = _start_encoder(tmp_out, seg_path, info)
         frames_here = 0
         failed = None
-        gen = decode_frames([seg_path], width=width, height=height,
-                            fps=fps, gray=False)
-        for dframe in gen:
+        if seg_durations and seg_idx < len(dirty_seg_paths) - 1:
+            budget = max(1, int(round(
+                float(seg_durations[seg_idx]) * fps)))
+        else:
+            budget = None  # 末段（或未给时长表时）吃到流尽
+        while budget is None or frames_here < budget:
+            dframe = next(dirty_gen, None)
+            if dframe is None:
+                break
             global_idx += 1
             cframe = next(clean_gen, None)
             if global_idx < dirty_skip:
@@ -1327,7 +1344,9 @@ def process_pair(db, dirty, sibling, *, mouth, stats=None):
             dpaths[:window], cpaths, info,
             strip_full=analysis["strip_full"],
             offset_frames=analysis["offset_frames"],
-            band_end_sec=band_end, out_dir=out_dir)
+            band_end_sec=band_end, out_dir=out_dir,
+            seg_durations=[float(d or 0.0)
+                           for d, _u in dsegs[:window]])
         for i, seg in enumerate(segments):
             seg["dur"] = float(dsegs[i][0] or 0.0)
             # 段级自检：时长与原段帧数口径对齐、音频在否与原段一致
