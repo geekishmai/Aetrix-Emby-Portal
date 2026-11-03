@@ -254,6 +254,75 @@ def _cms_year(value: Any) -> Optional[int]:
     return None
 
 
+#: 标题尾年份的合理区间下限：早于此的四位尾数按片名本身处理。
+_TITLE_YEAR_MIN = 1900
+
+_TRAILING_YEAR_BRACKET_RE = re.compile(
+    r"[\(（\[]\s*(\d{4})\s*[\)）\]]\s*$")
+_TRAILING_YEAR_PLAIN_RE = re.compile(r"(\d{4})\s*$")
+
+
+def _plausible_title_year(year: int) -> bool:
+    """尾数是否可作年份：1900..当前年+2。
+
+    区间外（如「银翼杀手2049」的 2049）是片名本身的一部分，
+    不许当作年份剥离——未来题材片名常把年份写进标题。
+    """
+    from datetime import datetime
+
+    return _TITLE_YEAR_MIN <= year <= datetime.now().year + 2
+
+
+def split_trailing_year(name: str):
+    """解析标题尾部年份，返回 ``(清洗名, 年份|None)``。
+
+    形态：括号/方括号包裹（「（2026）」「[2026]」）、空格分隔、
+    裸黏尾（「爆发夜2026」）。只认结尾四位：片名中间的数字、
+    「第X季」类季后缀不受影响；剥后名为空（整名就是四位数字）
+    不剥；四位尾数前一位仍是数字（更长数字串的一部分）不剥；
+    年份不在合理区间（见 :func:`_plausible_title_year`）不剥。
+    解析不出时原样返回 ``(name, None)``。
+    """
+    text = (name or "").strip()
+    if not text:
+        return text, None
+    match = _TRAILING_YEAR_BRACKET_RE.search(text)
+    if match:
+        clean = text[:match.start()].strip()
+        year = int(match.group(1))
+        if clean and _plausible_title_year(year):
+            return clean, year
+        return text, None
+    match = _TRAILING_YEAR_PLAIN_RE.search(text)
+    if match:
+        start = match.start(1)
+        if start == 0 or text[start - 1].isdigit():
+            return text, None
+        clean = text[:start].strip()
+        year = int(match.group(1))
+        if clean and _plausible_title_year(year):
+            return clean, year
+    return text, None
+
+
+def _resolve_title_year(name: str, vod_year: Optional[int]):
+    """标题尾年份与 ``vod_year`` 的合并口径，返回 ``(name, year)``。
+
+    - ``vod_year`` 为空 → 采用尾年份并把年份从名里剥掉（存干净名）；
+    - 两者相等 → 剥掉尾年份，年份用 ``vod_year``；
+    - 两者冲突 → 名与年份都保持原样（不剥不改，留待人工/后续口径）；
+    - 标题无可解析尾年份 → 原样。
+    """
+    clean, tail_year = split_trailing_year(name)
+    if tail_year is None:
+        return name, vod_year
+    if vod_year is None:
+        return clean, tail_year
+    if vod_year == tail_year:
+        return clean, vod_year
+    return name, vod_year
+
+
 def _cms_score(value: Any) -> Optional[float]:
     """vod_score 转 float 或 None。
 
@@ -317,6 +386,10 @@ def cms_entry_to_record(
     只供 CMS 库同步工人合行填空（见 UpstreamCatalogRecord 透传组
     注释）；字段在各源有无不一（实测：非凡/豆瓣 list 几乎只有名与
     备注，量子等源才带海报/评分/演职员），缺了就空。
+
+    标题尾年份在此一并解析（:func:`_resolve_title_year`）：源站常把
+    年份黏在标题尾（「爆发夜2026」）且 ``vod_year`` 为空，放任不管
+    会让行年份为空、enrich 搜 TMDB 不带年份而错认同名旧片。
     """
     if not isinstance(entry, dict):
         raise ValueError("cms entry must be a dict")
@@ -326,13 +399,15 @@ def cms_entry_to_record(
     name = str(entry.get("vod_name") or entry.get("name") or "").strip()
     if not name:
         raise ValueError("cms entry missing vod_name")
+    name, production_year = _resolve_title_year(
+        name, _cms_year(entry.get("vod_year")))
     return agg.UpstreamCatalogRecord(
         source_id=source_id,
         upstream_item_id=vod_id,
         name=name,
         item_type="Movie",
         category_id=str(category_id or ""),
-        production_year=_cms_year(entry.get("vod_year")),
+        production_year=production_year,
         tmdb_id=None,
         imdb_id=None,
         poster_url=str(entry.get("vod_pic") or "").strip(),
