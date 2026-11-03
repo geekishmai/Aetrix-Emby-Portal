@@ -22,19 +22,25 @@ ROUTE_QUOTA_GUIDE = "quota_guide"
 ROUTE_NO_COPY_GUIDE = "no_copy_guide"
 ROUTE_STALE_COPY = "stale_copy"
 ROUTE_BIND_GUIDE = "bind_guide"
+#: 服务端统一供片（2026-11-03）：条目来自服务器自己的挂载（mount://），
+#: 由服务端中继出流，不需要用户绑定；只在 decide_route 显式收到
+#: ``server_mount=True`` 时出现（绑定用户的 byos 语义不变）。
+ROUTE_SERVER_MOUNT = "server_mount"
 
 # 绑定用户永远不许走的路由：这里根本没有 "shared" 这一档——
 # 选路函数连表达“播共享原件”这个选项都不提供，绕路无从写起。
 _ROUTES = (
     ROUTE_USER_COPY, ROUTE_PREPARING, ROUTE_FAILED, ROUTE_QUOTA_GUIDE,
     ROUTE_NO_COPY_GUIDE, ROUTE_STALE_COPY, ROUTE_BIND_GUIDE,
+    ROUTE_SERVER_MOUNT,
 )
 
 
 def decide_route(*, bound: bool, has_user_ready_copy: bool,
                  user_copy_stale: bool = False,
                  user_job_status: str | None = None,
-                 quota_hit: bool = False) -> dict:
+                 quota_hit: bool = False,
+                 server_mount: bool = False) -> dict:
     """给定门禁事实，返回选路裁决（纯函数）。
 
     ``user_job_status``：用户归属桶最新转存任务的 status
@@ -43,6 +49,11 @@ def decide_route(*, bound: bool, has_user_ready_copy: bool,
     表示本裁决永远不授权播放共享原件——绑定用户无副本时是引导，
     不是回落。
     """
+    if server_mount:
+        # 服务端统一供片：mount:// 条目由服务端中继出流，不需要用户绑定。
+        # 这是唯一允许 shared=True 的分支（byos/用户副本路径仍不走这里）。
+        return {"route": ROUTE_SERVER_MOUNT, "shared": True,
+                "detail": "本服统一片源：可直接播放"}
     if not bound:
         return {"route": ROUTE_BIND_GUIDE, "shared": False,
                 "detail": "未绑定：只能浏览，去绑定自己的盘后才能点播"}

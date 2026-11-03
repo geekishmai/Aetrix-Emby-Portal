@@ -166,9 +166,12 @@ def _stub_flow(monkeypatch, item):
         api, "_require_visible_item", lambda db, user, item_id: item)
     monkeypatch.setattr(api, "ensure_playback_allowed",
                         lambda db, user: None)
+    # 本文件不查挂载类型（db 是测试桩）：按非 115 处理，保留既有顺序断言。
+    monkeypatch.setattr(api, "_mount_requires_server_relay",
+                        lambda db, it: False)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, user, r=None: None)
+        lambda *a, **k: None)
     from backend.emby_server import drive_changes
     monkeypatch.setattr(
         drive_changes, "get_token_for_drive",

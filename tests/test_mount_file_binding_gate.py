@@ -12,6 +12,7 @@
   mounted_item_file，且该端点本身带门禁（防下次替换再丢）。
 """
 
+import asyncio
 import types
 
 import pytest
@@ -88,7 +89,7 @@ def _mounted(monkeypatch):
 def test_unbound_user_blocked_on_mounted_file(db, _mounted):
     user = _user(db, "u1")
     with pytest.raises(HTTPException) as excinfo:
-        mount_routes.mounted_item_file("guid-1", _plain_request(), user, db)
+        asyncio.run(mount_routes.mounted_item_file("guid-1", _plain_request(), user, db))
     assert excinfo.value.status_code == 403
     assert excinfo.value.detail == gate.GATE_MESSAGE
 
@@ -96,7 +97,7 @@ def test_unbound_user_blocked_on_mounted_file(db, _mounted):
 def test_bound_user_passes_gate_to_302(db, _mounted):
     user = _user(db, "u1")
     _binding(db, user.id, "active")
-    resp = mount_routes.mounted_item_file("guid-1", _plain_request(), user, db)
+    resp = asyncio.run(mount_routes.mounted_item_file("guid-1", _plain_request(), user, db))
     assert resp.status_code == 302
     assert resp.headers["location"].startswith("https://example.invalid/dl/")
 
@@ -106,7 +107,7 @@ def test_issued_play_sign_exempt_for_unbound_user(db, _mounted, monkeypatch):
     from backend.emby_server import play_sign
     monkeypatch.setattr(play_sign, "hotlink_enabled", lambda db: True)
     monkeypatch.setattr(play_sign, "verify_play_sign", lambda uid, item_id, exp, sign: True)
-    resp = mount_routes.mounted_item_file("guid-1", _signed_request(), user, db)
+    resp = asyncio.run(mount_routes.mounted_item_file("guid-1", _signed_request(), user, db))
     assert resp.status_code == 302
 
 
@@ -116,7 +117,7 @@ def test_invalid_play_sign_still_blocked(db, _mounted, monkeypatch):
     monkeypatch.setattr(play_sign, "hotlink_enabled", lambda db: True)
     monkeypatch.setattr(play_sign, "verify_play_sign", lambda uid, item_id, exp, sign: False)
     with pytest.raises(HTTPException) as excinfo:
-        mount_routes.mounted_item_file("guid-1", _signed_request(), user, db)
+        asyncio.run(mount_routes.mounted_item_file("guid-1", _signed_request(), user, db))
     assert excinfo.value.status_code == 403
 
 
@@ -151,5 +152,5 @@ def test_install_mount_routes_serves_gated_endpoint(db, _mounted):
     # 路由表上 served 的端点本身必须带门禁：未绑定用户调它应被拦
     user = _user(db, "u1")
     with pytest.raises(HTTPException) as excinfo:
-        file_routes[0].endpoint("guid-1", _plain_request(), user, db)
+        asyncio.run(file_routes[0].endpoint("guid-1", _plain_request(), user, db))
     assert excinfo.value.status_code == 403

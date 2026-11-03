@@ -24,9 +24,137 @@ from sqlalchemy.orm import Session
 
 from backend import models
 from backend.emby_server import models as em
+from backend.emby_server import mounts as mount_lib
+from backend.emby_server.env_util import env_int
+from backend.integrations import store
 
 # 被拦时返回给客户端的大白话（前端点播处据此展示去“我的”页绑定的引导）。
 GATE_MESSAGE = "请先绑定自己的网盘账号才能点播"
+
+#: 绑定门禁兜底开关（SystemConfig 键 + env 缺省）。
+#: 默认 1 = 保持 2026-10-26 的硬规矩；置 0 = 全站播放不再要求用户绑定
+#: （服务器统一供片模式的逃生舱）。SystemConfig 显式值优先于 env。
+KEY_PLAYBACK_REQUIRE_USER_BINDING = "playback_require_user_binding"
+ENV_PLAYBACK_REQUIRE_USER_BINDING = "EMBY_PLAYBACK_REQUIRE_USER_BINDING"
+
+
+def binding_gate_enabled(db: Session) -> bool:
+    """绑定门是否启用（默认开）。
+
+    服务器统一提供挂载片源的部署可以把 ``playback_require_user_binding``
+    置 false（或 env ``EMBY_PLAYBACK_REQUIRE_USER_BINDING=0``）：播放不再
+    要求用户自备网盘账号。读失败按默认开处理（fail-closed，不因配置抖动
+    悄悄放开全站）。
+    """
+    default = "1" if env_int(ENV_PLAYBACK_REQUIRE_USER_BINDING, 1, 0, 1) else "0"
+    try:
+        raw = (store.get_value(
+            db, KEY_PLAYBACK_REQUIRE_USER_BINDING, default) or "").strip().lower()
+    except Exception:  # noqa: BLE001 — 读不到按默认（默认开）
+        return default == "1"
+    return raw not in ("0", "false", "no", "off")
+
+
+def is_server_mount_item(item) -> bool:
+    """条目是否来自服务器侧挂载（``mount://<id>/<rel>``）。
+
+    这类片源由服务端中继出流（凭据不下发），不需要用户自备网盘账号；
+    绑定门只对用户自备盘（``byos://`` / 用户副本）有意义。
+    """
+    return bool(item is not None
+                and mount_lib.is_mount_path(getattr(item, "file_path", "")))
+
+
+def _item_is_user_owned(item) -> bool:
+    """条目是否来自用户自备盘（``byos://<binding_id>/...``）。
+
+    这类条目的字节在用户自己的网盘里，必须用该用户的绑定凭据取流——
+    即使库行开了免绑定，也永远要求 active 绑定。
+    """
+    path = (getattr(item, "file_path", "") or "").strip()
+    return path.startswith("byos://")
+
+
+def _library_exempts_binding(db: Session, library_id) -> bool:
+    """库行是否显式免绑定（``no_binding_required``，默认关）。
+
+    与上游 #1797 的 ``binding_required_for_item`` 同一接口：上游把「CMS 库」
+    硬编码为免绑定，本 fork 把范围扩成「库行显式开关」，合并上游时只需在
+    ``binding_required_for_item`` 里保留上游的 CMS 分支（见注释）。
+    """
+    if library_id is None:
+        return False
+    try:
+        library = (db.query(em.Library)
+                   .filter(em.Library.id == int(library_id)).first())
+    except Exception:  # noqa: BLE001 — 查不到库按不免（fail-closed）
+        return False
+    return bool(library is not None
+                and getattr(library, "no_binding_required", False))
+
+
+def binding_required_for_item(db: Session, item) -> bool:
+    """该条目的播放是否需要过绑定门禁（与上游 #1797 同名同签名）。
+
+    判定顺序：
+    1. 条目/库 id 缺失 → True（fail-closed）；
+    2. ``byos://`` 用户自备盘条目 → True（永远要求绑定）；
+    3. 库行 ``no_binding_required=True`` → False（服务端挂载库显式豁免）。
+
+    合并上游时：在上游版的基础上保留第 3 条即可；上游的
+    ``_library_is_cms`` 分支（``upstream_source_ids`` 非空 → 免绑定）应
+    一并保留，两者是「或」关系。
+    """
+    if item is None:
+        return True
+    library_id = getattr(item, "library_id", None)
+    if library_id is None:
+        return True
+    if _item_is_user_owned(item):
+        return True
+    return not _library_exempts_binding(db, library_id)
+
+
+def binding_required_for_upstream(db: Session, source_id,
+                                  upstream_item_id) -> bool:
+    """上游兜底口（按源 id + 上游条目 id 寻址）是否需要过绑定门禁。
+
+    与上游 #1797 同实现：经映射表反查本地条目，全部条目都免绑定才免；
+    查不到映射 / 条目已不存在 / 任一要求绑定 → True（fail-closed）。
+    """
+    rows = (
+        db.query(em.UpstreamItemMapping.local_item_id)
+        .filter(
+            em.UpstreamItemMapping.source_id == source_id,
+            em.UpstreamItemMapping.upstream_item_id == upstream_item_id,
+        )
+        .all()
+    )
+    if not rows:
+        return True
+    item_ids = {row[0] for row in rows}
+    items = (
+        db.query(em.MediaItem)
+        .filter(em.MediaItem.id.in_(item_ids))
+        .all()
+    )
+    if len(items) != len(item_ids):
+        return True
+    return any(binding_required_for_item(db, it) for it in items)
+
+
+def can_issue_play_sign(db: Session, user_id, item) -> bool:
+    """是否给该用户签发该条目的播放签名。
+
+    服务端挂载条目（或绑定门整体关闭）不需要绑定；其余仍要求 active 绑定。
+    """
+    if user_id is None:
+        return False
+    if not binding_required_for_item(db, item):
+        return True
+    if not binding_gate_enabled(db):
+        return True
+    return has_active_binding(db, user_id)
 
 
 def has_active_binding(db: Session, user_id: int) -> bool:
@@ -88,15 +216,24 @@ def _request_uses_issued_play_sign(request: Request, db: Session) -> bool:
 
 
 def ensure_binding_playback_allowed(
-    db: Session, user: models.WebUser, request: Request | None = None
+    db: Session, user: models.WebUser, request: Request | None = None,
+    item=None,
 ) -> None:
     """播放门禁：无 active 绑定时抛 403。
 
+    豁免顺序（2026-11-03，服务器统一供片模式）：
+    1. 绑定门整体关闭（``playback_require_user_binding`` false / env 0）→ 放行；
+    2. 条目是服务端挂载（``mount://``）→ 放行（服务端中继出流，不需要用户账号）；
+    3. 带有效 play_sign 的已下发链接消费 → 放行（不追溯）；
+    4. 其余仍要求本用户名下有 active 绑定（``byos://`` / 用户副本语义不变）。
+
     ``request`` 为空时无条件判定（PlaybackInfo / 上游兜底口：本次调用
-    本身就是新下发）；传了 ``request`` 且请求带有效 play_sign 时放行
-    （消费已下发的链接，不追溯）。用户对象取不到 id 时按无绑定处理
-    （fail-closed：403 而不是 500）。
+    本身就是新下发）；用户对象取不到 id 时按无绑定处理（fail-closed：403）。
     """
+    if not binding_gate_enabled(db):
+        return
+    if not binding_required_for_item(db, item):
+        return
     if request is not None and _request_uses_issued_play_sign(request, db):
         return
     user_id = getattr(user, "id", None)

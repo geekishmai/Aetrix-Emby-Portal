@@ -16,6 +16,7 @@ mount_routes.mounted_item_file）此前只有绑定门禁——已绑定但尚�
   302；有 ready 副本 → 照常 302；有效 play_sign 消费 → 不追溯；
 - 本机条目（stream_routes）：provider 不在门禁范围 → 照常出字节。
 """
+import asyncio
 import os
 
 os.environ.setdefault("DATABASE_TYPE", "sqlite")
@@ -159,7 +160,7 @@ def test_mounted_file_preparing_blocked(db, _mounted, monkeypatch):
     _binding(db, user.id)
     _patch_gate(monkeypatch, {"verdict": "preparing"})
     with pytest.raises(HTTPException) as excinfo:
-        mount_routes.mounted_item_file("guid-1", _plain_request(), user, db)
+        asyncio.run(mount_routes.mounted_item_file("guid-1", _plain_request(), user, db))
     assert excinfo.value.status_code == 409
     assert "转存准备中" in excinfo.value.detail
 
@@ -169,7 +170,7 @@ def test_mounted_file_failed_blocked(db, _mounted, monkeypatch):
     _binding(db, user.id)
     _patch_gate(monkeypatch, {"verdict": "failed", "detail": "转存失败说明"})
     with pytest.raises(HTTPException) as excinfo:
-        mount_routes.mounted_item_file("guid-1", _plain_request(), user, db)
+        asyncio.run(mount_routes.mounted_item_file("guid-1", _plain_request(), user, db))
     assert excinfo.value.status_code == 409
     assert excinfo.value.detail == "转存失败说明"
 
@@ -179,7 +180,7 @@ def test_mounted_file_error_is_503(db, _mounted, monkeypatch):
     _binding(db, user.id)
     _patch_gate(monkeypatch, {"verdict": "error"})
     with pytest.raises(HTTPException) as excinfo:
-        mount_routes.mounted_item_file("guid-1", _plain_request(), user, db)
+        asyncio.run(mount_routes.mounted_item_file("guid-1", _plain_request(), user, db))
     assert excinfo.value.status_code == 503
 
 
@@ -187,7 +188,7 @@ def test_mounted_file_proceed_still_302(db, _mounted, monkeypatch):
     user = _user(db)
     _binding(db, user.id)
     _patch_gate(monkeypatch, {"verdict": "proceed"})
-    resp = mount_routes.mounted_item_file("guid-1", _plain_request(), user, db)
+    resp = asyncio.run(mount_routes.mounted_item_file("guid-1", _plain_request(), user, db))
     assert resp.status_code == 302
 
 
@@ -225,7 +226,7 @@ def test_mounted_file_no_copy_blocked_and_job_created(db, _mounted_real):
     user = _user(db)
     _binding(db, user.id)
     with pytest.raises(HTTPException) as excinfo:
-        mount_routes.mounted_item_file("guid-1", _plain_request(), user, db)
+        asyncio.run(mount_routes.mounted_item_file("guid-1", _plain_request(), user, db))
     assert excinfo.value.status_code == 409
     jobs = (db.query(em.TransferJob)
             .filter(em.TransferJob.item_id == _mounted_real.id,
@@ -244,7 +245,7 @@ def test_mounted_file_ready_copy_passes(db, _mounted_real):
         owner_scope="user", owner_ref=str(user.id),
         status="ready", size_bytes=1000))
     db.commit()
-    resp = mount_routes.mounted_item_file("guid-1", _plain_request(), user, db)
+    resp = asyncio.run(mount_routes.mounted_item_file("guid-1", _plain_request(), user, db))
     assert resp.status_code == 302
     assert resp.headers["location"].startswith("https://example.invalid/dl/")
 
@@ -261,7 +262,7 @@ def test_mounted_file_signed_consume_not_blocked(db, _mounted_real,
     req = types.SimpleNamespace(
         query_params={"sign": "s", "exp": "9999999999", "uid": str(user.id)},
         path_params={"item_id": "guid-1"})
-    resp = mount_routes.mounted_item_file("guid-1", req, user, db)
+    resp = asyncio.run(mount_routes.mounted_item_file("guid-1", req, user, db))
     assert resp.status_code == 302
 
 

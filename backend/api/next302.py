@@ -161,7 +161,7 @@ def play_status(item_id: int = Query(..., ge=1),
     if item is None:
         raise HTTPException(status_code=404, detail="未找到该条目")
     user_id = getattr(user, "id", None)
-    bound = playback_gate.has_active_binding(db, user_id) \
+    has_binding = playback_gate.has_active_binding(db, user_id) \
         if user_id is not None else False
     user_variants = (
         db.query(em.TransferVariant)
@@ -176,11 +176,21 @@ def play_status(item_id: int = Query(..., ge=1),
     job = tv._latest_job(db, item.id, "user", str(user_id)) \
         if user_id is not None else None
     job_status = getattr(job, "status", None) if job is not None else None
+    # 服务端统一供片（2026-11-03）：按库开关（no_binding_required）决定该
+    # 库的服务端挂载条目是否免绑定；byos 条目永远要求绑定。
+    # AL-1 P2：server_mount 只由「条目本身是服务端挂载」决定——全局开关关闭
+    # 时也不能把 byos/用户副本条目误判成服务端挂载（否则路由错、播不了）。
+    gate_on = playback_gate.binding_gate_enabled(db)
+    binding_required = playback_gate.binding_required_for_item(db, item)
+    server_mount = (playback_gate.is_server_mount_item(item)
+                    and (not binding_required or not gate_on))
+    route_bound = bool(has_binding) or not gate_on
     verdict = decide_route(
-        bound=bound,
+        bound=route_bound,
         has_user_ready_copy=bool(ready),
         user_copy_stale=bool(stale) and not bool(ready),
-        user_job_status=job_status)
+        user_job_status=job_status,
+        server_mount=server_mount)
     route = verdict["route"]
     action = {
         "user_copy": "play",
@@ -190,6 +200,7 @@ def play_status(item_id: int = Query(..., ge=1),
         "quota_guide": "want",
         "no_copy_guide": "want",
         "bind_guide": "bind",
+        "server_mount": "play",
     }[route]
     obs.log_event("next302_play_status", route=route, item_id=item.id)
     return {
@@ -197,7 +208,8 @@ def play_status(item_id: int = Query(..., ge=1),
         "route": route,
         "detail": verdict["detail"],
         "action": action,
-        "has_binding": bound,
+        "has_binding": has_binding,
         "has_user_ready_copy": bool(ready),
         "job_status": job_status,
+        "server_mount": bool(server_mount),
     }

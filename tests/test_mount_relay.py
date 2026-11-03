@@ -149,9 +149,13 @@ def _stub_common(monkeypatch, item, target):
     # 门禁行为见 tests/test_playback_gate.py）。
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, u, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(api.play_sign, "check_referer", lambda *a, **k: None)
     monkeypatch.setattr(api, "_play_target", lambda db, it: target)
+    # 本文件用 object() 当 db，不查挂载类型；默认按「非 115」处理（保留
+    # Drive 302 语义）。115 必须中转的专项断言在下方独立用例里覆盖。
+    monkeypatch.setattr(api, "_mount_requires_server_relay",
+                        lambda db, it: False)
     monkeypatch.setattr(_strategy, "maybe_direct_url", lambda db, fid: None)
 
 
@@ -189,6 +193,30 @@ def test_mount_item_goes_to_mount_relay_not_410(monkeypatch):
     assert calls["url"] == "https://115.example.com/d/abc"
     assert calls["headers"]["Cookie"] == "c=1"
     assert calls["media_type"] == "video/mkv"
+
+
+def test_115_mount_with_fid_never_302_goes_relay(monkeypatch):
+    """115 挂载即使带 drive_file_id、Drive 直链开关开，也必须中转，绝不 302。"""
+    item = SimpleNamespace(container="mkv", drive_file_id="fid-115",
+                           file_path="mount://3/Movies/a.mkv")
+    target = PlayTarget("url", "https://115cdn.example/secret",
+                        {"Cookie": "c=1"})
+    _stub_common(monkeypatch, item, target)
+    monkeypatch.setattr(api, "_mount_requires_server_relay",
+                        lambda db, it: True)
+    monkeypatch.setattr(_strategy, "drive_direct_play_enabled", lambda db: True)
+    calls = {}
+
+    async def fake_relay(url, request, headers, media_type, pt=None,
+                         sniff_quota_page=False):
+        calls.update(url=url)
+        return Response(b"relay-bytes", media_type=media_type)
+
+    monkeypatch.setattr(_streaming, "serve_mount_relay_async", fake_relay)
+    resp = asyncio.run(api.video_stream("item", _request(), object(), object()))
+    assert calls["url"] == "https://115cdn.example/secret"
+    assert resp.status_code == 200
+    assert "location" not in resp.headers
 
 
 def test_non_mount_url_item_still_410(monkeypatch):

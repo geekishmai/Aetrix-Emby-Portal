@@ -26,7 +26,11 @@ from backend import models
 from backend.emby_server.async_db import release_db_before_response
 from backend.database import get_db
 from backend.emby_server import mounts as mount_lib
-from backend.emby_server.api import _play_target, _require_visible_item
+from backend.emby_server.api import (
+    _mount_requires_server_relay,
+    _play_target,
+    _require_visible_item,
+)
 from backend.emby_server.auth import get_play_user
 from backend.subscriptions import ensure_playback_allowed
 
@@ -37,7 +41,7 @@ SUPERSEDED_FILE_PATHS = ("/emby/Items/{item_id}/File", "/Items/{item_id}/File")
 
 
 @release_db_before_response
-def mounted_item_file(
+async def mounted_item_file(
     item_id: str,
     request: Request,
     user: models.WebUser = Depends(get_play_user),
@@ -48,24 +52,34 @@ def mounted_item_file(
     r62：与其它播放投递端点统一走 get_play_user（短期签名优先，回退 Emby
     token/JWT）；此前 get_emby_user 不认 uid/exp/sign，签名链接会被 401。
     """
-    item = _require_visible_item(db, user, item_id)
+    from backend.emby_server.async_db import run_db
+
+    item = await run_db(_require_visible_item, db, user, item_id)
     # 与在线播放、下载同一门槛：付费墙对拉文件同样生效
-    ensure_playback_allowed(db, user)
+    await run_db(ensure_playback_allowed, db, user)
     # 播放门禁（2026-10-26 用户亲定硬规矩）：Emby token 直接取文件是新播放，
     # 必须过门禁；带有效 play_sign 的请求是在消费已下发的链接，不追溯。
     # 与 stream_routes.item_file 逐字同口径（360° 审计 A-007：替换版曾静默丢门禁）。
     from backend.emby_server import playback_gate as _gate
-    _gate.ensure_binding_playback_allowed(db, user, request)
+    await run_db(_gate.ensure_binding_playback_allowed, db, user, request, item)
     # 首播转存门禁（与 video_stream 同口径）：该片需先转存到用户
     # 自己绑定盘且尚无 ready 副本时，不许经 File 拿到共享原件字节；
     # 已下发链接消费不追溯（play_sign 豁免与主路一致）。
-    _play_sign_consume = _gate._request_uses_issued_play_sign(request, db)
+    _play_sign_consume = await run_db(
+        _gate._request_uses_issued_play_sign, request, db)
     from backend.emby_server import transfer_variant as _tv
-    _gate.raise_for_transfer_gate(_tv.ensure_user_copy_gate(
-        db, item, user, play_sign_consume=_play_sign_consume))
+    _gate.raise_for_transfer_gate(await run_db(
+        _tv.ensure_user_copy_gate, db, item, user,
+        play_sign_consume=_play_sign_consume))
     # 复用 api 的目标解析与错误映射，保证两条端点对同一份数据行为一致
-    target = _play_target(db, item)
+    target = await run_db(_play_target, db, item)
     if target.kind == "url":
+        # 115 挂载必须服务端中转（全中转路线）：绝不把 115 CDN 直链 302 给客户端。
+        if await run_db(_mount_requires_server_relay, db, item):
+            from backend.emby_server.streaming import serve_mount_relay_async
+            media_type = f"video/{item.container}" if item.container else "video/mp4"
+            return await serve_mount_relay_async(
+                target.value, request, target.headers, media_type)
         # 最简播放（SEAM-3，中继已删）：Drive 条目 302 到谷歌 usercontent
         # 直链；rebase 到世界窗口定稿后按其处置更新。
         _fid = (getattr(item, "drive_file_id", "") or "").strip()

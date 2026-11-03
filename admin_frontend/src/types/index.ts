@@ -1038,6 +1038,8 @@ export interface EmbyLibrary {
   incremental_scan?: boolean
   /** 本机目录实时监听（v2.44.0，默认开）：有变动自动触发增量扫描；远程挂载仍靠定时扫描 */
   fs_watch?: boolean
+  /** 免绑定播放（2026-11-03，默认关）：开启后本库的服务端挂载条目不再要求用户绑定网盘 */
+  no_binding_required?: boolean
   is_enabled: boolean
   is_scanning: boolean
   /**

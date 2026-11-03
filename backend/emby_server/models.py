@@ -65,6 +65,10 @@ class Library(Base):
     # 只对**本机路径**生效（远程挂载拿不到可靠的事件源，仍靠定时扫描）。
     # 监听起不来时自动降级为定时扫描，并在设置里说明，不会默默不工作。
     fs_watch = Column(Boolean, default=True)
+    # 免绑定播放（2026-11-03，与上游 #1797 的 binding_required_for_item 同接口）：
+    # 库行显式开关，默认关（关 = 照旧要求用户绑定）。开启后该库的服务端挂载
+    # （mount://）条目不再要求用户自备网盘；byos:// 用户自备盘条目永远要求绑定。
+    no_binding_required = Column(Boolean, default=False)
     # 库展示顺序（媒体库学习 L4）：Views / 发现页按 sort_order 排库。
     # 0 = 未设序：只有任一库 sort_order 非零时才参与排序，全部为 0 时
     # 查询逐字不变（见 api.user_views）；已设序的在前，未设序的排在

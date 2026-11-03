@@ -1894,6 +1894,9 @@ class LibraryUpdate(BaseModel):
     # 扫描策略开关（v2.44.0）：不传 = 不修改
     incremental_scan: bool | None = None
     fs_watch: bool | None = None
+    # 免绑定播放（2026-11-03，与上游 #1797 binding_required_for_item 同接口）：
+    # 库行开关，默认关；开启后该库的服务端挂载条目不再要求用户绑定网盘。
+    no_binding_required: bool | None = None
 
 
 def _validate_library_sources(db: Session, paths: list[str], mount_ids: list[int]) -> None:
@@ -2360,6 +2363,8 @@ def update_library(lib_id: int, req: LibraryUpdate, staff: models.WebUser = Depe
         lib.incremental_scan = bool(req.incremental_scan)
     if req.fs_watch is not None:
         lib.fs_watch = bool(req.fs_watch)
+    if req.no_binding_required is not None:
+        lib.no_binding_required = bool(req.no_binding_required)
     if "account_115_id" in req.model_fields_set:
         # 允许显式解绑（传 null）
         lib.account_115_id = req.account_115_id
