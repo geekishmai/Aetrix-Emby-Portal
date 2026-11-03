@@ -37,6 +37,13 @@ from backend.emby_server import models as em
 # 被拦时返回给客户端的大白话（前端点播处据此展示去“我的”页绑定的引导）。
 GATE_MESSAGE = "请先绑定自己的网盘账号才能点播"
 
+# 名下存在已下线绑定（115 / 夸克存量行）的人被拦时的专用大白话：
+# 这批人不是“没绑”，是绑的线被下线了——必须明说已下线、改绑
+# Drive 才能播，不许与从未绑定的人混用上面那句笼统提示
+# （2026-11-03 存量收敛单；选文案仍在本模块单一入口里做）。
+GATE_MESSAGE_REMOVED_PROVIDER = (
+    "你之前绑定的 115 / 夸克网盘已下线，请改绑 Google Drive 才能点播")
+
 
 def has_active_binding(db: Session, user_id: int) -> bool:
     """该用户名下是否存在至少一条 active 的 Drive 用户存储绑定。
@@ -51,6 +58,27 @@ def has_active_binding(db: Session, user_id: int) -> bool:
             em.UserStorageBinding.user_id == user_id,
             em.UserStorageBinding.provider == "drive",
             em.UserStorageBinding.status == "active",
+        )
+        .first()
+        is not None
+    )
+
+
+def has_removed_provider_binding(db: Session, user_id: int) -> bool:
+    """该用户名下是否存在已下线 provider（115 / 夸克）的存量绑定行。
+
+    不论行状态：active 是删线时未收敛的存量，expired / invalid 同样
+    说明此人绑过这两家——被门禁拦时据此出下线专用文案。provider
+    名单只认 ``user_bindings.REMOVED_PROVIDERS`` 一处（函数内懒引，
+    与本仓既有防循环口径一致）。
+    """
+    from backend.emby_server.user_bindings import REMOVED_PROVIDERS
+
+    return (
+        db.query(em.UserStorageBinding)
+        .filter(
+            em.UserStorageBinding.user_id == user_id,
+            em.UserStorageBinding.provider.in_(REMOVED_PROVIDERS),
         )
         .first()
         is not None
@@ -179,6 +207,9 @@ def ensure_binding_playback_allowed(
     user_id = getattr(user, "id", None)
     if user_id is not None and has_active_binding(db, user_id):
         return
+    if user_id is not None and has_removed_provider_binding(db, user_id):
+        raise HTTPException(
+            status_code=403, detail=GATE_MESSAGE_REMOVED_PROVIDER)
     raise HTTPException(status_code=403, detail=GATE_MESSAGE)
 
 

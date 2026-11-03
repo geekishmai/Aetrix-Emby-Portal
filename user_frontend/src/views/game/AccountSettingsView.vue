@@ -142,6 +142,28 @@
           <p class="dev-tip">点绑定后会在新窗口打开 Google 授权页，点同意后关掉那个窗口、回到本页，列表会自动刷新，没出现再点“刷新列表”。授权页本身不是本站页面，账号密码只交给 Google。</p>
           </div>
         </div>
+        <div v-if="removedBindings.length" class="prov-block">
+          <div v-for="b in removedBindings" :key="b.id" class="dev-row">
+            <div class="dev-main">
+              <span class="dev-name">{{ b.account_label }}</span>
+              <span class="dev-meta">
+                {{ b.provider === 'pan115' ? '115' : '夸克' }} · 已下线
+                <template v-if="b.error_message"> · {{ b.error_message }}</template>
+              </span>
+            </div>
+            <span class="dev-badge off">已下线</span>
+            <button
+              type="button"
+              class="dev-remove"
+              :class="{ confirming: pendingUnbind === b.id }"
+              :disabled="unbindingId === b.id"
+              @click="handleUnbindDrive(b)"
+            >
+              {{ unbindingId === b.id ? '解绑中' : (pendingUnbind === b.id ? '确认解绑' : '解绑') }}
+            </button>
+          </div>
+          <p class="dev-tip">115 / 夸克绑定线已下线，旧绑定不能再用来点播；想播本地库的片，请在上面改绑谷歌盘。</p>
+        </div>
         </div>
         </template>
       </section>
@@ -865,6 +887,9 @@ async function loadProviders() {
 }
 
 const driveBindings = ref<StorageBinding[]>([])
+// 已下线两家的存量绑定行（115 / 夸克，2026-11-02 下线）：不再当可用盘
+// 展示，只在本区列成“已下线”行 + 下线文案，免得用户对着旧绑定以为还能播。
+const removedBindings = ref<StorageBinding[]>([])
 const driveLoading = ref(false)
 const driveError = ref('')
 const driveLabel = ref('')
@@ -910,6 +935,9 @@ async function loadDriveBindings() {
   try {
     const res = await storageBindingApi.list()
     driveBindings.value = (res.bindings || []).filter((b) => b.provider === 'drive')
+    removedBindings.value = (res.bindings || []).filter(
+      (b) => b.provider === 'pan115' || b.provider === 'quark',
+    )
   } catch (e) {
     // 加载失败别装成“没绑盘”，留错误态给用户重试
     driveError.value = humanizeError(e)

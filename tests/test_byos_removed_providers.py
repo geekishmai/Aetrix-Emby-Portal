@@ -306,6 +306,32 @@ def test_revive_skips_removed_dest_jobs(db):
 
 
 # ---------------------------------------------------------------------------
+# 存量收敛：provider_removed 落盘档位与序列化文案（2026-11-03 收敛单）
+# ---------------------------------------------------------------------------
+
+def test_provider_removed_error_message(db):
+    # 收敛档位的文案必须与下线定版同一句，不另编新文案。
+    assert ub.error_message("provider_removed") == ub.REMOVED_PROVIDER_MESSAGE
+    assert ub.error_message("provider_removed", "pan115") == \
+        ub.REMOVED_PROVIDER_MESSAGE
+    assert ub.error_message("provider_removed", "quark") == \
+        ub.REMOVED_PROVIDER_MESSAGE
+    # 落盘状态档位：provider_removed → invalid（终态）。
+    assert ub.ERROR_KIND_TO_STATUS["provider_removed"] == "invalid"
+
+
+def test_serialize_converged_removed_binding(db):
+    # 收敛后的存量行（invalid + provider_removed）序列化出来不许再
+    # 呈现为可用：状态 invalid、error_message 是已下线文案。
+    row = _binding(db, 7, "pan115", status="invalid")
+    row.last_error_kind = "provider_removed"
+    db.commit()
+    payload = ub.serialize_binding(row)
+    assert payload["status"] == "invalid"
+    assert payload["error_message"] == ub.REMOVED_PROVIDER_MESSAGE
+
+
+# ---------------------------------------------------------------------------
 # TG 机器人：绑定展示只认 Drive
 # ---------------------------------------------------------------------------
 
