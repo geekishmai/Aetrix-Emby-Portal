@@ -589,6 +589,14 @@ jobs:
         timeout-minutes: 10
         run: python -m pytest tests/test_coupons_reserve_race.py -q
 
+      # 补全认领并发回归：_claim_group_atomic 的 bulk UPDATE 在 PG 上曾因
+      # 候选集高度重叠互相锁等（生产实测滞留 3 分钟+、postgres 约 284% CPU）。
+      # 修复为候选 SELECT 走 FOR UPDATE SKIP LOCKED（见 enrich_worker 头注）。
+      # DATABASE_URL 由本 job 的 env 指向真 PG；无 PG 时 PG 用例自动跳过。
+      - name: 补全认领并发回归（真 PG SKIP LOCKED）
+        timeout-minutes: 10
+        run: python -m pytest tests/test_enrich_claim_skiplocked_race.py -q
+
   deploy-check:
     name: 后端 · 部署自检（真起服务 + 真发 HTTP）
     needs: frontend
