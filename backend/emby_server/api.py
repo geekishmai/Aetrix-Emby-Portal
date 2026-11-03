@@ -2569,6 +2569,57 @@ def user_views(user_id: str, user: models.WebUser = Depends(get_emby_user),
     return {"Items": items, "TotalRecordCount": len(items), "StartIndex": 0}
 
 
+def _request_wants_media_sources(request: Request) -> bool:
+    """列表请求是否在 Fields 里明确要 MediaSources / MediaStreams。
+
+    官方 Emby 口径：列表 DTO 的 MediaSources 只在客户端用 Fields
+    明确请求时才填充，未请求时为空（本服务一直如此）。判读与
+    选集接口的既有 Fields 口径一致（逗号分隔、大小写不敏感）。
+    """
+    raw = request.query_params.get("Fields") or ""
+    fields = {f.strip().lower() for f in raw.split(",")}
+    return "mediasources" in fields or "mediastreams" in fields
+
+
+def _fill_list_media_sources(result: dict, user: models.WebUser,
+                             db: Session, base: str) -> None:
+    """按详情面同口径给列表 DTO 补 MediaSources（仅 Fields 明确请求时）。
+
+    背景（2026-11-03 Reflix 实证）：我方列表 DTO 此前无视 Fields、
+    MediaSources 恒为 []，而真实 Emby 被明确要求时会带上来源；
+    部分三方客户端（如 Reflix）详情页只凭列表 DTO＋PlaybackInfo
+    判源，列表面空来源直接判「没有可用的源」、连 stream 都不发。
+    补齐方式不另起一套：按 guid 取回本页条目，逐条走详情 DTO
+    （``_item_dto(full=True)``）取其 MediaSources 填回——托管行只放
+    上游线路、本地行走既有本地源＋线路追加，签名轨与详情面完全
+    一致。只处理 movie/episode（容器类无播放源）；未请求 Fields
+    的列表不进本函数、行为逐字不变（不给海报墙等列表加成本）。
+    单条补齐失败只跳过该条，不许拖垮列表本体。
+    """
+    dtos = result.get("Items") or []
+    if not dtos:
+        return
+    guids = [d.get("Id") for d in dtos if d.get("Id")]
+    if not guids:
+        return
+    rows = (db.query(em.MediaItem)
+            .filter(em.MediaItem.guid.in_(guids)).all())
+    by_guid = {r.guid: r for r in rows}
+    for dto in dtos:
+        row = by_guid.get(dto.get("Id"))
+        if row is None or row.item_type not in ("movie", "episode"):
+            continue
+        try:
+            full = _item_dto(row, base, user.id, db, full=True)
+        except Exception as exc:  # noqa: BLE001 — 单条补齐失败不拖垮列表
+            logger.warning("列表 MediaSources 补齐失败 item=%s: %s",
+                           row.id, exc)
+            continue
+        sources = full.get("MediaSources") or []
+        dto["MediaSources"] = sources
+        dto["MediaSourceCount"] = len(sources)
+
+
 @json_route(emby_router, "/emby/Users/{user_id}/Items", "/Users/{user_id}/Items", "/emby/Items", "/Items")
 def get_items(
     request: Request,
@@ -2576,6 +2627,14 @@ def get_items(
     db: Session = Depends(get_db),
 ):
     result = _query_items(request, user, db, _base_url(request))
+    # Fields 明确要 MediaSources/MediaStreams 时按详情面同口径补齐
+    # （官方 Emby 口径；未请求时列表行为逐字不变）。补齐失败不许
+    # 拖垮列表本体——列表可用性优先于字段完整性。
+    if _request_wants_media_sources(request):
+        try:
+            _fill_list_media_sources(result, user, db, _base_url(request))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("列表 MediaSources 补齐整体失败: %s", exc)
     # 首次播放预热：恰好一条 Ids 是点名直达（点播前常走这条而不是详情路由），
     # 后台暖这一条。否则才用 ParentId 暖父级第一集未看（最多 1 条，响应不动；
     # ParentId 为库 guid 或查不到时线程内空转）。两条不叠加，避免一次列表打两次谷歌。
