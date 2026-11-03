@@ -1996,14 +1996,20 @@ def _enrich_fetch_tmdb_post(result: dict, item: Any, tmdb_ctx: dict,
                          _th.get("original_title"), _th.get("original_name")]
             _t_year = ((_th.get("first_air_date") or _th.get("release_date")
                         or "")[:4])
+            # 条目年份走识别收口（known_item_year）：production_year
+            # 为空时认片名尾黏年份，不许只拿 production_year 让从严
+            # 校验对「诅咒2025」这类条目整体落空（2026-11-03 定案）。
+            from backend.emby_server.identify_two_stage import (
+                known_item_year as _known_item_year)
+            _item_year_known = _known_item_year(item)
             if not any(_ban_downgrade_strict_hit_ok(
                     getattr(item, "name", ""),
-                    getattr(item, "production_year", None),
+                    _item_year_known,
                     _t, _t_year) for _t in _t_titles if _t):
                 logger.info(
                     "豆瓣封禁降级期 TMDB 命中从严丢弃：条目=%r 年=%s 命中标题=%r 年=%s",
                     getattr(item, "name", ""),
-                    getattr(item, "production_year", None),
+                    _item_year_known,
                     _th.get("title") or _th.get("name"), _t_year or None)
                 result.pop("tmdb_hit", None)
                 result.pop("tmdb_details", None)
@@ -2030,7 +2036,14 @@ def _enrich_fetch_tmdb_post(result: dict, item: Any, tmdb_ctx: dict,
                 and tmdb_client.configured):
             from backend.emby_server.tmdb import (
                 TmdbTransientError as _GateTransient,
-                binding_reject_reason as _reject_reason,
+            )
+            # 年份复核走识别收口（binding_reject_reason_for_item）：
+            # 逐个已知年份（production_year / 片名尾黏年份）过
+            # binding_reject_reason，任一冲突即拒——不许再裸传
+            # production_year，production_year 为空时年份校验会被
+            # 整体跳过（「诅咒2025」错绑 Cursed(2005) 定案，2026-11-03）。
+            from backend.emby_server.identify_two_stage import (
+                binding_reject_reason_for_item as _reject_reason_for_item,
             )
             # 证据优先级：完整 details（有 id）直接判；details 完全没取到
             # （None）→ 现拉一次判（拉回空体 = 按 kind 查不到，拒）；details
@@ -2058,9 +2071,8 @@ def _enrich_fetch_tmdb_post(result: dict, item: Any, tmdb_ctx: dict,
                 result["ok"] = False
                 result["error"] = "tmdb transient, retry later"
             elif _gate_evidence is not None:
-                _reason = _reject_reason(
-                    _gate_evidence, kind,
-                    getattr(item, "production_year", None))
+                _reason = _reject_reason_for_item(
+                    _gate_evidence, kind, item)
                 if _reason:
                     logger.warning(
                         "绑定复核门拒绝 id=%s name=%r tmdb_id=%s reason=%s "
