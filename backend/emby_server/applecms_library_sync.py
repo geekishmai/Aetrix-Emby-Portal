@@ -872,30 +872,6 @@ def _fill_row_poster(row: em.MediaItem, entry) -> bool:
 CMS_METADATA_SOURCE = "applecms"
 
 
-def _fill_people(db: Session, row: em.MediaItem, record) -> bool:
-    """演员填空：行上还没有任何人物行时，按记录的演员名单落行。
-
-    与 enrich 侧 ``_apply_cast`` / ``_apply_douban_cast`` 同口径：
-    人物行「先写者赢」——已有行（哪怕是另一源写的）就不合并、
-    不重写，TMDB 命中后按名字补头像/id。导演不落行：现有人物
-    模型只有演员一种类型（EA 的 People 恒 Type=Actor、TMDB 侧
-    也只落 cast），把导演写成演员是错数据；导演只采集进 record，
-    待人物模型支持导演类型后另行落。
-    """
-    if not record.actors:
-        return False
-    exists = (db.query(em.EmbyPerson.id)
-              .filter(em.EmbyPerson.item_id == row.id)
-              .first())
-    if exists:
-        return False
-    for idx, name in enumerate(record.actors):
-        db.add(em.EmbyPerson(
-            item_id=row.id, name=str(name)[:200], role="", image="",
-            sort_order=idx, person_tmdb_id=""))
-    return True
-
-
 def _fill_row_from_record(db: Session, row: em.MediaItem,
                           record) -> bool:
     """源站自带元数据合行填空：只填行上为空的字段，绝不覆盖。
@@ -928,7 +904,7 @@ def _fill_row_from_record(db: Session, row: em.MediaItem,
     if record.remarks and not (row.tagline or "").strip():
         row.tagline = record.remarks[:300]
         changed = True
-    if _fill_people(db, row, record):
+    if _fill_people(db, row, record.actors or ()):
         changed = True
     if changed and not (row.metadata_source or "").strip():
         row.metadata_source = CMS_METADATA_SOURCE
