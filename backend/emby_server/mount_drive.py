@@ -543,6 +543,8 @@ class DriveMount(RemoteMount):
         workers = self.walk_workers() if hasattr(self, "walk_workers") else 4
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="walk") as pool:
             while current:
+                from backend.emby_server import scan_cancel
+                scan_cancel.checkpoint("drive_dir")
                 fut_to_dir = {
                     pool.submit(self._list_by_id, fid): (fid, dpath, depth, bkey)
                     for fid, dpath, depth, bkey in current

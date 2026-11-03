@@ -1080,6 +1080,8 @@ def _auto_migrate():
         # （老流水的既有落点），行为与升级前完全一致。
         ("emby_scan_runs", [
             ("state_json", "TEXT", "NULL"),
+            # 运行中取消（2026-11-03）：老库补列后 NULL = 未请求取消
+            ("cancel_requested_at", "DATETIME", "NULL"),
         ]),
         # 目录到期调度（2026-10-24，FMBY 学习批二 #12）：emby_scan_dirs 加
         # next_due_at / last_decision。老库补列后为 NULL（= 没有排期，

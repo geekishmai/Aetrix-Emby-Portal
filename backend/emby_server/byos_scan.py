@@ -248,6 +248,8 @@ class UserDriveEnumerator:
         stack: list[tuple[str, str]] = [(root, self._folder_id(root))]
         seen_folders: set[str] = {stack[0][1]}
         while stack:
+            from backend.emby_server import scan_cancel
+            scan_cancel.checkpoint("byos_dir")
             rel, folder_id = stack.pop()
             for item in self._list_children(folder_id):
                 name = item.get("name") or ""

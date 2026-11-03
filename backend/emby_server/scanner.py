@@ -60,6 +60,7 @@ from backend.db_retry import commit_with_retry, deadlock_backoff, is_deadlock, r
 from backend.emby_server import disc_filter
 from backend.emby_server import models as emby_models
 from backend.emby_server import mounts as mount_lib
+from backend.emby_server import scan_cancel
 from backend.emby_server import mount_sources
 from backend.emby_server import rule_pack as _rule_pack
 from backend.emby_server import scan_snapshots
@@ -2274,6 +2275,7 @@ def _local_dir_files(root: str, failed_roots: list,
             f"{getattr(e, 'strerror', '') or e}"
         ),
     ):
+        scan_cancel.checkpoint("local_dir")
         # 原盘结构目录（BDMV/STREAM、CERTIFICATE…）整棵剪掉：里面的 .m2ts 是码流片段，
         # 当成电影会产出一堆名为「00000」这样、既刮不出元数据也没有封面的条目
         _dirnames[:] = [d for d in _dirnames if not disc_filter.is_disc_subtree_dir(d)]
@@ -2643,6 +2645,10 @@ def iter_scan_sources(snap: "LibrarySnapshot", library, db: Session,
                                                     prefixes),
                                        prefixes),
                         db, library.id, failed_roots, check_empty)
+                except scan_cancel.ScanCancelled:
+                    # QA AI-2 P1：取消不是挂载故障，必须穿透宽捕获——
+                    # 否则会被记进 failed_roots、扫描继续跑，取消形同虚设。
+                    raise
                 except mount_lib.MountError as exc:
                     logger.warning("媒体库「%s」的挂载「%s」不可用：%s", snap.name, src.label, exc)
                     failed_roots.append(f"{src.label}: {exc}")
@@ -3827,6 +3833,9 @@ def _mount_dir_entries(ctx: "_ScanContext", scan_file: "ScanFile", dir_rel: str)
                 return ctx.mount_dir_cache[key]
         try:
             entries = scan_file.provider.list_dir(dir_rel)
+        except scan_cancel.ScanCancelled:
+            # 同上：目录列举里的取消检查点不能被「目录读不到」吞掉。
+            raise
         except mount_lib.MountError as exc:
             logger.warning("读取挂载目录失败，跳过：%s（%s）", dir_rel, exc)
             entries = []
@@ -4020,6 +4029,10 @@ def _result(handle, default=None):
     if isinstance(handle, Future):
         try:
             return handle.result()
+        except scan_cancel.ScanCancelled:
+            # QA AI-2 P1：取消从 IO 线程池里冒出来时，不许被「预取失败」
+            # 的宽捕获吞掉（目录列举的检查点可能就在池线程里触发）。
+            raise
         except Exception as exc:  # noqa: BLE001 — 单个文件的探测/刮削失败不该拖垮整库
             logger.warning("扫描预取任务失败：%s", exc)
             return default
@@ -5078,6 +5091,7 @@ def _iter_prepared(ctx: "_ScanContext", files, pool, db: Session, process_one,
         唯一键冲突只重试一次：第二次还撞说明不是竞态而是真有重复数据，让它抛出去、
         整库失败留下证据，比无限重试诚实。PG 死锁单独给 3 次重试预算。
         """
+        scan_cancel.checkpoint("batch")
         before = set(ctx.seen_guids)
         conflict_retries = 0
         deadlock_retries = 0
@@ -5571,6 +5585,7 @@ SCAN_STATUS_SUCCESS = "success"
 SCAN_STATUS_PARTIAL = "partial"   # 有来源读不到：本轮已跳过清理
 SCAN_STATUS_FAILED = "failed"
 SCAN_STATUS_INTERRUPTED = "interrupted"   # 被进程重启打断（不是失败）：启动维护会收尾成这个状态并自动续扫
+SCAN_STATUS_CANCELLED = "cancelled"       # 管理员运行中取消：不续跑、不执行清理
 
 # 谁触发的扫描（写进流水：回答「半夜三点是谁在扫」）：
 # manual = 面板按钮/一键扫描 · client = Emby 客户端刷新 · node = 归属节点转发 ·
@@ -5603,6 +5618,8 @@ SCAN_STATS_KEYS = ("added", "updated", "removed", "probed", "probe_queued", "scr
                    # 删除保护拦截原因：finish_scan 的 error 兜底链 + _scan_metrics
                    # 对外口径都依赖它，不进白名单就落不了库（v2.55.x 修复）
                    "removal_guard",
+                   # 运行中取消（2026-11-03）：cancelled 收尾的依据，也要落库
+                   "canceled", "canceled_phase",
                    # 定向扫描标记：清理跳过是预期行为，finish_scan 据此不判 partial
                    #（v2.56.x 修复"没有可用来源"误报）
                    "targeted_scan",
@@ -5828,6 +5845,9 @@ def _scan_metrics(stats: dict) -> dict:
         "failed_roots": list(stats.get("failed_roots") or []),
         # v2.56.x：定向扫描标记（预期跳过清理，前端可据此不显示警告）
         "targeted_scan": bool(stats.get("targeted_scan")),
+        # 运行中取消（2026-11-03）：cancelled 不是失败，管理端据此展示中性状态
+        "canceled": bool(stats.get("canceled")),
+        "canceled_phase": stats.get("canceled_phase") or "",
         # 删除保护拦截原因（v2.55.x）：本轮没删任何东西是因为被拦了，而不是
         # "库里本来就空"。finish_scan() 已把该原因写进 error 兜底链，这里单独
         # 暴露给排障/接口调用方，避免再出现"有写入、零读取"的死字段。
@@ -6254,6 +6274,91 @@ def finish_scan(db: Session, library: emby_models.Library, stats: Optional[dict]
     return status
 
 
+def cancel_scan(db: Session, library: emby_models.Library, stats: Optional[dict],
+                run_id: Optional[int] = None) -> str:
+    """运行中取消的收尾：状态记 cancelled（不是失败），并跳过清理。
+
+    与 fail_scan 的区别：不写 failed、不触发失败告警、不自动续跑；已提交的
+    批次保留（条目有效），未提交批次由调用方 rollback 丢弃。
+    """
+    stats = dict(stats or {})
+    stats["canceled"] = True
+    stats["removal_skipped"] = True
+    error = "管理员取消：已扫描部分保留，未执行清理"
+    if run_id is not None:
+        # QA AI-2 P2：条件更新只改 running 行——取消与收尾并发时，绝不能
+        # 把已经 success/partial 的流水覆盖成 cancelled（审计被改写）。
+        res = db.execute(
+            update(emby_models.ScanRun)
+            .where(emby_models.ScanRun.id == int(run_id),
+                   emby_models.ScanRun.status == SCAN_STATUS_RUNNING)
+            .values(status=SCAN_STATUS_CANCELLED,
+                    finished_at=datetime.now(),
+                    duration_ms=stats.get("duration_ms"),
+                    stats=encode_scan_stats(stats),
+                    error=error[:500]))
+        try:
+            commit_with_retry(db, label="扫描取消收尾")
+        except Exception:
+            db.rollback()
+            raise
+        if not res.rowcount:
+            logger.warning(
+                "扫描取消收尾跳过：run=%s 已不在 running（并发收尾已写终态）",
+                run_id)
+            return "already_finished"
+        try:
+            prune_library_scan_runs(db, library.id)
+        except Exception:  # noqa: BLE001 — 回收失败不影响取消结果
+            logger.warning("取消后回收扫描流水失败", exc_info=True)
+    _write_scan_state(db, library, SCAN_STATUS_CANCELLED, stats, error)
+    logger.info("媒体库「%s」扫描已取消（run=%s），跳过清理",
+                getattr(library, "name", "?"), run_id)
+    return SCAN_STATUS_CANCELLED
+
+
+def request_cancel_run(db: Session, library_id: int,
+                       wait_sec: float = 3.0) -> Optional[int]:
+    """API 进程：给当前 running 流水置取消标志；返回 run_id。
+
+    dequeue→begin_scan 有窗口（worker 刚取走任务、还没写 run 行），这里短
+    轮询等它出现；超时返回 None，由接口回 409（扫描已结束或尚未进入可
+    取消阶段）。幂等：已置过标志的 run 直接返回。
+    """
+    deadline = time.monotonic() + max(0.0, float(wait_sec))
+    while True:
+        run = (db.query(emby_models.ScanRun)
+               .filter(emby_models.ScanRun.library_id == int(library_id),
+                       emby_models.ScanRun.status == SCAN_STATUS_RUNNING)
+               .order_by(emby_models.ScanRun.id.desc())
+               .first())
+        if run is not None:
+            # 条件更新：只改仍为 running 且尚未置过标志的行（幂等；不会
+            # 把刚收尾的 success/partial 行改脏）。
+            res = db.execute(
+                update(emby_models.ScanRun)
+                .where(emby_models.ScanRun.id == int(run.id),
+                       emby_models.ScanRun.status == SCAN_STATUS_RUNNING,
+                       emby_models.ScanRun.cancel_requested_at.is_(None))
+                .values(cancel_requested_at=datetime.now()))
+            try:
+                commit_with_retry(db, label="写入扫描取消请求")
+            except Exception:
+                db.rollback()
+                raise
+            if res.rowcount:
+                return int(run.id)
+            fresh = (db.query(emby_models.ScanRun.status)
+                     .filter(emby_models.ScanRun.id == int(run.id))
+                     .first())
+            if fresh is not None and fresh[0] == SCAN_STATUS_RUNNING:
+                return int(run.id)   # 已置过标志：幂等返回
+            # 已收尾：继续等下一轮（或超时）
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.2)
+
+
 def fail_scan(db: Session, library: emby_models.Library, exc: Exception,
               run_id: Optional[int] = None,
               duration_ms: Optional[int] = None) -> None:
@@ -6318,8 +6423,14 @@ def scan_library_sync(db: Session, library: emby_models.Library,
         _fg.set_yield_exempt(bool(getattr(snap, "targeted", False)))
     except Exception:  # noqa: BLE001 — 让路记账失败绝不拖累扫描本身
         pass
+    _probe_token = None
     try:
         run_id = begin_scan(db, library, trigger, snapshot=snap)
+        # 运行中取消探针：按 run 行读 cancel_requested_at；未开流水时没有
+        # run_id，取消退化为不可用（EMBY_SCAN_HISTORY 下限 1，正常不会发生）。
+        _probe_token = None
+        if run_id is not None:
+            _probe_token = scan_cancel.bind(scan_cancel.CancelProbe(run_id))
         started = time.perf_counter()
         try:
             # source_override 只在真正传了时才递给 _scan_library_body：
@@ -6345,9 +6456,14 @@ def scan_library_sync(db: Session, library: emby_models.Library,
                       duration_ms=int((time.perf_counter() - started) * 1000))
             raise
         stats["duration_ms"] = int((time.perf_counter() - started) * 1000)
-        finish_scan(db, library, stats, run_id)
+        if stats.get("canceled"):
+            cancel_scan(db, library, stats, run_id)
+        else:
+            finish_scan(db, library, stats, run_id)
         return stats
     finally:
+        if _probe_token is not None:
+            scan_cancel.unbind(_probe_token)
         # 无论成功、失败还是生成器被提前关闭，都释放进程内占位，否则这个库再也扫不动
         _release_scan(snap.library_id)
         try:
@@ -6757,6 +6873,7 @@ def _scan_library_body(db: Session, library: emby_models.Library,
                                               report=stats["sources"],
                                               source_override=source_override)
         for label, source_files in _sources_iter:
+            scan_cancel.checkpoint("source")
             def _process_one(scan_file, _pending):
                 """处理单个文件的写库（由 _iter_prepared 按批次驱动）。
 
@@ -7212,6 +7329,15 @@ def _scan_library_body(db: Session, library: emby_models.Library,
             counted = _FileCounter(source_files)
             _iter_prepared(ctx, counted, pool, db, _process_one,
                             label, counted, stats, failed_roots)
+    except scan_cancel.ScanCancelled as exc:
+        # 协作式取消：丢掉当前未提交批次，保留已提交批次；清理阶段绝不执行。
+        db.rollback()
+        stats["canceled"] = True
+        stats["removal_skipped"] = True
+        stats["canceled_phase"] = str(exc) or "enumerating"
+        logger.info("媒体库「%s」扫描取消于 %s，跳过清理", snap.name,
+                    stats["canceled_phase"])
+        return stats
     finally:
         # 扫描标志与结果由 scan_library_sync 统一写回（成功 / 部分失败 / 异常三条路都覆盖）
         try:
@@ -7221,6 +7347,16 @@ def _scan_library_body(db: Session, library: emby_models.Library,
             db.rollback()
 
     stats["failed_roots"] = failed_roots
+    try:
+        # 清理入口是最后一个取消点：一旦开始删除就不中途停（避免删一半的歧义）。
+        scan_cancel.checkpoint("before_cleanup")
+    except scan_cancel.ScanCancelled as exc:
+        db.rollback()
+        stats["canceled"] = True
+        stats["removal_skipped"] = True
+        stats["canceled_phase"] = "before_cleanup"
+        logger.info("媒体库「%s」清理前取消（%s），不执行删除", snap.name, exc)
+        return stats
     if getattr(snap, "targeted", False):
         # v2.52.0 定向扫描（Drive Changes）：只看了部分目录，看不到的不能当成
         # "文件已删除"，跳过清理阶段。删除检测留给整库扫描做。

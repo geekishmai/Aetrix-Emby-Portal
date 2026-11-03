@@ -90,7 +90,7 @@ class Library(Base):
     # 最近一次扫描的结果（v2.22.0）：只靠 is_scanning + last_scan_at 看不出「扫得怎么样」——
     # 新增/更新/删除多少、哪些来源读不到、有没有异常都只留在日志里，扫描结束就查不到了。
     # 这里把结果落库，管理端列表直接带回（见 scanner.begin_scan / finish_scan / scan_result_payload）。
-    # scan_status: running / success / partial / failed / interrupted
+    # scan_status: running / success / partial / failed / interrupted / cancelled
     # （partial = 有来源不可用、已跳过清理；interrupted = 被进程重启打断，启动时自动续扫）
     scan_status = Column(String(20))
     scan_stats = Column(Text)          # JSON：added/updated/removed/probed/scraped/unchanged…
@@ -792,6 +792,10 @@ class ScanRun(Base):
     # 夹带续命；这一列只由 begin_scan 写、收尾永不触碰，被打断后
     # interrupted_resume_prefixes 先读它、老行（无此列值）再回退 stats。
     state_json = Column(Text)     # JSON，编码与 stats 同一套（encode_scan_stats）
+    # 运行中取消（2026-11-03）：管理员请求停止这一轮扫描的时间戳。
+    # 按 run 行隔离（不是 Library 级），下一轮新 run 不受旧请求影响；
+    # NULL = 未请求取消。worker 的取消探针每 2s 读一次这一列。
+    cancel_requested_at = Column(DateTime)
     error = Column(String(500))   # partial / failed 的原因摘要
 
     __table_args__ = (

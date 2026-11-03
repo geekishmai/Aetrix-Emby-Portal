@@ -73,12 +73,23 @@ def reset_stale_scan_flags(db, stale_hours=None) -> int:
     for lib in rows:
         if scanner.is_scan_active(lib.id):   # 本进程真在扫：绝不碰
             continue
+        # 取消请求后进程退出：记 cancelled（不续跑），不能记 interrupted
+        # （否则启动维护会把它当成「被重启打断」自动续扫）。
+        run = (db.query(em.ScanRun)
+               .filter(em.ScanRun.library_id == lib.id,
+                       em.ScanRun.status == scanner.SCAN_STATUS_RUNNING)
+               .order_by(em.ScanRun.id.desc()).first())
+        cancel_requested = bool(run is not None and run.cancel_requested_at)
         lib.is_scanning = False
         lib.scan_started_at = None
         lib.scan_progress = None
         if lib.scan_status == scanner.SCAN_STATUS_RUNNING:
-            lib.scan_status = scanner.SCAN_STATUS_INTERRUPTED
-            lib.scan_error = "进程重启，本轮扫描未完成"
+            if cancel_requested:
+                lib.scan_status = scanner.SCAN_STATUS_CANCELLED
+                lib.scan_error = "管理员取消（取消请求后进程退出）"
+            else:
+                lib.scan_status = scanner.SCAN_STATUS_INTERRUPTED
+                lib.scan_error = "进程重启，本轮扫描未完成"
         reset.append(lib.id)
     if reset:
         commit_with_retry(db, label="复位残留扫描标志")
@@ -115,9 +126,14 @@ def close_stale_scan_runs(db: Session, stale_hours: Optional[float] = None,
             continue  # 本进程真的在扫：绝不碰
         if run.library_id not in forced and run.started_at is not None and run.started_at >= cutoff:
             continue  # 刚开始不久：可能正在另一台机器上扫
-        run.status = scanner.SCAN_STATUS_INTERRUPTED
+        if run.cancel_requested_at:
+            # 取消请求已落库、进程随后退出：收尾成 cancelled，不触发续扫
+            run.status = scanner.SCAN_STATUS_CANCELLED
+            run.error = "管理员取消（取消请求后进程退出）"
+        else:
+            run.status = scanner.SCAN_STATUS_INTERRUPTED
+            run.error = (run.error or "进程重启，本轮扫描未完成")[:500]
         run.finished_at = now
-        run.error = (run.error or "进程重启，本轮扫描未完成")[:500]
         stuck.append(run)
     if stuck:
         commit_with_retry(db, label="收尾中断扫描流水")
