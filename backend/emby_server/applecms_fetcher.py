@@ -332,6 +332,91 @@ def episode_address(group, episode_index) -> Optional[str]:
     return episodes[index - 1].get("address")
 
 
+def episode_candidates(groups, episode_index) -> list:
+    """同一 vod 内某集的全部直链候选 ``[(组名, 地址), ...]``。
+
+    排序口径：先各「全直链组」该集地址（保持 CMS 给的组序），再各
+    混合组中该集自身为 direct 的地址（保持组序）；同一地址只出现
+    一次（多组同址按首次出现去重）。解析型地址不进候选（走
+    ``resolve_play_candidates`` 的解析分支）。候选全部位于同一个
+    vod 内——CMS detail 的平行播放组本就是同一内容的等价线路，
+    调用方（探活下发）可以在候选间逐个试，但绝不跨 vod/跨条目。
+    """
+    ordered = []
+    seen = set()
+
+    def _push(group):
+        address = episode_address(group, episode_index)
+        if not address or classify_url(address) != "direct":
+            return
+        if address in seen:
+            return
+        seen.add(address)
+        ordered.append((group.get("name") or "", address))
+
+    group_list = [g for g in (groups or []) if isinstance(g, dict)]
+    for group in group_list:
+        episodes = group.get("episodes") or []
+        if episodes and all(
+                classify_url(ep.get("address")) == "direct"
+                for ep in episodes):
+            _push(group)
+    for group in group_list:
+        _push(group)
+    return ordered
+
+
+def resolve_play_candidates(vod_detail, episode_index,
+                            parse_lines_enabled: bool = False,
+                            parse_resolver: Optional[Callable] = None):
+    """``resolve_play`` 的多候选版：``("ok", [(组名, 地址), ...])``
+    或 ``("unplayable", 原因)``。
+
+    原因取值与判定先后与 ``resolve_play`` 逐字一致：有全直链组时
+    先判该集序号越界（``episode_out_of_range``）；只有解析型组时
+    按开关/解析器判 ``parse_not_enabled`` / ``parse_rule_missing``
+    （解析分支保持单候选——解析器调用口径与 ``resolve_play`` 此前
+    逐字一致，只取首个解析成功结果）；什么都没有是
+    ``no_direct_group``。唯一扩展：无全直链组时，混合组中该集自身
+    为 direct 的地址也算候选（同 vod 同集的等价直链，不经解析
+    线路、不受解析开关约束）。
+    """
+    if not isinstance(vod_detail, dict):
+        return ("unplayable", "no_direct_group")
+    groups = parse_play_groups(vod_detail.get("vod_play_from"),
+                               vod_detail.get("vod_play_url"))
+    direct = pick_direct_group(groups)
+    if direct is not None:
+        if episode_address(direct, episode_index) is None:
+            return ("unplayable", "episode_out_of_range")
+        return ("ok", episode_candidates(groups, episode_index))
+    candidates = episode_candidates(groups, episode_index)
+    if candidates:
+        return ("ok", candidates)
+    has_parse = any(
+        classify_url(ep.get("address")) == "parse"
+        for group in groups for ep in group.get("episodes") or [])
+    if has_parse:
+        if not parse_lines_enabled:
+            return ("unplayable", "parse_not_enabled")
+        if parse_resolver is not None:
+            for group in groups:
+                address = episode_address(group, episode_index)
+                if address is None:
+                    continue
+                if classify_url(address) != "parse":
+                    continue
+                try:
+                    resolved = parse_resolver(address, group["name"])
+                except Exception:
+                    continue
+                if isinstance(resolved, str) and resolved.strip() \
+                        and classify_url(resolved) == "direct":
+                    return ("ok", [(group["name"], resolved.strip())])
+        return ("unplayable", "parse_rule_missing")
+    return ("unplayable", "no_direct_group")
+
+
 def resolve_play(vod_detail, episode_index,
                  parse_lines_enabled: bool = False,
                  parse_resolver: Optional[Callable] = None):
@@ -356,36 +441,15 @@ def resolve_play(vod_detail, episode_index,
     经 ``classify_url`` 判定为 direct 才算解析成功（返回解析型/
     空地址都按无规则处理），成功结果走既有 ``("ok", …)`` 口径，
     下游探活/302 口径与直链组完全一致，不另起播放路径。
+
+    本函数是 ``resolve_play_candidates`` 的单候选视图（取首候选），
+    判定口径以候选版为准，两处不许漂移。
     """
-    if not isinstance(vod_detail, dict):
-        return ("unplayable", "no_direct_group")
-    groups = parse_play_groups(vod_detail.get("vod_play_from"),
-                               vod_detail.get("vod_play_url"))
-    direct = pick_direct_group(groups)
-    if direct is not None:
-        address = episode_address(direct, episode_index)
-        if address is None:
-            return ("unplayable", "episode_out_of_range")
-        return ("ok", direct["name"], address)
-    has_parse = any(
-        classify_url(ep.get("address")) == "parse"
-        for group in groups for ep in group.get("episodes") or [])
-    if has_parse:
-        if not parse_lines_enabled:
-            return ("unplayable", "parse_not_enabled")
-        if parse_resolver is not None:
-            for group in groups:
-                address = episode_address(group, episode_index)
-                if address is None:
-                    continue
-                if classify_url(address) != "parse":
-                    continue
-                try:
-                    resolved = parse_resolver(address, group["name"])
-                except Exception:
-                    continue
-                if isinstance(resolved, str) and resolved.strip() \
-                        and classify_url(resolved) == "direct":
-                    return ("ok", group["name"], resolved.strip())
-        return ("unplayable", "parse_rule_missing")
-    return ("unplayable", "no_direct_group")
+    result = resolve_play_candidates(
+        vod_detail, episode_index,
+        parse_lines_enabled=parse_lines_enabled,
+        parse_resolver=parse_resolver)
+    if result[0] != "ok":
+        return result
+    name, address = result[1][0]
+    return ("ok", name, address)
