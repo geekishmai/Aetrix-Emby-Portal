@@ -7532,6 +7532,112 @@ async def upstream_item_stream(
     return RedirectResponse(_url, status_code=302)
 
 
+def _issued_playback_hosts(db, request) -> set:
+    """本站下发播放地址可能用到的全部主机名（下发口径的镜像集合）。
+
+    播放 URL 的基址只来自三处：请求基址（``_base_url``，含
+    EMBY_PUBLIC_URL 与可信转发头口径）、加速域名配置
+    ``stream_accel_domain``（生产现值是逗号名单，按名单口径逐个
+    清洗）、流节点注册表（``stream_nodes._raw_nodes``）。畸形地址
+    修复只许把客户端拼坏的地址还原到这三处之一的主机；任何一处
+    配置读失败都只缩小集合（fail-closed），绝不放大到任意主机。
+    """
+    hosts = set()
+
+    def _add_url(raw):
+        try:
+            host = (urllib.parse.urlsplit(raw or "").hostname
+                    or "").strip().lower()
+        except Exception:  # noqa: BLE001 — 解析不了就不收
+            host = ""
+        if host:
+            hosts.add(host)
+
+    _add_url(_base_url(request))
+    try:
+        req_host = (request.url.hostname or "").strip().lower()
+    except Exception:  # noqa: BLE001 — 假请求/缺字段时不收
+        req_host = ""
+    if req_host:
+        hosts.add(req_host)
+    if db is not None:
+        try:
+            from backend.integrations import store as _cfg_store
+            from backend.emby_server import stream_accel as _sa
+            raw = _cfg_store.get_value(db, "stream_accel_domain", "") or ""
+            for part in str(raw).split(","):
+                domain = _sa.normalize_domain(part)
+                if domain:
+                    hosts.add(domain)
+        except Exception:  # noqa: BLE001 — 配置读失败不许放大集合
+            pass
+        try:
+            from backend.emby_server import stream_nodes as _sn
+            for node in _sn._raw_nodes(db):
+                if isinstance(node, dict):
+                    _add_url(str(node.get("url") or ""))
+        except Exception:  # noqa: BLE001 — 同上
+            pass
+    return hosts
+
+
+def _mangled_redirect_url(db, request, scheme, embedded):
+    """把被坏客户端拼坏的播放地址还原为绝对地址；不认返回 None。
+
+    还原条件（全满足才认）：scheme 是 http/https；嵌回地址的主机
+    属于 :func:`_issued_playback_hosts`。查询串（MediaSourceId /
+    uid / exp / sign 等）从原请求原样带回，一个字节不改。
+    """
+    scheme = (scheme or "").strip().lower()
+    if scheme not in ("http", "https"):
+        return None
+    embedded = (embedded or "").strip()
+    if not embedded:
+        return None
+    candidate = f"{scheme}://{embedded}"
+    try:
+        host = (urllib.parse.urlsplit(candidate).hostname
+                or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        return None
+    if not host or host not in _issued_playback_hosts(db, request):
+        return None
+    try:
+        query = request.url.query or ""
+    except Exception:  # noqa: BLE001
+        query = ""
+    if query:
+        candidate = f"{candidate}?{query}"
+    return candidate
+
+
+@emby_router.get("/emby{scheme}://{embedded:path}")
+@release_db_before_response
+async def mangled_playback_url_repair(
+    scheme: str, embedded: str, request: Request,
+    db: Session = Depends(get_db),
+):
+    """坏客户端把绝对播放地址当相对路径拼坏时的修复口（兼容层）。
+
+    生产实证（2026-11-03）：Yamby/2.1.0.11 把 PlaybackInfo 下发的
+    绝对 DirectStreamUrl 直接拼到自己的 ``/emby`` 前缀后请求本站，
+    形态如 ``/embyhttps://<加速域名>/emby/Videos/{guid}/upstream/
+    stream?...``，此前必然落默认 404（当日 60 次、22 字节响应体）。
+    本口只认这一形态：嵌回地址的主机属于本站下发主机集合才 302
+    还原；名单外主机（包括客户端自带的第三方代理包装域名）与非
+    http(s) 一律维持 404——不借本站域名做开放重定向，也不改动
+    任何既有播放地址的下发口径。路由形态含 ``://``、与任何既有
+    路径不重叠（通配 video_hls 要求 ``/emby/videos/`` 前缀、同样
+    吞不下这一形态），注册位置不影响既有路由的匹配顺序。
+    """
+    from backend.emby_server.async_db import run_db
+    target = await run_db(
+        _mangled_redirect_url, db, request, scheme, embedded)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return RedirectResponse(target, status_code=302)
+
+
 async def _maybe_cms_playlist_proxy(db, item, mapping_id, url, request, user):
     """取流口清单代理 engage 判定 + 一级清单组装；不 engage/失败回 None。"""
     from backend.emby_server import cms_playlist_proxy as _proxy
