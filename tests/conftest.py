@@ -42,20 +42,21 @@ def _reset_pan115_http_client():
     except Exception:
         yield
         return
-    with _t115._http_client_lock:
-        _client = _t115._http_client
-        _t115._http_client = None
-        _t115._http_client_pid = None
+    def _drop_and_close():
+        """取出当前共享 client 并关闭（不留连接池泄漏）。"""
+        with _t115._http_client_lock:
+            client = _t115._http_client
+            _t115._http_client = None
+            _t115._http_client_pid = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    _drop_and_close()          # 上一个用例残留的：先关掉，不留连接池泄漏
     yield
-    with _t115._http_client_lock:
-        _client = _t115._http_client
-        _t115._http_client = None
-        _t115._http_client_pid = None
-    if _client is not None:
-        try:
-            _client.close()
-        except Exception:
-            pass
+    _drop_and_close()
 
 
 @pytest.fixture(autouse=True)

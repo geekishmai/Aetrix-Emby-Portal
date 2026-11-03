@@ -62,16 +62,20 @@ class _FakeCtxClient(_FakeClient):
 
 @pytest.fixture(autouse=True)
 def _clean_shared_client():
+    def _drop_and_close():
+        with transfer115._http_client_lock:
+            client = transfer115._http_client
+            transfer115._http_client = None
+            transfer115._http_client_pid = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    _drop_and_close()      # 上一个用例残留的 client：关掉，不泄漏连接池
     yield
-    with transfer115._http_client_lock:
-        client = transfer115._http_client
-        transfer115._http_client = None
-        transfer115._http_client_pid = None
-    if client is not None:
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001
-            pass
+    _drop_and_close()
 
 
 def _install(monkeypatch, *clients):
@@ -208,3 +212,44 @@ def test_http_bytes_uses_shared_client(monkeypatch):
                             data=b"x")
     assert len(created) == 1
     assert created[0].requests[0][2]["follow_redirects"] is True
+
+
+def test_closed_client_is_refetched_and_retried_once(monkeypatch):
+    """QA P2：别的线程丢弃并关闭共享 client 后，本线程重取一次再发。
+
+    httpx 对已关闭的 client 抛 RuntimeError（不是 httpx.HTTPError），
+    不识别就会把整个扫描打挂。
+    """
+    closed = _FakeClient(error=RuntimeError(
+        "Cannot send a request, as the client has been closed."))
+    healthy = _FakeClient()
+    created = _install(monkeypatch, closed, healthy)
+    transfer115._http_json("GET", "https://webapi.115.com/a")
+    assert len(created) == 2, "应重取一个新 client"
+    assert len(healthy.requests) == 1
+    assert closed.closed is True
+
+
+def test_closed_client_retry_only_once(monkeypatch):
+    """重取后仍被关闭 → 原样抛出，不无限重试。"""
+    closed1 = _FakeClient(error=RuntimeError(
+        "Cannot send a request, as the client has been closed."))
+    closed2 = _FakeClient(error=RuntimeError(
+        "Cannot send a request, as the client has been closed."))
+    created = _install(monkeypatch, closed1, closed2)
+    with pytest.raises(RuntimeError):
+        transfer115._http_json("GET", "https://webapi.115.com/a")
+    assert len(created) == 2, "只重取一次"
+
+
+def test_connection_level_error_taxonomy():
+    """QA P3 取舍：读超时不重建连接池；连接/协议类错误才重建。"""
+    import httpx as _h
+    assert transfer115._is_connection_level_error(_h.ConnectError("x")) is True
+    assert transfer115._is_connection_level_error(_h.ReadError("x")) is True
+    assert transfer115._is_connection_level_error(
+        _h.RemoteProtocolError("x")) is True
+    assert transfer115._is_connection_level_error(_h.ConnectTimeout("x")) is True
+    # 读超时 = 服务端慢，不是连接坏了 → 不重建（否则满速段会引发握手风暴）
+    assert transfer115._is_connection_level_error(_h.ReadTimeout("x")) is False
+    assert transfer115._is_connection_level_error(_h.PoolTimeout("x")) is False

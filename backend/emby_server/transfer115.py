@@ -502,16 +502,10 @@ def _http_bytes(method: str, url: str, *, params: Optional[dict] = None,
         headers["Cookie"] = auth_ck
     if content_type:
         headers["Content-Type"] = content_type
-    client = _get_http_client()
-    try:
-        resp = client.request(method, url, params=params, data=data,
-                              headers=headers,
-                              timeout=timeout or PAN115_TIMEOUT,
-                              follow_redirects=True)
-    except httpx.HTTPError as exc:
-        if _is_connection_level_error(exc):
-            _discard_http_client(client)
-        raise
+    resp = _request_shared(method, url, params=params, data=data,
+                           headers=headers,
+                           timeout=timeout or PAN115_TIMEOUT,
+                           follow_redirects=True)
     if resp.status_code in (401, 403):
         raise Pan115AuthError(
             f"115 返回 HTTP {resp.status_code}，Cookie 可能已失效")
@@ -827,11 +821,56 @@ def _discard_http_client(client) -> None:
 
 
 def _is_connection_level_error(exc: BaseException) -> bool:
-    """连接本身坏了（而非 115 业务/HTTP 状态错误）——需要重建连接池。"""
+    """连接本身坏了（而非 115 业务/HTTP 状态错误）——需要重建连接池。
+
+    取舍（QA P3 问：ReadTimeout 算不算连接级错误）——**不算**：
+    - ReadTimeout 说明连接已经建立、服务器只是没在时限内回包，是「服务端慢」
+      而不是「连接坏了」。115 在列目录满速段（1.8–2.0 次/秒）延迟本来就高，
+      这时若把超时当连接坏了就丢弃池子，等于在最该稳住连接的时候不停重连，
+      反而制造新的 TLS 握手风暴（run 10 的握手超时就是这么来的）。
+    - 真正「连接已死」的表现是 httpx.NetworkError（ConnectError/ReadError/
+      WriteError）、RemoteProtocolError（对端在空闲后直接关掉 keep-alive
+      连接）、ConnectTimeout（连不上）——这三种都算连接级，按需重建。
+    - 读超时的后果由调用方按普通网络错误处理（重试/降级/记错误），不重建池。
+    """
     import httpx
 
     return isinstance(exc, (httpx.NetworkError, httpx.RemoteProtocolError,
                             httpx.ConnectTimeout))
+
+
+def _is_closed_client_error(exc: BaseException) -> bool:
+    """httpx 客户端已被关闭（另一个线程丢弃并 close 了共享实例）。
+
+    httpx 对「client 已关闭」抛的是 **RuntimeError**（不是 httpx.HTTPError）：
+    ``Cannot send a request, as the client has been closed.``。
+    共享 client 被别的线程丢弃时，本线程的请求会撞上它——必须识别出来，
+    重取一个新 client 再发一次，否则并发下一个连接级错误会把整个扫描打挂。
+    """
+    return isinstance(exc, RuntimeError) and "has been closed" in str(exc)
+
+
+def _request_shared(method: str, url: str, **kwargs):
+    """用进程级共享 client 发请求；client 被并发线程关闭时重取一次再发。"""
+    import httpx
+
+    client = _get_http_client()
+    try:
+        return client.request(method, url, **kwargs)
+    except RuntimeError as exc:
+        if not _is_closed_client_error(exc):
+            raise
+        # 另一线程丢弃并关闭了共享 client：丢掉手里这个（可能已经不是当前
+        # 实例，_discard 会自行判断），重取一个新的再试一次。
+        _discard_http_client(client)
+        fresh = _get_http_client()
+        return fresh.request(method, url, **kwargs)
+    except httpx.HTTPError as exc:
+        # 连接级错误（池已坏）→ 丢弃共享 client，下一次调用重建；
+        # 读超时不算连接级（见 _is_connection_level_error 的取舍说明）。
+        if _is_connection_level_error(exc):
+            _discard_http_client(client)
+        raise
 
 
 def _http_json(
@@ -854,16 +893,10 @@ def _http_json(
     }
     if cookie:
         headers["Cookie"] = cookie
-    client = _get_http_client()
-    try:
-        resp = client.request(method, url, params=params, data=data,
-                              headers=headers,
-                              timeout=timeout or PAN115_TIMEOUT,
-                              follow_redirects=True)
-    except httpx.HTTPError as exc:
-        if _is_connection_level_error(exc):
-            _discard_http_client(client)
-        raise
+    resp = _request_shared(method, url, params=params, data=data,
+                           headers=headers,
+                           timeout=timeout or PAN115_TIMEOUT,
+                           follow_redirects=True)
     if resp.status_code in (401, 403):
         raise Pan115AuthError(f"115 返回 HTTP {resp.status_code}，Cookie 可能已失效")
     if resp.status_code >= 400:
