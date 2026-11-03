@@ -3284,6 +3284,28 @@ def _maybe_queue_probe(db, item: Any) -> None:
         logger.warning("probe 衔接入队失败 id=%s: %s", getattr(item, "id", "?"), exc)
 
 
+def _apply_claim_lock(q, dialect_name: str):
+    """候选行锁（降争用）：PG 上 FOR UPDATE SKIP LOCKED；其他方言原样返回。
+
+    只决定「候选 SELECT 要不要顺带上锁」，不决定认领成败——认领的原子性
+    仍由 _claim_group_atomic 的带谓词 UPDATE + token 查回保证（见其头注）。
+    SQLite 没有行锁语义，加了也无从渲染，保持普通查询逐字不变。
+    """
+    if dialect_name == "postgresql":
+        return q.with_for_update(skip_locked=True)
+    return q
+
+
+def _claim_dialect_name(db) -> str:
+    """当前 session 绑定的方言名；取不到返回空串（按非 PG 处理 = 旧行为）。"""
+    bind = None
+    try:
+        bind = db.get_bind()
+    except Exception:  # noqa: BLE001
+        bind = getattr(db, "bind", None)
+    return bind.dialect.name if bind is not None else ""
+
+
 def _claim_group_atomic(db, q, now) -> list:
     """原子认领一组候选：单条 UPDATE ... WHERE enrich_status='pending'。
 
@@ -3294,11 +3316,21 @@ def _claim_group_atomic(db, q, now) -> list:
     并发下只有一个赢家。赢到的行用本批次 token 查回，保证处理的是自己
     赢到的行（候选顺序即 q 自带的 ORDER BY/LIMIT 顺序）。
 
+    降争用（生产发热诊断建议 2）：16 路 worker 的候选集高度重叠时，上面的
+    bulk UPDATE 会在 PG 上排队等先行认领事务提交（锁等实测滞留 3 分钟+，
+    postgres 被拖到约 284% CPU）。所以候选 SELECT 在 PG 上恢复
+    FOR UPDATE SKIP LOCKED：先把要认领的行锁进自己事务，已被别人锁住的
+    行直接跳过（它们正在被认领，下轮自然轮到），随后的 UPDATE 只碰自己
+    锁住的行、不再等待。这与最早那版「SELECT 锁定 + 内存改状态」不同：
+    本次的正确性仍由带谓词的原子 UPDATE + token 查回兜底，行锁只负责
+    避让——候选就算过期也抢不重、抢不丢。SQLite 路径不加锁、逐字不变。
+
     SQLite 上输家的 UPDATE 会撞 busy（忙等待后仍冲突）→ 返回 []，
     本轮跳过，下轮再抢；worker 循环会重试，不丢任务。
     """
     from sqlalchemy.exc import OperationalError
-    cand_ids = [r[0] for r in q.with_entities(em.MediaItem.id).all()]
+    cand_ids = [r[0] for r in _apply_claim_lock(
+        q.with_entities(em.MediaItem.id), _claim_dialect_name(db)).all()]
     if not cand_ids:
         return []
     token = uuid.uuid4().hex
