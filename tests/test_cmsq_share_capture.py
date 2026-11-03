@@ -452,6 +452,21 @@ def test_display_runtime_keeps_local_duration(mem_db):
     assert dto["RunTimeTicks"] == 100 * TICKS
 
 
+def test_display_quality_cache_does_not_emit_playlist_bandwidth(mem_db):
+    """CMS 合成源只下发画质缓存的宽高，不把清单 BANDWIDTH 当码率。"""
+    item, mapping = _cms_item_with_mapping(mem_db)
+    up.store_cms_quality(mapping.id, {
+        "width": 1920, "height": 1080, "bandwidth": 800000,
+        "label": "1080P"})
+    dto = emby_api._synthetic_cms_base_source(
+        item, mapping, "http://base", "", None)
+    assert "Bitrate" not in dto
+    video = next(s for s in dto["MediaStreams"] if s["Type"] == "Video")
+    assert video["Width"] == 1920
+    assert video["Height"] == 1080
+    assert "BitRate" not in video
+
+
 # ---------------------------------------------------------------- 跟随总预算（PA-080）
 
 

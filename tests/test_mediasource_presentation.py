@@ -320,12 +320,14 @@ def test_cms_item_one_source_per_mapping_with_quality(client, token, seed):
         assert q["MediaSourceId"][0] == f"{seed['cms']}:upstream:{mid}"
         # 名字里绝不出现源名
         assert SRC_A not in line["Name"] and SRC_B not in line["Name"]
-    # 甲源有画质缓存：纯画质标 + 真实带宽/轨道摘要
+    # 甲源有画质缓存：纯画质标 + 宽高/范围摘要；清单 BANDWIDTH
+    # 只是上游模板声明，不能当真实码率下发给客户端。
     assert line_a["Name"] == "4K Dolby"
-    assert line_a["Bitrate"] == 18_500_000
+    assert "Bitrate" not in line_a
     video = [s for s in line_a["MediaStreams"] if s["Type"] == "Video"][0]
     assert video["Width"] == 3840 and video["Height"] == 2160
     assert video["VideoRange"] == "DolbyVision"
+    assert "BitRate" not in video
     # Size 推不出就不报实数（0/缺失都是未知口径），不编造
     assert not line_a.get("Size")
     # 乙源无缓存：回落 Emby 默认形态（条目名），不拿源名凑数

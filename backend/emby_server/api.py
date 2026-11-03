@@ -1477,23 +1477,21 @@ def _synthetic_cms_base_source(item, mapping, base: str,
 
     CMS 行没有本地文件、参数也不现查 CMS 接口（detail 只在点播
     取流时现取）：先用本地行数据走 _media_source 拼同形空壳，再把
-    取流路径回填的画质缓存（m3u8 主清单解析出的宽高/带宽/范围、
+    取流路径回填的画质缓存（m3u8 主清单解析出的宽高/范围、
     备注画质标记，见 upstream_playback.read_cms_quality）叠成
-    Bitrate 与一条视频轨摘要；缓存带 media playlist 分段时长
+    一条视频轨摘要；缓存带 media playlist 分段时长
     （duration_sec）且本地行时长为空时，再用它填 RunTimeTicks。
     没缓存时除空壳外再补一条无参数的视频轨占位（见函数尾）：
     零轨道的 MediaSource 会被按媒体规格选源的三方客户端判为
     不可用（2026-11-03 Reflix 实证），不再只是「展示粗糙」。
-    Size 永远不报：m3u8 推不出文件大小，不编造。
+    Size 永远不报：m3u8 推不出文件大小，不编造。画质缓存里的
+    BANDWIDTH 同理只是主清单的模板声明，不当真实码率下发。
     """
     from backend.emby_server import upstream_playback as _up
     dto = _media_source(item, base, api_key, db, synthesize=True)
     cached = _up.read_cms_quality(mapping.id) or {}
     width = cached.get("width") or 0
     height = cached.get("height") or 0
-    bandwidth = cached.get("bandwidth") or 0
-    if bandwidth:
-        dto["Bitrate"] = int(bandwidth)
     duration_sec = cached.get("duration_sec") or 0
     if duration_sec and not dto.get("RunTimeTicks"):
         # 本地行时长为空时用分段时长求和回填（ticks 口径与
@@ -1507,7 +1505,6 @@ def _synthetic_cms_base_source(item, mapping, base: str,
             "Index": 0, "Type": "Video",
             "Width": width or None, "Height": height or None,
             "VideoRange": cached.get("video_range") or None,
-            "BitRate": int(bandwidth) if bandwidth else None,
             "DisplayTitle": cached.get("label") or None,
             "IsDefault": True, "IsForced": False, "IsExternal": False,
         }
