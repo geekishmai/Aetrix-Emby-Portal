@@ -118,7 +118,7 @@ from backend.emby_server import upstream_sources as us
 from backend.emby_server import upstream_health as uh
 from backend.emby_server import upstream_http
 from backend.emby_server import upstream_item_mappings as uim
-from backend.emby_server.env_util import env_int
+from backend.emby_server.env_util import env_float, env_int
 
 logger = logging.getLogger(__name__)
 
@@ -143,11 +143,14 @@ APPLECMS_TIER_GATE_ENV = "APPLECMS_TIER_GATE"
 APPLECMS_SYNC_ENV = "UPSTREAM_SYNC_ENABLED"
 
 #: 苹果 CMS 坏源自动熔断阈值 env 键：真实点播路径上某 CMS 源连续
-#: 失败达到该值时，自动经 upstream_sources.disable_source 停用该源
-#: （只对 applecms 型源生效）。默认值与健康状态机翻 Unavailable 的
-#: 阈值（UPSTREAM_HEALTH_FAILURE_THRESHOLD，默认 3）对齐——同一份
+#: 失败达到该值时，进入整源停用判定（只对 applecms 型源生效）。
+#: 默认值与健康状态机翻 Unavailable 的阈值
+#: （UPSTREAM_HEALTH_FAILURE_THRESHOLD，默认 3）对齐——同一份
 #: 连续失败计数（SourceHealthRecord）喂两处消费：先翻 Unavailable
-#: 沉底排序，再达熔断阈值停用；两个阈值默认同值、各自可调。
+#: 沉底排序，再达熔断阈值进入停用判定；两个阈值默认同值、各自
+#: 可调。注意：达阈值只是停用判定的门票，真正停用还须过 PA-078
+#: 双重保险（时间跨度门 + 停用前复核门，见
+#: APPLECMS_CIRCUIT_BREAKER_MIN_SPAN_SEC 与 _maybe_disable_cms_source）。
 APPLECMS_CIRCUIT_BREAKER_THRESHOLD_ENV = "APPLECMS_CIRCUIT_BREAKER_THRESHOLD"
 
 
@@ -155,6 +158,24 @@ def cms_circuit_breaker_threshold() -> int:
     """CMS 坏源自动熔断的连续失败阈值（默认与健康状态机阈值同值）。"""
     return env_int(APPLECMS_CIRCUIT_BREAKER_THRESHOLD_ENV,
                    uh.failure_threshold(), 1, 100)
+
+#: 苹果 CMS 熔断保险一（PA-078）：连续失败串的最小时间跨度 env 键。
+#: 计数达阈值后，失败串从第一笔（SourceHealthRecord.first_failure_at）
+#: 到当前不足该秒数，一律不许整源停用。依据：四度误伤的共同形态是
+#: 源站出现「分钟级坏窗口」，坏窗口内点播密集、 counted 失败几分钟
+#: 就攒满阈值（源 11 实证：计数被复位后约 5.5 分钟再攒满 3 次即被
+#: 停，连带 5,174 部已验活单源片断播）。默认 600 秒要求失败横跨
+#: 至少 10 分钟的真实点播：单个分钟级坏窗口熬不满这条线，真持续
+#: 死源的失败则会自然横跨，至多延迟 10 分钟停用——延迟期间源已被
+#: 健康分翻 Unavailable 沉底，择优不耽误。配 0 即退回计数单门
+#: （运维显式选择，非默认）。
+APPLECMS_CIRCUIT_BREAKER_MIN_SPAN_ENV = "APPLECMS_CIRCUIT_BREAKER_MIN_SPAN_SEC"
+
+
+def cms_circuit_breaker_min_span_sec() -> float:
+    """整源停用要求的连续失败最小时间跨度（秒，默认 600）。"""
+    return env_float(APPLECMS_CIRCUIT_BREAKER_MIN_SPAN_ENV,
+                     600.0, 0.0, 86400.0)
 
 #: 上游探活/认证单次超时（秒，运维常量，见模块 docstring）。
 UPSTREAM_PROBE_TIMEOUT_SEC = 10.0
@@ -1137,7 +1158,8 @@ def _resolve_applecms_stream(source, vod_id: str, *,
 # CMS 分支）逐次把成败/延迟写进既有健康记录（源级 SourceHealthRecord
 # + 线路级 LineHealthRecord，同一份 Redis 存储、同一套状态机），
 # PlaybackInfo 组装（get_displayable_mappings）按这份记录择优排序，
-# 连续失败达阈值时经唯一启停写口 disable_source 自动停用坏源。
+# 连续失败达阈值时进入 PA-078 双重保险判定，过门才经唯一启停
+# 写口 disable_source 自动停用坏源（见 _maybe_disable_cms_source）。
 # ---------------------------------------------------------------------------
 
 def _get_health_store():
@@ -1170,6 +1192,77 @@ _CMS_FAILURE_KINDS = {
 }
 
 
+def _cms_breaker_recheck_confirms_dead(source, http_get=None) -> bool:
+    """整源停用前复核（PA-078 保险二）：换一种方式问源站还活着没。
+
+    点播路径的 counted 失败来自 detail 抓取与播放地址探活；复核
+    改走与轻探活（applecms_probe）同形态的只读一问——provide
+    接口首页（ac=list&pg=1），不写任何健康状态、不受探活总开关
+    影响（保险不能被另一个默认关的开关架空）：
+    - 接口正常应答（fetch_page 成功返回）→ 源还活着，返回 False；
+    - 限流（429）→ 源站明明应答了、只是限流，与 #1770 同口径，
+      不是「已死」证据，返回 False；
+    - 其余明确失败（AppleCMSError：连不上、401/403、非 1 code
+      等）→ 拿到「已死」的第二种证据，返回 True；
+    - 复核本身无法定性（非抓取层异常等）→ 返回 False：无法定性
+      绝不当作确认已死，保险口径宁可晚停、不可误停。
+    """
+    from backend.emby_server import applecms_fetcher as acf
+    try:
+        acf.fetch_page(source.base_url, ac="list", pg=1,
+                       http_get=http_get,
+                       headers=_source_headers(source))
+    except acf.AppleCMSError as exc:
+        return exc.kind != "rate_limited"
+    except Exception:  # noqa: BLE001 — 复核无法定性按未确认计，见 docstring
+        logger.warning("CMS 熔断停用前复核无法定性，按未确认已死计 "
+                       "source_id=%s", getattr(source, "id", None),
+                       exc_info=True)
+        return False
+    return False
+
+
+def _maybe_disable_cms_source(db, source, record, now) -> None:
+    """整源停用的保险判定（PA-078）：两道门都过才真停。
+
+    调用点已保证：本轮是 counted 失败、源仍启用、连续失败计数
+    已达 cms_circuit_breaker_threshold()。
+    - 门一（时间跨度）：失败串起点 first_failure_at 到 now 不足
+      cms_circuit_breaker_min_span_sec() → 暂缓，只记 warning
+      （cms_circuit_breaker_deferred reason=span）；计数保留，
+      下一次 counted 失败再判。无起点（异常路径）按跨度 0 计。
+    - 门二（停用前复核）：_cms_breaker_recheck_confirms_dead 换
+      轻探活口径问源站 API，未确认已死 → 暂缓（reason=
+      recheck_not_dead）。
+    两门皆过才经唯一启停写口 disable_source 停用并落审计 error
+    日志（cms_circuit_breaker_open，老 grep 口径不变）。本函数在
+    _record_cms_stream_outcome 的 fail-open try 内被调用，异常
+    由调用方吞掉，绝不打断取流。
+    """
+    span = (now - record.first_failure_at
+            if record.first_failure_at is not None else 0.0)
+    if span < cms_circuit_breaker_min_span_sec():
+        logger.warning(
+            "cms_circuit_breaker_deferred source_id=%s reason=span "
+            "failures=%s span_sec=%.0f min_span_sec=%.0f",
+            source.id, record.consecutive_unavailable_failures, span,
+            cms_circuit_breaker_min_span_sec())
+        return
+    if not _cms_breaker_recheck_confirms_dead(source):
+        logger.warning(
+            "cms_circuit_breaker_deferred source_id=%s "
+            "reason=recheck_not_dead failures=%s",
+            source.id, record.consecutive_unavailable_failures)
+        return
+    us.disable_source(db, source)
+    db.commit()
+    logger.error(
+        "cms_circuit_breaker_open source_id=%s failures=%s "
+        "threshold=%s trigger=resolve_upstream_stream",
+        source.id, record.consecutive_unavailable_failures,
+        cms_circuit_breaker_threshold())
+
+
 def _record_cms_stream_outcome(db, source, *, error_code=None,
                                latency_ms=None,
                                quality_mapping_id=None) -> None:
@@ -1183,10 +1276,13 @@ def _record_cms_stream_outcome(db, source, *, error_code=None,
       仍守「源级已确认才摘线」口径），并补记线路连续失败数、失败
       原因与最近一次成功延迟，供择优排序消费。
     - 熔断：失败累计达到 cms_circuit_breaker_threshold() 且源仍
-      启用时，经唯一启停写口 us.disable_source 停用并落一条审计
-      日志；只对 applecms 型源生效。恢复只走手动 enable_source
-      （管理端现成启停，「最大」源人工停用即先例）——生产探活
-      工人默认关，不存在可靠的自动复活信号，不许假装能自动恢复。
+      启用时，进入 _maybe_disable_cms_source 的 PA-078 双重保险
+      判定（时间跨度门 + 停用前复核门），两门皆过才经唯一启停
+      写口 us.disable_source 停用并落一条审计日志；只对 applecms
+      型源生效。恢复只走手动 enable_source（管理端现成启停，
+      「最大」源人工停用即先例；enable 时同步清零熔断计数，
+      见 upstream_sources.enable_source）——生产探活工人默认关，
+      不存在可靠的自动复活信号，不许假装能自动恢复。
     - 条目不存在（upstream_item_not_found）按 unknown 记：只推进
       last_checked_at。源站明明应答了、是条目没了，不许拿它给源
       记失败、更不许触发熔断。
@@ -1234,13 +1330,7 @@ def _record_cms_stream_outcome(db, source, *, error_code=None,
                 and getattr(source, "enabled", False)
                 and record.consecutive_unavailable_failures
                 >= cms_circuit_breaker_threshold()):
-            us.disable_source(db, source)
-            db.commit()
-            logger.error(
-                "cms_circuit_breaker_open source_id=%s failures=%s "
-                "threshold=%s trigger=resolve_upstream_stream",
-                source.id, record.consecutive_unavailable_failures,
-                cms_circuit_breaker_threshold())
+            _maybe_disable_cms_source(db, source, record, now)
     except Exception:  # noqa: BLE001 — 留痕/熔断不许打断取流，见 docstring
         logger.warning("CMS 取流留痕/熔断异常，已忽略 source_id=%s",
                        getattr(source, "id", None), exc_info=True)
