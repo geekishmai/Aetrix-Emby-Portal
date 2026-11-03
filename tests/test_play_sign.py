@@ -205,8 +205,10 @@ class TestWiring:
         # upstream_item_stream 为 U-02 详情页上游线路取流口，与上游兜底口
         # 逐项同门禁，故同样计入；
         # + #1764 清单代理二级端点 upstream_playlist_media，
-        # 同款 get_play_user 验签，故同样计入）
-        assert content.count("Depends(get_play_user)") == 7
+        # 同款 get_play_user 验签，故同样计入；
+        # + #1818 借帧修复段端点 upstream_graft_segment，
+        # 同款 get_play_user 验签 + 付费墙 + 绑定门禁，故同样计入）
+        assert content.count("Depends(get_play_user)") == 8
         # 防盗链检查挂在 video_stream（video_hls 转交 video_stream，
         # 同一检查点覆盖两个入口）
         assert content.count("play_sign.check_referer") == 1
