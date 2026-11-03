@@ -47,9 +47,13 @@ class _FakePubSub:
 class _FakeClient:
     def __init__(self, pubsub):
         self._pubsub = pubsub
+        self.closed = 0
 
     def pubsub(self):
         return self._pubsub
+
+    def close(self):
+        self.closed += 1
 
 
 @pytest.fixture(autouse=True)
@@ -67,9 +71,12 @@ def test_subscriber_uses_dedicated_client_not_get_redis(monkeypatch):
         calls["get_redis"] += 1
         raise AssertionError("订阅线程不应调用 get_redis（会受熔断门控）")
 
+    clients = []
+
     def make_dedicated():
         calls["dedicated"] += 1
-        return _FakeClient(pubsub)
+        clients.append(_FakeClient(pubsub))
+        return clients[-1]
 
     monkeypatch.setattr(database, "get_redis", boom_get_redis)
     monkeypatch.setattr(database, "make_redis_subscriber_client", make_dedicated)
@@ -82,6 +89,7 @@ def test_subscriber_uses_dedicated_client_not_get_redis(monkeypatch):
     assert calls["get_redis"] == 0
     assert calls["dedicated"] >= 1
     assert pubsub.closed >= 1, "每轮必须显式关闭 pubsub（否则连接池泄漏）"
+    assert clients[0].closed == 1, "每轮新建的客户端也要关（连同连接池）"
 
 
 def test_subscriber_timeout_does_not_trip_breaker(monkeypatch):

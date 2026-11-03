@@ -8318,6 +8318,7 @@ def _wake_subscriber_loop(stop_event):
     """
     while not stop_event.is_set():
         pubsub = None
+        client = None
         try:
             from backend.database import make_redis_subscriber_client
             client = make_redis_subscriber_client()
@@ -8340,6 +8341,12 @@ def _wake_subscriber_loop(stop_event):
                 try:
                     pubsub.close()
                 except Exception:  # noqa: BLE001 — 关闭失败不影响重连
+                    pass
+            # 每轮新建的独立客户端连同它的连接池一起关掉（QA AF-②）
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
                     pass
 
 
