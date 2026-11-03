@@ -812,7 +812,16 @@ def cached_listing(fn: Callable) -> Callable:
 def list_dir_uncached(provider, rel: str = "/") -> list:
     """绕过缓存列目录（后台目录选择器 / 管理页的「刷新」用；看当下而不是 5 秒前的）"""
     impl = getattr(type(provider).list_dir, "__wrapped__", None)
-    if impl is None:            # 没被装饰（自定义提供者）：照常调用
+    if impl is None:            # 没被装饰（自定义提供者，如 sidecar）：传 fresh
+        import inspect as _inspect
+        try:
+            accepts_fresh = "fresh" in _inspect.signature(
+                provider.list_dir).parameters
+        except (TypeError, ValueError):
+            accepts_fresh = False
+        if accepts_fresh:
+            return _call_remote(
+                provider, lambda prov, path: prov.list_dir(path, fresh=True), rel)
         return _call_remote(provider, lambda prov, path: prov.list_dir(path), rel)
     return _call_remote(provider, impl, rel)
 

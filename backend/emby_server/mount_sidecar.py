@@ -149,7 +149,7 @@ class SidecarMountProvider(MountProvider):
             pass
 
     # ---- 目录 ----
-    def list_dir(self, rel: str = "/") -> list[MountEntry]:
+    def list_dir(self, rel: str = "/", fresh: bool = False) -> list[MountEntry]:
         """列目录：**逐页重试**；某页重试仍失败时返回已拿到的部分并置
         ``_partial_listing``（首扫 partial 修法①）。
 
@@ -165,7 +165,7 @@ class SidecarMountProvider(MountProvider):
         token = None
         self._partial_listing = False
         while True:
-            page = self._list_page_with_retry(rel, token)
+            page = self._list_page_with_retry(rel, token, fresh=fresh)
             if page is None:
                 self._partial_listing = True
                 logger.warning("sidecar 列目录分页失败（已取 %d 项，标记 partial）：%s",
@@ -186,12 +186,13 @@ class SidecarMountProvider(MountProvider):
         entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
         return entries
 
-    def _list_page_with_retry(self, rel: str, token):
+    def _list_page_with_retry(self, rel: str, token, fresh: bool = False):
         """单页列举：3 次尝试（0.5s/1s 退避）；全失败返回 None（调用方标记 partial）。"""
         last_exc = None
         for attempt in range(3):
             try:
-                return self.client.list_page(self.session_id, rel, token)
+                return self.client.list_page(self.session_id, rel, token,
+                                             fresh=fresh)
             except ProviderRuntimeError as exc:
                 last_exc = exc
                 if attempt < 2:

@@ -56,7 +56,7 @@ def _handler_with(pages):
 
 
 def test_sidecar_dir_cache_reuses_listing_within_ttl():
-    """同一 cid 的多次列举在 30s 内只打一次 115。"""
+    """同一 cid 的多次列举在 TTL 内只打一次 115（handler 级缓存）。"""
     h = _handler_with({"0": [{"name": "媒体库", "is_dir": True, "cid": "10"}]})
     client = h._states["s1"].client
     st = h._states["s1"]
@@ -70,9 +70,10 @@ def test_sidecar_dir_cache_expires_after_ttl(monkeypatch):
     st = h._states["s1"]
     client = st.client
     h._raw_list(st, "0")
-    # 手动把缓存过期时间拨到过去
-    exp, items = st.dir_cache["0"]
-    st.dir_cache["0"] = (time.monotonic() - 1, items)
+    # 手动把 handler 缓存过期时间拨到过去
+    key = (st.scope, "0")
+    exp, items = h._dir_cache[key]
+    h._dir_cache[key] = (time.monotonic() - 1, items)
     h._raw_list(st, "0")
     assert client.calls == ["0", "0"]
 
@@ -113,7 +114,7 @@ class _FlakyClient:
         self.failures_before_success = failures_before_success
         self.total_pages = total_pages
 
-    def list_page(self, session_id, rel, token=None):
+    def list_page(self, session_id, rel, token=None, fresh=False):
         self.calls += 1
         if self.calls <= self.failures_before_success:
             raise mount_sidecar.ProviderRuntimeError("timeout", "sidecar 调用超时：list_page")
@@ -140,7 +141,7 @@ def test_list_dir_partial_returns_collected_pages(monkeypatch):
     class AlwaysFailAfterFirst:
         def __init__(self):
             self.calls = 0
-        def list_page(self, session_id, rel, token=None):
+        def list_page(self, session_id, rel, token=None, fresh=False):
             self.calls += 1
             if token is None:
                 return {"entries": [{"name": "a", "path": "/a", "is_dir": False,
@@ -160,7 +161,7 @@ def test_walk_media_raises_after_yielding_partial(monkeypatch):
     monkeypatch.setattr(mount_sidecar.time, "sleep", lambda s: None)
 
     class PartialClient:
-        def list_page(self, session_id, rel, token=None):
+        def list_page(self, session_id, rel, token=None, fresh=False):
             if rel == "/" and token is None:
                 return {"entries": [
                     {"name": "movie.mkv", "path": "/movie.mkv", "is_dir": False,
@@ -322,10 +323,10 @@ def test_cid_cache_ttl_expires(monkeypatch):
     # 缓存命中：不新增调用
     assert h._cid_of(st, "/媒体库/华语电影") == "20"
     assert len(client.calls) == n1
-    # 把 TTL 拨到过去 → 重新解析（会再列父目录；dir_cache 30s 仍命中，
-    # 因此这里断言的是 cid 缓存本身失效：清掉 dir_cache 才看得到调用）
-    st.cid_cache_at["/媒体库/华语电影"] = 0.0
-    st.dir_cache.clear()
+    # 把 TTL 拨到过去 → 重新解析（会再列父目录；dir 缓存仍命中，
+    # 因此这里断言的是 cid 缓存本身失效：清掉 dir 缓存才看得到调用）
+    h._cid_cache[(st.scope, "/媒体库/华语电影")] = (0.0, "20")
+    h._dir_cache.clear()
     assert h._cid_of(st, "/媒体库/华语电影") == "20"
     assert len(client.calls) > n1
 
@@ -339,9 +340,9 @@ def test_cid_prefix_dropped_on_not_found():
     from backend.emby_server.provider_runtime import ProviderRuntimeError
     with pytest.raises(ProviderRuntimeError):
         h._cid_of(st, "/媒体库/不存在")
-    assert "/媒体库/不存在" not in st.cid_cache
-    # 父级缓存保留（仍有效）
-    assert st.cid_cache.get("/媒体库") == "10"
+    # 路径不存在 → 清祖先链 + 自身（祖先 cid 也可能因目录移动失效）
+    assert (st.scope, "/媒体库/不存在") not in h._cid_cache
+    assert (st.scope, "/媒体库") not in h._cid_cache
 
 
 def test_retrying_with_null_next_retry_is_claimable_expected(db):
