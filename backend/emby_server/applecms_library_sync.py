@@ -86,6 +86,7 @@ import time
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from backend.emby_server import applecms_backfill as abf
@@ -794,7 +795,8 @@ def _find_series_row(db: Session, library, source, vod_id: str,
         # 标题+年份；已补身份的候选若带身份建键会得 tmdb:/imdb: 键，
         # 与记录键失配致建第二棵树。本函数 docstring 原本就写
         # 「去重键只在本库 series 行里比（标题+年份）」，此处使代码
-        # 与口径一致。电影版 _find_row 的同构问题属 PA-062，另单处理。
+        # 与口径一致。电影版 _find_row 的同构问题（PA-062）已按
+        # 同一口径修复（见 _movie_row_matches）。
         cand_record = agg.UpstreamCatalogRecord(
             source_id=str(source.id), upstream_item_id=vod_id,
             name=cand.name or "", item_type="Series",
@@ -814,6 +816,15 @@ def _find_row(db: Session, library, source, vod_id: str, record,
     guid 命中但行属别的库时返回 ``_OTHER_LIBRARY`` 哨兵：一个源
     一期只喂一个库，跨库共用同一 guid 行会把行在两库间扯动，
     宁可跳过计数，不抢行。
+
+    去重键比对（PA-062，与剧集版 PA-070 同口径）：候选行可能已被
+    enrich 补上 tmdb/imdb 身份，比对建键必须剥身份、只用标题+年份
+    ——带身份建键会得 ``tmdb:``/``imdb:`` 键，与入同步记录恒定的
+    ``title:`` 键永不相等，已绑身份的行会被当成新片反复建行。
+    另有两条放宽（见 :func:`_movie_row_matches`）：候选名可能是
+    标题清洗上线前的存量脏名（尾黏年份），先按同一口径清洗再比；
+    年份「一空一有」且清洗后标题相同视为同片（年份以非空为准，
+    命中后 ``_refresh_row`` 会把干净名/年份刷进行，同步自愈）。
     """
     mapping = (
         db.query(em.UpstreamItemMapping)
@@ -828,22 +839,61 @@ def _find_row(db: Session, library, source, vod_id: str, record,
     row = uimp._usable_row_by_guid(db, uimp.hosted_guid(source.id, vod_id))
     if row is not None:
         return row if row.library_id == library.id else _OTHER_LIBRARY
-    candidates = (
+    for cand in _movie_candidates(db, library, record):
+        if _movie_row_matches(cand, record, key):
+            return cand
+    return None
+
+
+def _movie_candidates(db: Session, library, record):
+    """去重候选行（有界，不全表扫）：名与记录名精确相等，或以
+    记录名开头的行。
+
+    后者兜存量脏名：脏名 = 干净名 + 尾年份后缀（黏尾/空格/括号
+    形态），恒以干净名开头。前缀相同但实为另一部片的行（如
+    「…外传」）由 :func:`_movie_row_matches` 的清洗比对挡下，
+    不会误命中。
+    """
+    prefix = (record.name.replace("\\", "\\\\")
+              .replace("%", "\\%").replace("_", "\\_"))
+    return (
         db.query(em.MediaItem)
         .filter(em.MediaItem.library_id == library.id,
                 em.MediaItem.item_type == "movie",
-                em.MediaItem.name == record.name)
+                or_(em.MediaItem.name == record.name,
+                    em.MediaItem.name.like(prefix + "%", escape="\\")))
         .all())
-    for cand in candidates:
-        cand_record = agg.UpstreamCatalogRecord(
-            source_id=str(source.id), upstream_item_id=vod_id,
-            name=cand.name or "", item_type="Movie",
-            production_year=cand.production_year,
-            tmdb_id=cand.tmdb_id or None,
-            imdb_id=cand.imdb_id or None)
-        if agg.aggregate_key_for(cand_record) == key:
-            return cand
-    return None
+
+
+def _movie_row_matches(cand, record, key: str) -> bool:
+    """候选行与入同步记录是否同一部片（标题+年份，剥身份口径）。
+
+    候选先剥身份建键与记录键比：候选名按
+    ``applecms_sync.split_trailing_year`` 清洗（存量脏名），候选
+    年份为空时用其名尾解析出的年份补上。键不等时再走放宽：年份
+    恰有一边为空且标题键（不带年份）相等 → 同片；两边年份都有
+    且不同（键已不等）则是另一部片（重拍/续作），不许误并。
+    """
+    clean_name, tail_year = acs.split_trailing_year(cand.name or "")
+    cand_year = cand.production_year
+    if cand_year is None:
+        cand_year = tail_year
+    cand_record = agg.UpstreamCatalogRecord(
+        source_id="", upstream_item_id="",
+        name=clean_name, item_type="Movie",
+        production_year=cand_year)
+    if agg.aggregate_key_for(cand_record) == key:
+        return True
+    if (cand_year is None) == (record.production_year is None):
+        return False
+    blank_cand = agg.UpstreamCatalogRecord(
+        source_id="", upstream_item_id="",
+        name=clean_name, item_type="Movie", production_year=None)
+    blank_record = agg.UpstreamCatalogRecord(
+        source_id="", upstream_item_id="",
+        name=record.name, item_type="Movie", production_year=None)
+    return agg.aggregate_key_for(blank_cand) == agg.aggregate_key_for(
+        blank_record)
 
 
 def _create_row(db: Session, library, source, vod_id: str,

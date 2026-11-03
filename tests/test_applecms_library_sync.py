@@ -25,7 +25,9 @@ from sqlalchemy.orm import sessionmaker
 
 from backend import models as base_models
 from backend.emby_server import applecms_library_sync as als
+from backend.emby_server import applecms_sync as acs
 from backend.emby_server import models as em
+from backend.emby_server import upstream_aggregation as agg
 from backend.emby_server.upstream_import import hosted_guid
 
 
@@ -283,3 +285,179 @@ def test_process_entry_series_mode_gate_before_detail(db):
                        headers={}, do_sleep=lambda s: None, delay=0.0)
     assert stats["skipped_quality_gun"] == 1
     assert _movies(db, lib) == []
+
+
+# ---------------------------------------------------------------------------
+# 入库标题尾年份解析（错认根因：黏尾年份无人剥离，production_year 为空
+# → enrich 不带年份搜 TMDB、年份门跳过，绑到同名旧片）
+# ---------------------------------------------------------------------------
+
+def _record(name, year):
+    return acs.cms_entry_to_record(
+        {"vod_id": "1", "vod_name": name, "vod_year": year},
+        source_id="7")
+
+
+def test_cms_title_glued_year_fills_year_and_cleans_name():
+    rec = _record("生化危机：爆发夜2026", "")
+    assert rec.name == "生化危机：爆发夜"
+    assert rec.production_year == 2026
+
+
+def test_cms_title_glued_year_equal_to_vod_year_stripped():
+    rec = _record("生化危机：爆发夜2026", "2026")
+    assert rec.name == "生化危机：爆发夜"
+    assert rec.production_year == 2026
+
+
+def test_cms_title_year_conflict_keeps_original():
+    """vod_year 与尾年份冲突：名与年份都不动，留待后续口径。"""
+    rec = _record("生化危机：爆发夜2026", "2002")
+    assert rec.name == "生化危机：爆发夜2026"
+    assert rec.production_year == 2002
+
+
+@pytest.mark.parametrize("raw,clean", [
+    ("某片（2024）", "某片"),
+    ("某片[2024]", "某片"),
+    ("某片 (2024)", "某片"),
+    ("某片 2024", "某片"),
+])
+def test_cms_title_year_forms_stripped(raw, clean):
+    rec = _record(raw, "")
+    assert rec.name == clean
+    assert rec.production_year == 2024
+
+
+def test_cms_title_out_of_range_year_not_stripped():
+    """「银翼杀手2049」的 2049 在合理区间外，是片名本身，不剥。"""
+    rec = _record("银翼杀手2049", "")
+    assert rec.name == "银翼杀手2049"
+    assert rec.production_year is None
+
+
+def test_cms_title_non_trailing_digits_untouched():
+    rec = _record("2012世界末日", "")
+    assert rec.name == "2012世界末日"
+    assert rec.production_year is None
+    rec2 = _record("某剧第二季", "")
+    assert rec2.name == "某剧第二季"
+    assert rec2.production_year is None
+    rec3 = _record("2026", "")
+    assert rec3.name == "2026"
+    assert rec3.production_year is None
+
+
+# ---------------------------------------------------------------------------
+# PA-062：电影版 _find_row 去重（与剧集版 PA-070 同构：候选比对剥身份）
+# ---------------------------------------------------------------------------
+
+def test_enriched_movie_row_still_dedupes_new_source(db):
+    """已补 tmdb 身份的电影行＋新源同标题+年份条目 → 不建新行、只挂映射。
+
+    与剧集版 PA-070 回归同构：第二轮只喂新源，绕开同轮 run_cache，
+    让 _find_row 的候选比对真正跑到。
+    """
+    lib = _seed(db, type_map={"电影": "in"})
+    lib.upstream_source_ids = "7"
+    db.commit()
+    als.sync_library(db, lib, http_get=FakeHttpGet())
+    dune = next(r for r in _movies(db, lib) if r.name == "沙丘")
+    dune.tmdb_id = "438631"
+    db.commit()
+    lib.upstream_source_ids = "8"
+    db.commit()
+    stats2 = als.sync_library(db, lib, http_get=FakeHttpGet())
+    assert stats2["added"] == 1  # 只有流浪地球是新行，沙丘不许重建
+    dunes = [r for r in _movies(db, lib) if r.name == "沙丘"]
+    assert len(dunes) == 1
+    assert {(m.source_id, m.upstream_item_id)
+            for m in _maps_for(db, dunes[0].id)} == {(7, "101"), (8, "55")}
+
+
+def test_find_row_matches_imdb_enriched_candidate(db):
+    """直测：仅补 imdb 身份的候选行同样按标题+年份命中。"""
+    lib = _seed(db)
+    source8 = db.query(em.UpstreamSource).filter_by(id=8).one()
+    row = em.MediaItem(guid="pa062-imdb-cand", library_id=lib.id,
+                       item_type="movie", name="沙丘",
+                       production_year=2021, imdb_id="tt1160419")
+    db.add(row)
+    db.commit()
+    record = agg.UpstreamCatalogRecord(
+        source_id="8", upstream_item_id="55", name="沙丘",
+        item_type="Movie", production_year=2021)
+    key = agg.aggregate_key_for(record)
+    found = als._find_row(db, lib, source8, "55", record, key)
+    assert found is not None and found.id == row.id
+
+
+@pytest.mark.parametrize("cand_year,rec_year", [(None, 2021), (2021, None)])
+def test_find_row_year_one_side_empty_still_matches(db, cand_year, rec_year):
+    """年份一空一有且标题相同视为同片（年份以非空为准）。"""
+    lib = _seed(db)
+    source8 = db.query(em.UpstreamSource).filter_by(id=8).one()
+    row = em.MediaItem(guid=f"pa062-year-{cand_year}", library_id=lib.id,
+                       item_type="movie", name="沙丘",
+                       production_year=cand_year)
+    db.add(row)
+    db.commit()
+    record = agg.UpstreamCatalogRecord(
+        source_id="8", upstream_item_id="55", name="沙丘",
+        item_type="Movie", production_year=rec_year)
+    key = agg.aggregate_key_for(record)
+    found = als._find_row(db, lib, source8, "55", record, key)
+    assert found is not None and found.id == row.id
+
+
+def test_find_row_year_conflict_does_not_match(db):
+    """年份两边都有且不同 = 另一部片（重拍/续作），不许误并。"""
+    lib = _seed(db)
+    source8 = db.query(em.UpstreamSource).filter_by(id=8).one()
+    row = em.MediaItem(guid="pa062-year-conflict", library_id=lib.id,
+                       item_type="movie", name="沙丘",
+                       production_year=1984)
+    db.add(row)
+    db.commit()
+    record = agg.UpstreamCatalogRecord(
+        source_id="8", upstream_item_id="55", name="沙丘",
+        item_type="Movie", production_year=2021)
+    key = agg.aggregate_key_for(record)
+    assert als._find_row(db, lib, source8, "55", record, key) is None
+
+
+class _OnePageHttp:
+    """单页 provide 桩（脏名存量行自愈用例专用）。"""
+
+    def __init__(self, page):
+        self.page = page
+        self.urls = []
+
+    def __call__(self, url, headers=None, timeout=None):
+        self.urls.append(url)
+        return 200, json.loads(json.dumps(self.page, ensure_ascii=False))
+
+
+def test_sync_heals_dirty_glued_year_row(db):
+    """存量脏名行（标题黏尾年份、年份空）被干净记录认出并刷新，不建新行。"""
+    lib = _seed(db, type_map={"电影": "in"})
+    lib.upstream_source_ids = "7"
+    dirty = em.MediaItem(
+        guid="pa062-dirty-row", library_id=lib.id, item_type="movie",
+        name="生化危机：爆发夜2026", production_year=None,
+        upstream_source_id=7, probe_status="done")
+    db.add(dirty)
+    db.commit()
+    page = {"code": 1, "page": 1, "pagecount": 1, "limit": 20,
+            "total": 1, "class": CLASS_TREE,
+            "list": [_entry(900, "生化危机：爆发夜", year="2026")]}
+    stats = als.sync_library(db, lib, http_get=_OnePageHttp(page))
+    assert stats["added"] == 0
+    rows = _movies(db, lib)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.id == dirty.id
+    assert row.name == "生化危机：爆发夜"
+    assert row.production_year == 2026
+    assert {(m.source_id, m.upstream_item_id)
+            for m in _maps_for(db, row.id)} == {(7, "900")}
