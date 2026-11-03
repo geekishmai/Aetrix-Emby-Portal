@@ -141,6 +141,7 @@ def _zero_stats(library_id: int) -> Dict[str, object]:
         "added": 0, "updated": 0, "existing": 0, "mapped": 0,
         "pages": 0, "skipped_category": 0, "skipped_series_shape": 0,
         "skipped_invalid": 0, "skipped_other_library": 0,
+        "skipped_short_drama": 0,
         "skipped_area": 0, "skipped_quality_gun": 0,
         "skipped_quality_lowdef": 0,
         "detail_errors": 0, "detail_fetches": 0,
@@ -522,6 +523,7 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
     seen: List[str] = []
     stats["seen_by_source"][source_id] = seen
     tops: Dict[int, str] = {}
+    short_ids: set = set()
     delay = acs._page_delay_sec()
     do_sleep = sleep_fn if sleep_fn is not None else time.sleep
     page_limit = max_pages or acf.DEFAULT_MAX_PAGES
@@ -535,12 +537,14 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
             stats["pages"] += 1
             if pg == 1:
                 tops = class_top_names(payload)
+                short_ids = abf.class_short_drama_ids(payload)
             entries = [e for e in (payload.get("list") or [])
                        if isinstance(e, dict)]
             for entry in entries:
                 _process_entry(db, library, source, entry, stats,
                                run_cache, type_map=type_map, tops=tops,
                                seen=seen, series_mode=series_mode,
+                               short_ids=short_ids,
                                area_bucket_cfg=area_bucket_cfg,
                                http_get=http_get, headers=headers,
                                do_sleep=do_sleep, delay=delay)
@@ -572,7 +576,8 @@ def _sync_source(db: Session, library, source_id: int, stats: dict,
 def _process_entry(db: Session, library, source, entry: dict,
                    stats: dict, run_cache: dict, *, type_map: dict,
                    tops: dict, seen: List[str],
-                   series_mode: bool = False, area_bucket_cfg: str = "",
+                   series_mode: bool = False, short_ids=None,
+                   area_bucket_cfg: str = "",
                    http_get=None, headers: Optional[dict] = None,
                    do_sleep=None, delay: float = 0.0) -> None:
     vod_id = str(entry.get("vod_id") or "").strip()
@@ -581,7 +586,7 @@ def _process_entry(db: Session, library, source, entry: dict,
         return
     # 质量门（枪版/低清）：与扩抓 lane、智能补源同一套判据
     # （applecms_backfill.version_quality_block，仓库内唯一落点）。
-    # 分类/短剧门仍走 type_map 白名单，本处不重复拦。门在 seen
+    # 分类门仍走 type_map 白名单，本处不重复拦；短剧门见下段。门在 seen
     # 登记与剧集 detail 拉取之前：命中项不建行、不耗 detail、
     # 不进 seen（与 lane 把命中条目置空后走 skipped_invalid
     # 的语义一致，只是计数键分开）。
@@ -594,12 +599,23 @@ def _process_entry(db: Session, library, source, entry: dict,
     if version_block == "low_quality":
         stats["skipped_quality_lowdef"] += 1
         return
+    # 质量门（短剧）：与智能补源同一套判据（applecms_backfill
+    # 的 class_short_drama_ids / _is_short_drama_entry，仓库内
+    # 唯一落点）——只认源站分类证据：分类 id 命中短剧类集合，
+    # 或 type_name / vod_class / vod_remarks 带短剧标记；片名不
+    # 作证据（综艺拿「短剧」当节目名不许误杀）。与枪版/低清门
+    # 同一位置：seen 登记与剧集 detail 拉取之前，命中不建行、
+    # 不挂映射、不进 seen；剧集 detail 证据在剧集路径内复检。
+    if abf._is_short_drama_entry(entry, short_ids):
+        stats["skipped_short_drama"] += 1
+        return
     if series_mode:
         # 剧集路径独立成段：电影路径逐字不动（回归口径）。地区
         # 细拆走白名单口径，本路径不接 cms_area_bucket 校验。
         _process_series_entry(
             db, library, source, entry, stats, run_cache,
-            type_map=type_map, tops=tops, seen=seen, http_get=http_get,
+            type_map=type_map, tops=tops, seen=seen,
+            short_ids=short_ids, http_get=http_get,
             headers=headers, do_sleep=do_sleep, delay=delay)
         return
     seen.append(vod_id)
@@ -668,7 +684,7 @@ def _process_series_entry(db: Session, library, source, entry: dict,
                           stats: dict, run_cache: dict, *,
                           type_map: dict, tops: dict, seen: List[str],
                           http_get, headers, do_sleep,
-                          delay: float) -> None:
+                          delay: float, short_ids=None) -> None:
     """剧集库单条目：分类白名单 → 去重找剧行 → 拉 detail 建/补树。
 
     集序号解析口径：detail 的首个全直链组内 1 起序号
@@ -721,6 +737,11 @@ def _process_series_entry(db: Session, library, source, entry: dict,
         return
     if detail is None:
         stats["skipped_detail_missing"] += 1
+        return
+    # 短剧 detail 复检：list 分类看不出、detail 证据明确的在此
+    # 拦（与 list 层同一函数、同一口径）。
+    if abf._is_short_drama_entry(detail, short_ids):
+        stats["skipped_short_drama"] += 1
         return
     if not acser.plan_episodes(detail):
         stats["skipped_no_direct_group"] += 1
@@ -959,6 +980,7 @@ def _write_progress(db: Session, library, stats: dict,
         "skipped_series_shape": stats["skipped_series_shape"],
         "skipped_invalid": stats["skipped_invalid"],
         "skipped_other_library": stats["skipped_other_library"],
+        "skipped_short_drama": stats["skipped_short_drama"],
         "skipped_area": stats["skipped_area"],
         "skipped_quality_gun": stats["skipped_quality_gun"],
         "skipped_quality_lowdef": stats["skipped_quality_lowdef"],
