@@ -40,6 +40,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import time
 import signal
@@ -48,6 +49,7 @@ import threading
 from dataclasses import dataclass, field
 
 from backend.emby_server import transfer115
+from backend.emby_server.env_util import env_float, env_int
 from backend.emby_server.provider_runtime import (
     BASE_CAPABILITIES,
     P115_EXTENSIONS,
@@ -63,6 +65,11 @@ PROVIDER = "p115"
 DEFAULT_PAGE_SIZE = 1000  # 115 /files 单页上限 1000（QA AC-3 P1：减少根目录页数）
 MAX_PAGE_SIZE = 1000
 MAX_SYNC_ENTRIES = 100000
+
+
+def _account_scope(cookie: str) -> str:
+    """账号作用域：cookie 的 sha256 前 16 位（与 pan115_guard.scope_of 同口径）。"""
+    return hashlib.sha256((cookie or "").encode("utf-8")).hexdigest()[:16]
 
 
 def _map_115_error(exc: Exception) -> ProviderRuntimeError:
@@ -97,16 +104,10 @@ class _SessionState:
     ua: str
     root_cid: str
     client: object = None
-    cid_cache: dict = field(default_factory=dict)
-    # QA AE-3②：cid 缓存加 TTL（与 dir_cache 同为 30s）——目录被移动/重命名后
-    # 旧 cid 会 404/空列；过期 + 失败即清，避免长期用死 cid。
-    cid_cache_at: dict = field(default_factory=dict)
+    # 账号作用域（sha256(cookie)[:16]，与 pan115_guard 同口径）：缓存按
+    # (scope, cid) / (scope, rel) 键，多账号互不串。
+    scope: str = ""
     pick_cache: dict = field(default_factory=dict)
-    # 目录列举缓存：cid -> (expire_monotonic, items)。首扫 partial 根因之一：
-    # 每个 list_page 都 _raw_list 全目录，且每个条目的 _cid_of/_locate 都重列
-    # 父目录（1020 项的根 = 每部 6 次 115 list）。会话内 30s TTL 复用，
-    # 与宿主 mounts.cached_listing 的 30s 同口径；错误不缓存。
-    dir_cache: dict = field(default_factory=dict)
     # life_poll 快照：key = 监视目录元组，value = {path: 指纹}；
     # 只存本 sidecar 进程内存，不落盘、不跨进程（与 full_sync 的 generation 同口径）。
     life_snapshots: dict = field(default_factory=dict)
@@ -127,6 +128,19 @@ class P115SidecarHandler:
         self._states: dict[str, _SessionState] = {}
         self._lock = threading.Lock()
         self._generation = 0
+        # handler 级缓存（2026-11-03 §13）：所有宿主进程共用同一 sidecar 进程，
+        # 缓存必须挂在 handler 上、按 (account_scope, cid) 键——不能挂在
+        # _SessionState（session_upsert 每次整体替换会清空，30s TTL 覆盖不到
+        # 扫描批次）。TTL 默认 300s 覆盖一次扫描 + 紧随的 enrich 旁挂读取。
+        # 锁用 RLock：_drop_scope 会在持锁路径里调用。
+        self._cache_lock = threading.RLock()
+        self._dir_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+        self._cid_cache: dict[tuple[str, str], tuple[float, str]] = {}
+        self._dir_cache_ttl = env_float("P115_SIDECAR_DIR_CACHE_SEC", 300.0, 0.0)
+        self._cid_cache_ttl = env_float(
+            "P115_SIDECAR_CID_CACHE_SEC", self._dir_cache_ttl, 0.0)
+        self._cache_max_dirs = env_int(
+            "P115_SIDECAR_CACHE_MAX_DIRS", 4096, 16, 100000)
 
     # ---- 会话 ----
     def session_upsert(self, session_id: str, data: dict) -> None:
@@ -141,10 +155,16 @@ class P115SidecarHandler:
             raise ProviderRuntimeError("invalid_request", str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 — 工厂异常按上游失败计
             raise _map_115_error(exc) from exc
-        state = _SessionState(cookie=cookie, ua=ua, root_cid=root_cid, client=client)
-        state.cid_cache = {"": root_cid, "/": root_cid}
+        scope = _account_scope(cookie)
+        state = _SessionState(cookie=cookie, ua=ua, root_cid=root_cid,
+                              client=client, scope=scope)
         with self._lock:
+            old = self._states.get(session_id)
             self._states[session_id] = state
+        # cookie 刷新（scope 变了）→ 旧账号缓存整块释放（不只是不复用）
+        if old is not None and old.scope and old.scope != scope:
+            self._drop_scope(old.scope)
+        # 同 scope：缓存保留（handler 级，本就与 session 对象解耦）
 
     def session_remove(self, session_id: str) -> None:
         with self._lock:
@@ -157,80 +177,141 @@ class P115SidecarHandler:
         return state
 
     # ---- 目录解析（与 Pan115Mount._cid_of/_locate 同语义，sidecar 内单份） ----
-    def _raw_list(self, state: _SessionState, cid: str,
-                  deadline: float | None = None) -> list[dict]:
-        """列目录（会话内 30s TTL 缓存，键 = cid）。
 
-        sidecar 的每次 list_page / _cid_of / _locate 都走这里；不缓存时
-        1020 项的根目录会被每个条目的路径解析重列一遍（首扫 16.6 list/部
-        的主因）。TTL 与宿主 cached_listing 同为 30s；读失败不缓存。
+    def _drop_scope(self, scope: str) -> None:
+        """整块释放某账号作用域的缓存（cookie 刷新时调用）。"""
+        if not scope:
+            return
+        with self._cache_lock:
+            for cache in (self._dir_cache, self._cid_cache):
+                for key in [k for k in cache if k[0] == scope]:
+                    cache.pop(key, None)
+
+    def _drop_cid_prefix(self, scope: str, rel: str) -> None:
+        """清掉某路径及其子路径的 cid 缓存（目录移动/重命名/不存在时）。"""
+        rel = "/" + (rel or "").lstrip("/")
+        rel = rel.rstrip("/") or "/"
+        prefix = rel.rstrip("/") + "/"
+        with self._cache_lock:
+            for key in [k for k in self._cid_cache
+                        if k[0] == scope and (k[1] == rel or k[1].startswith(prefix))]:
+                self._cid_cache.pop(key, None)
+
+    def _drop_cid_chain(self, scope: str, rel: str) -> None:
+        """清掉某路径的**祖先链 + 自身 + 子孙** cid 缓存。
+
+        目录被移动/重命名时，失效的不止目标本身——祖先的 cid 也可能已变
+        （整棵子树被移走）。播放/取链 not_found 重试前调用，保证从根重新
+        解析一次。
         """
-        import time as _t
-        now = _t.monotonic()
-        hit = state.dir_cache.get(cid)
-        if hit is not None and hit[0] > now:
-            return list(hit[1])
+        rel = "/" + (rel or "").lstrip("/")
+        rel = rel.rstrip("/") or "/"
+        parts = [p for p in rel.split("/") if p]
+        ancestors = {"/" + "/".join(parts[:i]) for i in range(1, len(parts) + 1)}
+        child_prefix = rel.rstrip("/") + "/"
+        with self._cache_lock:
+            stale_cids = {v for k, (_exp, v) in self._cid_cache.items()
+                          if k[0] == scope and (
+                              k[1] in ancestors or k[1] == rel
+                              or k[1].startswith(child_prefix))}
+            for key in [k for k in self._cid_cache if k[0] == scope and (
+                    k[1] in ancestors or k[1] == rel
+                    or k[1].startswith(child_prefix))]:
+                self._cid_cache.pop(key, None)
+            # 祖先目录的「旧列表」也一起清：否则重试会从旧列表里重新解析出
+            # 同一个死 cid（目录移动后列表已变）。
+            for cid in stale_cids:
+                self._dir_cache.pop((scope, cid), None)
+
+    def _raw_list(self, state: _SessionState, cid: str,
+                  deadline: float | None = None,
+                  fresh: bool = False) -> list[dict]:
+        """列目录（handler 级缓存，键 = (account_scope, cid)，TTL 默认 300s）。
+
+        2026-11-03 §13：缓存从 _SessionState 提到 handler——宿主每次
+        build_provider 都会 session_upsert 整体替换会话状态，挂在会话上的
+        缓存会被反复清空，30s TTL 覆盖不到扫描批次。handler 级缓存被
+        api/worker/EA 三个宿主进程共用（都落到同一 sidecar 进程）。
+        fresh=True 仅限人工刷新：绕过并回填（扫描/chase-new 不传）。
+        """
+        key = (state.scope, cid or "0")
+        now = time.monotonic()
+        if not fresh and self._dir_cache_ttl > 0:
+            with self._cache_lock:
+                hit = self._dir_cache.get(key)
+                if hit is not None and hit[0] > now:
+                    return list(hit[1])
         try:
             items = state.client.list_dir(cid or "0", deadline=deadline)
         except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
             raise _map_115_error(exc) from exc
-        state.dir_cache[cid] = (now + 30.0, list(items))
-        if len(state.dir_cache) > 512:   # 单会话上限，防大库长扫描吃内存
-            for k in list(state.dir_cache)[:256]:
-                state.dir_cache.pop(k, None)
+        if self._dir_cache_ttl > 0:
+            with self._cache_lock:
+                self._dir_cache[key] = (now + self._dir_cache_ttl, list(items))
+                if len(self._dir_cache) > self._cache_max_dirs:
+                    # 淘汰最早过期的一半（过期优先）
+                    ordered = sorted(self._dir_cache.items(),
+                                     key=lambda kv: kv[1][0])
+                    for k, _v in ordered[:max(1, len(ordered) // 2)]:
+                        self._dir_cache.pop(k, None)
         return items
 
-    _CID_TTL_SEC = 30.0
-
-    def _drop_cid_prefix(self, state: _SessionState, rel: str) -> None:
-        """清掉某路径及其子路径的 cid 缓存（目录移动/重命名/不存在时）。"""
-        rel = "/" + (rel or "").lstrip("/")
-        rel = rel.rstrip("/") or "/"
-        for key in [k for k in state.cid_cache
-                    if k == rel or k.startswith(rel.rstrip("/") + "/")]:
-            state.cid_cache.pop(key, None)
-            state.cid_cache_at.pop(key, None)
-
     def _cid_of(self, state: _SessionState, rel: str,
-                deadline: float | None = None) -> str:
+                deadline: float | None = None,
+                fresh: bool = False) -> str:
         rel = "/" + (rel or "").lstrip("/")
         rel = rel.rstrip("/") or "/"
         now = time.monotonic()
-        if rel in state.cid_cache and state.cid_cache[rel] \
-                and state.cid_cache_at.get(rel, 0.0) > now:
-            return state.cid_cache[rel]
+        if not fresh and self._cid_cache_ttl > 0:
+            with self._cache_lock:
+                hit = self._cid_cache.get((state.scope, rel))
+                if hit is not None and hit[0] > now:
+                    return hit[1]
         cid = state.root_cid
         prefix = ""
         for part in [p for p in rel.split("/") if p]:
             prefix = f"{prefix}/{part}"
-            cached = state.cid_cache.get(prefix)
-            if cached and state.cid_cache_at.get(prefix, 0.0) > now:
+            cached = None
+            if not fresh and self._cid_cache_ttl > 0:
+                with self._cache_lock:
+                    hit = self._cid_cache.get((state.scope, prefix))
+                    if hit is not None and hit[0] > now:
+                        cached = hit[1]
+            if cached:
                 cid = cached
                 continue
             child = next(
-                (e for e in self._raw_list(state, cid, deadline=deadline)
+                (e for e in self._raw_list(state, cid, deadline=deadline,
+                                           fresh=fresh)
                  if e.get("name") == part and e.get("is_dir")),
                 None,
             )
             if child is None:
                 # AE-3②：路径不存在 → 清该前缀（可能目录被移动/改名）
-                self._drop_cid_prefix(state, prefix)
+                self._drop_cid_chain(state.scope, prefix)
                 raise ProviderRuntimeError("not_found", f"115 上找不到目录：{rel}")
             cid = str(child.get("cid") or "")
-            state.cid_cache[prefix] = cid
-            state.cid_cache_at[prefix] = now + self._CID_TTL_SEC
-        state.cid_cache[rel] = cid
-        state.cid_cache_at[rel] = now + self._CID_TTL_SEC
+            if self._cid_cache_ttl > 0:
+                with self._cache_lock:
+                    self._cid_cache[(state.scope, prefix)] = (
+                        now + self._cid_cache_ttl, cid)
+        if self._cid_cache_ttl > 0:
+            with self._cache_lock:
+                self._cid_cache[(state.scope, rel)] = (
+                    now + self._cid_cache_ttl, cid)
         return cid
 
     def _locate(self, state: _SessionState, rel: str,
-                deadline: float | None = None) -> dict:
+                deadline: float | None = None,
+                fresh: bool = False) -> dict:
         rel = "/" + (rel or "").lstrip("/")
         if rel in state.pick_cache:
             return {"pickcode": state.pick_cache[rel], "name": os.path.basename(rel)}
         parent, _, name = rel.rpartition("/")
-        for item in self._raw_list(state, self._cid_of(state, parent or "/", deadline=deadline),
-                                   deadline=deadline):
+        for item in self._raw_list(
+                state,
+                self._cid_of(state, parent or "/", deadline=deadline, fresh=fresh),
+                deadline=deadline, fresh=fresh):
             if item.get("name") == name and not item.get("is_dir"):
                 return {"pickcode": str(item.get("pickcode") or ""), "name": name,
                         "size": int(item.get("size") or 0)}
@@ -253,11 +334,12 @@ class P115SidecarHandler:
 
     # ---- 8 项基础能力 ----
     def list_page(self, session, path: str, page_token, page_size,
-                  deadline: float | None = None) -> dict:
+                  deadline: float | None = None,
+                  fresh: bool = False) -> dict:
         state = self._state(session)
         rel = "/" + (path or "").lstrip("/")
         rel = rel.rstrip("/") or "/"
-        cid = self._cid_of(state, rel, deadline=deadline)
+        cid = self._cid_of(state, rel, deadline=deadline, fresh=fresh)
         try:
             offset = int(page_token) if page_token is not None else 0
         except (TypeError, ValueError):
@@ -266,11 +348,11 @@ class P115SidecarHandler:
             raise ProviderRuntimeError("invalid_request", "page_token 为负")
         size = DEFAULT_PAGE_SIZE if page_size is None else int(page_size)
         size = max(1, min(size, MAX_PAGE_SIZE))
-        items = self._raw_list(state, cid, deadline=deadline)
+        items = self._raw_list(state, cid, deadline=deadline, fresh=fresh)
         if not items and rel != "/":
             # AE-3②：解析出的 cid 列不出任何条目——可能是目录已移动/重命名的
             # 死 cid；清缓存让下次调用重新解析（空目录只是多一次解析，无副作用）。
-            self._drop_cid_prefix(state, rel)
+            self._drop_cid_chain(state.scope, rel)
         page = items[offset:offset + size]
         entries = [self._entry(item, rel) for item in page]
         nxt = offset + size
@@ -300,7 +382,7 @@ class P115SidecarHandler:
         if byte_offset < 0 or (byte_length is not None and byte_length <= 0):
             raise ProviderRuntimeError(
                 "invalid_request", f"无效的取段范围：offset={byte_offset} length={byte_length}")
-        entry = self._locate(state, rel, deadline=deadline)
+        entry = self._locate_with_retry(state, rel, deadline=deadline)
         pickcode = entry.get("pickcode") or ""
         if not pickcode:
             raise ProviderRuntimeError("not_found", f"115 未返回该文件的 pickcode：{rel}")
@@ -346,11 +428,26 @@ class P115SidecarHandler:
         return self.open_range(session, path, byte_offset, byte_length,
                                deadline=deadline)
 
+    def _locate_with_retry(self, state: _SessionState, rel: str,
+                           deadline: float | None = None) -> dict:
+        """播放/取链专用：not_found 时清 cid 前缀并重试一次（§13 要求 3）。
+
+        旧缓存里的 cid 可能因目录移动/重命名失效；清前缀后重新解析一次，
+        仍找不到才按 not_found 返回。
+        """
+        try:
+            return self._locate(state, rel, deadline=deadline)
+        except ProviderRuntimeError as exc:
+            if exc.kind != "not_found":
+                raise
+            self._drop_cid_chain(state.scope, rel)
+            return self._locate(state, rel, deadline=deadline)
+
     def resolve_play_target(self, session, path: str,
                             deadline: float | None = None) -> dict:
         """换链：只回直链与非秘密头，不搬字节、不回 Cookie（宿主重贴）。"""
         state = self._state(session)
-        entry = self._locate(state, path, deadline=deadline)
+        entry = self._locate_with_retry(state, path, deadline=deadline)
         pickcode = entry.get("pickcode") or ""
         if not pickcode:
             raise ProviderRuntimeError("not_found", f"115 未返回该文件的 pickcode：{path}")

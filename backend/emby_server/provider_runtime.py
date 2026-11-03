@@ -325,12 +325,16 @@ class ProviderRuntimeClient:
         return self.call("session_remove", {"session_id": session_id})  # type: ignore[return-value]
 
     def list_page(self, session_id: str, path: str, page_token: str | None = None,
-                  page_size: int | None = None) -> dict:
+                  page_size: int | None = None, fresh: bool = False) -> dict:
         params: dict = {"session_id": session_id, "path": path}
         if page_token is not None:
             params["page_token"] = page_token
         if page_size is not None:
             params["page_size"] = page_size
+        if fresh:
+            # §13：fresh 仅限人工刷新（管理端目录选择器/刷新按钮），
+            # 扫描与 chase-new 一律不传（默认 False，走缓存）。
+            params["fresh"] = True
         return self.call("list_page", params)  # type: ignore[return-value]
 
     def stat(self, session_id: str, path: str) -> dict:
