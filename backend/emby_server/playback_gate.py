@@ -65,6 +65,84 @@ def is_server_mount_item(item) -> bool:
                 and mount_lib.is_mount_path(getattr(item, "file_path", "")))
 
 
+def _item_is_user_owned(item) -> bool:
+    """条目是否来自用户自备盘（``byos://<binding_id>/...``）。
+
+    这类条目的字节在用户自己的网盘里，必须用该用户的绑定凭据取流——
+    即使库行开了免绑定，也永远要求 active 绑定。
+    """
+    path = (getattr(item, "file_path", "") or "").strip()
+    return path.startswith("byos://")
+
+
+def _library_exempts_binding(db: Session, library_id) -> bool:
+    """库行是否显式免绑定（``no_binding_required``，默认关）。
+
+    与上游 #1797 的 ``binding_required_for_item`` 同一接口：上游把「CMS 库」
+    硬编码为免绑定，本 fork 把范围扩成「库行显式开关」，合并上游时只需在
+    ``binding_required_for_item`` 里保留上游的 CMS 分支（见注释）。
+    """
+    if library_id is None:
+        return False
+    try:
+        library = (db.query(em.Library)
+                   .filter(em.Library.id == int(library_id)).first())
+    except Exception:  # noqa: BLE001 — 查不到库按不免（fail-closed）
+        return False
+    return bool(library is not None
+                and getattr(library, "no_binding_required", False))
+
+
+def binding_required_for_item(db: Session, item) -> bool:
+    """该条目的播放是否需要过绑定门禁（与上游 #1797 同名同签名）。
+
+    判定顺序：
+    1. 条目/库 id 缺失 → True（fail-closed）；
+    2. ``byos://`` 用户自备盘条目 → True（永远要求绑定）；
+    3. 库行 ``no_binding_required=True`` → False（服务端挂载库显式豁免）。
+
+    合并上游时：在上游版的基础上保留第 3 条即可；上游的
+    ``_library_is_cms`` 分支（``upstream_source_ids`` 非空 → 免绑定）应
+    一并保留，两者是「或」关系。
+    """
+    if item is None:
+        return True
+    library_id = getattr(item, "library_id", None)
+    if library_id is None:
+        return True
+    if _item_is_user_owned(item):
+        return True
+    return not _library_exempts_binding(db, library_id)
+
+
+def binding_required_for_upstream(db: Session, source_id,
+                                  upstream_item_id) -> bool:
+    """上游兜底口（按源 id + 上游条目 id 寻址）是否需要过绑定门禁。
+
+    与上游 #1797 同实现：经映射表反查本地条目，全部条目都免绑定才免；
+    查不到映射 / 条目已不存在 / 任一要求绑定 → True（fail-closed）。
+    """
+    rows = (
+        db.query(em.UpstreamItemMapping.local_item_id)
+        .filter(
+            em.UpstreamItemMapping.source_id == source_id,
+            em.UpstreamItemMapping.upstream_item_id == upstream_item_id,
+        )
+        .all()
+    )
+    if not rows:
+        return True
+    item_ids = {row[0] for row in rows}
+    items = (
+        db.query(em.MediaItem)
+        .filter(em.MediaItem.id.in_(item_ids))
+        .all()
+    )
+    if len(items) != len(item_ids):
+        return True
+    return any(binding_required_for_item(db, it) for it in items)
+
+
 def can_issue_play_sign(db: Session, user_id, item) -> bool:
     """是否给该用户签发该条目的播放签名。
 
@@ -72,7 +150,7 @@ def can_issue_play_sign(db: Session, user_id, item) -> bool:
     """
     if user_id is None:
         return False
-    if is_server_mount_item(item):
+    if not binding_required_for_item(db, item):
         return True
     if not binding_gate_enabled(db):
         return True
@@ -154,7 +232,7 @@ def ensure_binding_playback_allowed(
     """
     if not binding_gate_enabled(db):
         return
-    if is_server_mount_item(item):
+    if not binding_required_for_item(db, item):
         return
     if request is not None and _request_uses_issued_play_sign(request, db):
         return

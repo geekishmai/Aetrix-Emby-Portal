@@ -5410,6 +5410,28 @@ async def _usercopy_quota_relay_attempt(
     return _resp_q
 
 
+def _mount_type_of_item(db: Session, item) -> str:
+    """条目所属挂载的类型（local / 115 / rclone / drive）；非挂载或查不到返回空串。"""
+    parsed = mount_lib.parse_mount_path(getattr(item, "file_path", "") or "")
+    if parsed is None:
+        return ""
+    mount = (db.query(em.StorageMount)
+             .filter(em.StorageMount.id == parsed[0]).first())
+    if mount is None:
+        return ""
+    return mount_lib.detect_mount_type(getattr(mount, "path", "") or "")
+
+
+def _mount_requires_server_relay(db: Session, item) -> bool:
+    """115 挂载必须服务端中转（2026-11-01 全中转路线）。
+
+    同一 115 账号的直链分发给多个用户 IP 有封号风险，所以 115 条目
+    **绝不 302** 到 115 CDN，一律走 ``serve_mount_relay_async``。
+    Drive 挂载保留既有 302 语义（用户自己的盘）；其余类型维持现状。
+    """
+    return _mount_type_of_item(db, item) == "115"
+
+
 def _play_target(db: Session, item: em.MediaItem, *, variant=None):
     """把条目的 ``file_path`` 解析成播放目标（本机文件 或 挂载直链）
 
@@ -6320,7 +6342,9 @@ async def video_stream(
     # _DRIVE_EXISTS_EXECUTOR 注释与 auth-playback 专项调查报告）。
     from backend.emby_server import playback_strategy as _strategy
     _fid = (getattr(item, "drive_file_id", "") or "").strip()
-    _drive_switch_on = bool(_fid) and await run_db(
+    # 115 挂载绝不 302（全中转路线）：即使条目带了 fid，也不走 Drive 直链分支。
+    _mount_relay_only = await run_db(_mount_requires_server_relay, db, item)
+    _drive_switch_on = bool(_fid) and not _mount_relay_only and await run_db(
         _strategy.drive_direct_play_enabled, db)
     # 转存变体选路（D1 播放源单独立列）：有健康副本时 Drive 中继/302
     # 两条路改播副本 fid；无副本或总闸关时 _play_fid == _fid，行为逐字
@@ -7261,7 +7285,7 @@ async def video_stream(
             return _observe_traffic(
                 RedirectResponse(drive_usercontent_download_url(_play_fid), status_code=302,
                                  headers=_strategy.DIRECT_REDIRECT_HEADERS))
-        direct_url = await run_db(
+        direct_url = None if _mount_relay_only else await run_db(
             _strategy.maybe_direct_url, db, getattr(item, "drive_file_id", None))
         # 按变体取流时不走对象存储直链分支（那不是所选变体的分支）。
         if direct_url and _requested_variant is None:
@@ -7389,7 +7413,12 @@ async def upstream_stream(
     # 播放门禁（2026-10-26 用户亲定硬规矩）：上游 302 本次调用即新下发，
     # 无条件过门禁（无已下发链接消费一说）。
     from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user)
+    # 上游兜底口没有本地条目 id：经映射表反查本地条目走同一判定
+    # （binding_required_for_upstream，与上游 #1797 同接口）；映射不到 → 照旧过门禁。
+    _binding_required = await run_db(
+        _gate.binding_required_for_upstream, db, source_id, upstream_item_id)
+    if _binding_required:
+        await run_db(_gate.ensure_binding_playback_allowed, db, user)
     _msid = (getattr(request, "query_params", None) or {}).get("mediaSourceId")
     _ep_raw = (getattr(request, "query_params", None) or {}).get("episode")
     try:

@@ -353,6 +353,8 @@ function optionLabel(list: LibOption[], value: string | null | undefined): strin
 // ---- 扫描策略开关（v2.44.0）----
 /** 增量扫描：走目录/文件指纹，没变动的目录不重扫 */
 const incrementalScan = ref(true)
+/** 免绑定播放（库级开关，默认关）：服务端挂载条目不再要求用户绑定网盘 */
+const noBindingRequired = ref(false)
 /** 本机目录实时监听：新片入库自动触发增量扫描，不用等定时扫描 */
 const fsWatch = ref(true)
 /** 实时监听健康状况（降级原因要让人看见：默默不工作比报错更糟） */
@@ -424,6 +426,7 @@ function formFingerprint(): string {
     cover_auto_regen: coverAutoRegen.value,
     incremental_scan: incrementalScan.value,
     fs_watch: fsWatch.value,
+    no_binding_required: noBindingRequired.value,
     chase: libForm.chase,
   })
 }
@@ -463,6 +466,7 @@ function openSettings(l: EmbyLibrary) {
 coverAutoRegen.value = l.cover_auto_regen === true
   incrementalScan.value = l.incremental_scan !== false
   fsWatch.value = l.fs_watch !== false
+  noBindingRequired.value = l.no_binding_required === true
   if (!fsWatchStatus.value) void fetchFsWatchStatus().then((s) => { fsWatchStatus.value = s }).catch(() => undefined)
   if (coverTemplate.value) void loadCoverPreview()
   else { coverPreviewUrl.value = ''; coverPreviewError.value = '' }
@@ -559,6 +563,7 @@ async function saveForm(thenScan = false) {
         cover_auto_regen: coverAutoRegen.value,
         incremental_scan: incrementalScan.value,
         fs_watch: fsWatch.value,
+        no_binding_required: noBindingRequired.value,
       })
       savedId = res.id
       const hasSource = pathEntries.length > 0
@@ -583,6 +588,7 @@ async function saveForm(thenScan = false) {
         cover_auto_regen: coverAutoRegen.value,
         incremental_scan: incrementalScan.value,
         fs_watch: fsWatch.value,
+        no_binding_required: noBindingRequired.value,
       })
       savedId = editingId
       ElMessage.success(res?.rescan_required
@@ -2440,6 +2446,19 @@ function typeLabel(t: string): string {
             直接影响 TMDB 配额与扫描耗时。
           </p>
           <el-form label-position="top">
+            <el-form-item label="免绑定播放（服务端供片库）">
+              <el-switch
+                v-model="noBindingRequired"
+                active-text="开"
+                inactive-text="关"
+              />
+              <p class="field-help">
+                开启后，本库来自服务端挂载（mount://）的条目不再要求用户绑定自己的网盘；
+                用户自备盘（byos://）条目仍要求绑定。115 挂载播放始终走服务器中转，
+                不会把网盘直链下发给客户端。
+              </p>
+            </el-form-item>
+
             <el-form-item label="增量扫描">
               <el-switch
                 v-model="incrementalScan"

@@ -1056,6 +1056,8 @@ export const createLibrary = (data: {
   /** 扫描策略开关；不传 = 默认开 */
   incremental_scan?: boolean
   fs_watch?: boolean
+  /** 免绑定播放（库级开关，默认关）：服务端挂载条目不再要求用户绑定网盘 */
+  no_binding_required?: boolean
 }) => post<{ success: boolean; id: number; guid: string }>(`${E}/libraries`, data)
 
 export const updateLibrary = (
@@ -1085,6 +1087,8 @@ export const updateLibrary = (
     /** 扫描策略开关；传 false = 关，省略则不修改 */
     incremental_scan?: boolean
     fs_watch?: boolean
+    /** 免绑定播放（库级开关，默认关）；省略则不修改 */
+    no_binding_required?: boolean
   }
 ) => put<{ success: boolean; rescan_required?: boolean }>(`${E}/libraries/${id}`, data)
 

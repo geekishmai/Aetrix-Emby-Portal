@@ -1078,6 +1078,10 @@ def _auto_migrate():
         # 加 state_json（定向扫描的续扫范围）。老库补列后为 NULL，
         # interrupted_resume_prefixes 读不到就回退 stats 里的 resume_scope
         # （老流水的既有落点），行为与升级前完全一致。
+        ("emby_libraries", [
+            # 免绑定播放库级开关（2026-11-03）：默认 0 = 照旧要求绑定
+            ("no_binding_required", "BOOLEAN", "0"),
+        ]),
         ("emby_scan_runs", [
             ("state_json", "TEXT", "NULL"),
         ]),
