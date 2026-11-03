@@ -182,6 +182,15 @@ TRANSFER_WORKER_CONCURRENCY = _env_int("TRANSFER_WORKER_CONCURRENCY", 4)
 TRANSFER_WORKER_PER_USER_MAX = _env_int("TRANSFER_WORKER_PER_USER_MAX", 2)
 TRANSFER_WORKER_LEASE_SEC = _env_int("TRANSFER_WORKER_LEASE_SEC", 300)
 TRANSFER_WORKER_SWEEP_SEC = _env_int("TRANSFER_WORKER_SWEEP_SEC", 60)
+# 滞留回队（2026-11-03）：failed/retriable 终态行超过 AFTER_SEC 无人
+# 再拾时，看门狗按 BATCH 批量扫回 pending；单行累计回队达 MAX 次
+# 后永久留在 failed。详见 reschedule_stale_retriable_jobs。
+TRANSFER_RETRIABLE_RESCHEDULE_AFTER_SEC = _env_int(
+    "TRANSFER_RETRIABLE_RESCHEDULE_AFTER_SEC", 86400)
+TRANSFER_RETRIABLE_RESCHEDULE_MAX = _env_int(
+    "TRANSFER_RETRIABLE_RESCHEDULE_MAX", 5)
+TRANSFER_RETRIABLE_RESCHEDULE_BATCH = _env_int(
+    "TRANSFER_RETRIABLE_RESCHEDULE_BATCH", 20)
 TRANSFER_WORKER_AUTH_PAUSE_SEC = _env_int(
     "TRANSFER_WORKER_AUTH_PAUSE_SEC", 900)
 TRANSFER_WORKER_ALERT_QUEUE_DEPTH = _env_int(
@@ -771,6 +780,28 @@ def worker_sweep_sec():
 def worker_auth_pause_sec():
     """用户凭据死后暂停该用户队列的时长（秒），默认 900。"""
     return max(60, int(TRANSFER_WORKER_AUTH_PAUSE_SEC or 900))
+
+
+def retriable_reschedule_after_sec():
+    """滞留回队等待期（秒），默认 86400（24h）：failed/retriable
+    终态行超过此时长无人再拾，才被看门狗扫回 pending。下限 300，
+    不许调成高频——回队是兜底自愈，不是第二套重试调度（单内
+    重试仍走 _schedule_retry 的 60/120/240 秒退避）。"""
+    return max(300, int(TRANSFER_RETRIABLE_RESCHEDULE_AFTER_SEC
+                        or 86400))
+
+
+def retriable_reschedule_max():
+    """单行累计回队次数上限，默认 5：达上限永久留在 failed，
+    只剩用户点播时的门禁重触发（新建单）与重绑复活两条路。"""
+    return max(1, int(TRANSFER_RETRIABLE_RESCHEDULE_MAX or 5))
+
+
+def retriable_reschedule_batch():
+    """每轮看门狗最多回队/纠正的行数，默认 20：存量再多也分多轮
+    消化，不许一轮把整队僵尸行同时灌进认领链。"""
+    return min(200, max(1, int(TRANSFER_RETRIABLE_RESCHEDULE_BATCH
+                               or 20)))
 
 
 # 极限优化（2026-10-27，用户亲批全做，含预转存）：
@@ -2324,6 +2355,94 @@ def revive_binding_failed_jobs(db, user_id):
         job.claimed_by = None
         revived += 1
     return revived
+
+
+def close_removed_dest_no_binding_jobs(db, limit=None):
+    """已下线落点的 no_binding 死单纠正为明确终态（2026-11-03）。
+
+    failed/no_binding 的行本是终态，但落点是已删除的夸克/115 时，
+    错误文案里的“重绑后可重建”永远兑现不了（落点已下线、
+    revive_binding_failed_jobs 也明文跳过这类行），用户侧只会看
+    到一句假话。把这类行的 error_kind 纠正为 provider_removed
+    （删除单自己的终态口径，detail 同 PROVIDER_REMOVED_DETAIL），
+    状态仍 failed、attempts 不动；落点还活着的 no_binding 行不碰
+    （重绑复活口径不变）。幂等：纠正过的行不再命中。返回行数
+    （本函数内提交）。"""
+    from sqlalchemy import or_ as _or
+    if limit is None:
+        limit = retriable_reschedule_batch()
+    removed = _or(*[em.TransferJob.dest_drive_id.like(prefix + "%")
+                    for prefix in REMOVED_DEST_PREFIXES])
+    rows = (db.query(em.TransferJob)
+            .filter(em.TransferJob.status == "failed",
+                    em.TransferJob.error_kind == "no_binding",
+                    em.TransferJob.owner_scope == "user",
+                    removed)
+            .order_by(em.TransferJob.id)
+            .limit(limit)
+            .all())
+    for job in rows:
+        job.error_kind = PROVIDER_REMOVED_KIND
+        job.error_detail = PROVIDER_REMOVED_DETAIL
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+def reschedule_stale_retriable_jobs(db, now=None, limit=None):
+    """滞留 failed/retriable 单的周期回队（2026-11-03 生产实证）。
+
+    缺口：retriable 的“可重试”只在单内成立——_schedule_retry
+    3 次内回 pending 退避、满 3 次落 failed/retriable 终态。此后
+    再无人拾：工人只认领 pending、租约回收只管 running、重绑
+    复活只认 no_binding 与目录 401/403 三类行、门禁重触发只在
+    用户再次点播同一条目时新建一单。生产 job 1174 就这样晾了
+    4 天，全队列同形态滞留 77 单（failed/retriable、
+    next_retry_at 为空、超 24h 无更新）。
+
+    本函数由看门狗循环（_lease_reclaim_loop）周期调用：把滞留
+    超过 retriable_reschedule_after_sec() 的行按
+    revive_binding_failed_jobs 的重置口径打回 pending（attempts
+    清零——执行入口有 attempts 上限兜底门控，不清零回队也只会
+    被当场再判 failed；错误/重试时间/租约清掉），reschedule_
+    count +1。回队后一律走既有认领链裁决，不另起调度：认领前
+    复核（_fail_user_jobs_without_binding）判落点下线/无绑定、
+    执行器真跑、确定性错误由 _schedule_retry 的指纹熔断直接
+    终态化。硬上限：reschedule_count 达 retriable_reschedule_
+    max() 的行永久留在 failed，绝不无限回队。剧集预热探针单
+    不进搬字节认领，回队无意义，不碰。返回回队行数（本函数
+    内提交）。"""
+    from sqlalchemy import or_ as _or
+    now = now or datetime.now()
+    if limit is None:
+        limit = retriable_reschedule_batch()
+    cutoff = now - timedelta(seconds=retriable_reschedule_after_sec())
+    rows = (db.query(em.TransferJob)
+            .filter(em.TransferJob.status == "failed",
+                    em.TransferJob.error_kind == "retriable",
+                    em.TransferJob.next_retry_at.is_(None),
+                    em.TransferJob.updated_at <= cutoff,
+                    _or(em.TransferJob.reschedule_count.is_(None),
+                        em.TransferJob.reschedule_count
+                        < retriable_reschedule_max()),
+                    em.TransferJob.trigger != TRIGGER_SERIES_PREHEAT)
+            .order_by(em.TransferJob.updated_at)
+            .limit(limit)
+            .all())
+    for job in rows:
+        job.status = "pending"
+        job.attempts = 0
+        job.error_kind = None
+        job.error_detail = None
+        job.next_retry_at = None
+        job.lease_expires_at = None
+        job.claimed_by = None
+        job.reschedule_count = (job.reschedule_count or 0) + 1
+    if rows:
+        db.commit()
+        for job in rows:
+            notify_transfer_wakeup(job.id)
+    return len(rows)
 
 
 def run_pending_share_revokes(db, limit_users=20):
@@ -6945,6 +7064,34 @@ def _reclaim_leases_once(session_factory, source="janitor"):
                 pass
 
 
+def _reschedule_retriable_once(session_factory, source="janitor"):
+    """开短会话跑一次滞留单回队（下线落点 no_binding 终态纠正 +
+    滞留 retriable 回队），返回处理总数；异常只记 warning 返回
+    0。与租约回收同口径：兜底自身绝不许炸，DB 抖一下不能把
+    看门狗线程带走。两段各自独立提交，一段已落账不因另一段
+    异常回滚。"""
+    db = None
+    try:
+        db = session_factory()
+        closed = close_removed_dest_no_binding_jobs(db)
+        revived = reschedule_stale_retriable_jobs(db)
+        if closed or revived:
+            logger.info("转存工人：滞留 retriable 回队 %d 单、下线"
+                        "落点 no_binding 终态纠正 %d 单（%s）",
+                        revived, closed, source)
+        return closed + revived
+    except Exception:
+        logger.warning("转存工人：滞留单回队失败（%s），下一周期重试",
+                       source, exc_info=True)
+        return 0
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 def _lease_reclaim_loop(stop_event, session_factory):
     """租约回收看门狗：独立于唤醒订阅与守护主循环的周期兜底。
 
@@ -6962,6 +7109,11 @@ def _lease_reclaim_loop(stop_event, session_factory):
         # （见 sweep_stage_orphans），与回收各自独立兜底、一坏
         # 不拖另一道；暂存实占回落靠它，认领护栏才有解除路径。
         _sweep_stage_orphans_once(session_factory, source="janitor")
+        # 滞留回队搭同一周期：failed/retriable 终态行无人再拾的
+        # 兜底（见 reschedule_stale_retriable_jobs），与回收/清道
+        # 各自独立兜底；回队只把行打回 pending，认领/执行仍走
+        # 主链路，不占本循环其它兜底的节奏。
+        _reschedule_retriable_once(session_factory, source="janitor")
         stop_event.wait(worker_sweep_sec())
 
 
@@ -7884,7 +8036,8 @@ __all__ = [
     "transfer_config_payload", "write_transfer_config",
     "worker_sweep_sec", "notify_transfer_wakeup", "pause_user_queue",
     "is_user_paused", "reclaim_expired_leases", "claim_due_jobs",
-    "sweep_stage_orphans",
+    "sweep_stage_orphans", "reschedule_stale_retriable_jobs",
+    "close_removed_dest_no_binding_jobs",
     "queue_stats", "queue_alerts", "process_claimed_round",
     "play_inline_enabled", "play_inline_budget_sec",
     "play_inline_concurrency", "claim_job_for_inline",

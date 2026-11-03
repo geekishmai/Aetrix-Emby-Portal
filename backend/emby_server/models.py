@@ -1843,6 +1843,11 @@ class TransferJob(Base):
     # 普通认领不读它。老库由 auto-migrate 补列。
     claimed_at = Column(DateTime)
     last_probe_at = Column(DateTime)
+    # 滞留回队轮数（2026-11-03）：failed/retriable 终态行被看门狗
+    # 扫回 pending 的累计次数，达 TRANSFER_RETRIABLE_RESCHEDULE_MAX
+    # 后不再回队（仿 enrich_failed_reschedules 口径）。老库补列后
+    # 可能为 NULL，读取方一律按 0 处理。
+    reschedule_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
