@@ -211,3 +211,24 @@ def test_harvest_all_skips_disabled_driver(db):
     assert total["written"] == 3
     item7 = db.query(em.MediaItem).filter(em.MediaItem.id == 7).one()
     assert item7.external_ids is None
+
+
+def test_harvest_sends_source_headers(db):
+    """回归（2026-11-03 试点实证）：detail 请求必须带源级请求头
+    （_source_headers：UA/Referer/附加头，与同步路径同一套）——
+    不带头时按 UA 拦爬虫的源直接 403，整批证据丢失。"""
+    s7 = _source(db, 7)
+    s7.user_agent = "UA-TEST/1.0"
+    _item(db, 1)
+    _map(db, 1, 7, "100")
+    db.commit()
+    seen = {}
+
+    def _get(url, headers, timeout):
+        host = urllib.parse.urlparse(url).hostname
+        seen[host] = dict(headers or {})
+        return 200, {"code": 1, "list": [_vod(100, "111")]}
+
+    stats = hv.harvest_source(db, s7, http_get=_get, sleep_sec=0)
+    assert stats["written"] == 1
+    assert seen["src7.test"].get("User-Agent") == "UA-TEST/1.0"
