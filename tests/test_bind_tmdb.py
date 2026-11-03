@@ -187,3 +187,57 @@ def test_preview_flags_name_mismatch(own_db, monkeypatch):
     res = admin_scrape.preview_tmdb_id(it.id, "1", user, db)
     assert res["title"] == "某剧"
     assert res["matches_current"] is False, res
+
+
+def _rename_client(details):
+    class _T:
+        configured = True
+
+        def details(self, *a, **k):
+            return details
+
+        def apply_details(self, item, d):
+            item.imdb_id = "tt1"
+
+        def apply_images(self, item, d):
+            return True
+    return _T()
+
+
+def test_bind_rename_uses_tmdb_title(own_db, monkeypatch):
+    """rename=true：文件名解析出的片名换成 TMDB（中文）标题，并同步 sort_name"""
+    db, lib = own_db
+    it = _series(db, lib, name="漫长的季节 The Long Season S01")
+    monkeypatch.setattr(admin_scrape, "tmdb_client", _rename_client(
+        {"id": 225008, "name": "漫长的季节", "overview": "简介"}))
+    res = admin_scrape.bind_tmdb_id(
+        it.id, admin_scrape.TmdbBindRequest(tmdb_id="225008", rename=True),
+        SimpleNamespace(id=1), db)
+    assert it.name == "漫长的季节"
+    assert it.sort_name
+    assert any("片名" in n for n in res["notes"])
+
+
+def test_bind_without_rename_keeps_name(own_db, monkeypatch):
+    """默认不改名：管理员手改过的名字不能因为绑定被洗掉"""
+    db, lib = own_db
+    it = _series(db, lib, name="管理员改过的名字")
+    monkeypatch.setattr(admin_scrape, "tmdb_client", _rename_client(
+        {"id": 1, "name": "TMDB 名字"}))
+    admin_scrape.bind_tmdb_id(it.id, admin_scrape.TmdbBindRequest(tmdb_id="1"),
+                              SimpleNamespace(id=1), db)
+    assert it.name == "管理员改过的名字"
+
+
+def test_bind_rename_movie_uses_title(own_db, monkeypatch):
+    """电影用 title；保留副标题模式下「哆啦A梦：伴我同行」不被切成「哆啦A梦」"""
+    monkeypatch.setenv("TITLE_KEEP_SUBTITLE", "1")
+    db, lib = own_db
+    it = _series(db, lib, name="哆啦A梦：伴我同行 Stand By Me Doraemon HK 2D3D AVC HD MA TTG",
+                 item_type="movie", guid="m" * 32)
+    monkeypatch.setattr(admin_scrape, "tmdb_client", _rename_client(
+        {"id": 265712, "title": "哆啦A梦：伴我同行"}))
+    admin_scrape.bind_tmdb_id(
+        it.id, admin_scrape.TmdbBindRequest(tmdb_id="265712", rename=True),
+        SimpleNamespace(id=1), db)
+    assert it.name == "哆啦A梦：伴我同行"

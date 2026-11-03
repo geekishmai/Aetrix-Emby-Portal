@@ -2315,6 +2315,24 @@ def _apply_douban_cast(db, item: Any, celebs: Optional[list]) -> None:
         logger.debug("豆瓣演员落库失败 %s: %s", getattr(item, "name", ""), exc)
 
 
+def _rename_from_known_tmdb(item, item_type: str, details: dict) -> None:
+    """已知 TMDB id（目录名 {tmdb-xxx}、绑定）的条目，片名换成 TMDB 标题。
+
+    这条路不调 ``TmdbClient.apply``，片名一直是文件名解析结果（「霸王花 The
+    Inspector Wears Skirts H 265 10 bit」）。只在覆盖模式
+    （``enrich_tmdb_text_fill_only=0``）下做，与 ``apply`` 的改名同口径；
+    只改电影和剧，单集名由 ``apply_episode`` 管。
+    """
+    from backend.emby_server.tmdb import clean_title, tmdb_text_fill_only
+    if item_type not in ("movie", "series") or not details or tmdb_text_fill_only():
+        return
+    _n = clean_title(details.get("name") if item_type == "series" else details.get("title"))
+    if _n and _n != (item.name or ""):
+        from backend.emby_server.pinyin_sort import make_sort_name
+        item.name = _n
+        item.sort_name = make_sort_name(_n)
+
+
 def _apply_cast(db, item: Any, details: Optional[dict]) -> None:
     """写库阶段：把 details 里的演员表写入 ``emby_people``（幂等）。
 
@@ -2764,6 +2782,7 @@ def _enrich_apply(db, item: Any, fetched: dict) -> None:
             if needs_repair or not (item.poster_path or item.primary_image_url):
                 tmdb_client.apply_images(item, details,
                                          images_lang=fetched.get("tmdb_images_lang"))
+            _rename_from_known_tmdb(item, item_type, details)
         if nfo_data:
             nfo_lib.apply_nfo(item, nfo_data, kind,
                                           skip_overview=_ep_skip_overview)
@@ -3277,7 +3296,7 @@ def _claim_group_atomic(db, q, now) -> list:
     try:
         db.query(em.MediaItem).filter(
             em.MediaItem.id.in_(cand_ids),
-            em.MediaItem.enrich_status == "pending",
+            em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
         ).update(
             {"enrich_status": "enriching",
              "enrich_claimed_at": now,  # claim 租约：janitor 据此回收僵尸行
@@ -3363,6 +3382,18 @@ def enrich_episode_quota_status(db) -> dict:
         "episode_allowed_now": (not mode) or (not night_enabled)
         or in_window or used < effective,
     }
+
+
+#: 可认领状态（2026-11-03 排查）：pending + 外部停泊的 retrying。
+#: 现网有 244 行 enrich_status='retrying'（代码从不写这个值，全仓只有计数器；
+#: 系人工 SQL 停泊到次日 18:00）。旧抢单谓词只认 'pending'，这批行即使到期
+#: 也永远不会被领取；纳入后按 next_retry_at 到期自动恢复。
+#:
+#: 语义确认（QA AE-3③）：retrying 且 next_retry_at 为空 = **立即到期**，
+#: 会被下一轮抢单直接领取——这是期望行为（与 pending+NULL 同口径：
+#: NULL 表示「无退避等待」）。停泊行必须显式写 next_retry_at 才会被推迟；
+#: 现网库 3 的停泊行均带 next_retry_at（次日 18:00），不受影响。
+_CLAIMABLE_STATUSES = ("pending", "retrying")
 
 
 def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
@@ -3469,7 +3500,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
     groups_q = (db.query(group_key.label("g"),
                          _func.max(em.MediaItem.date_added).label("latest"),
                          em.MediaItem.library_id.label("lib"))
-                .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+                .filter(em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
+                        due, unlocked,
                         not_episode, not_merged, not_ban_backfill, queue_pred)
                 # library_id 必须显式入组（PG 要求）：组键是全局 id，
                 # 同一组恒在同一库内，(group_key, library_id) 与 group_key 等价。
@@ -3481,7 +3513,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
         if len(claimed) >= limit:
             break
         q = (db.query(em.MediaItem)
-             .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+             .filter(em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
+                     due, unlocked,
                      not_episode, not_merged, not_ban_backfill, queue_pred,
                      group_key == gid)
              .order_by(

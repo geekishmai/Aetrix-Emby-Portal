@@ -38,6 +38,20 @@ _RATE_LIMIT_WORDS = ("访问上限", "太频繁", "过于频繁", "操作频繁"
 _VERIFY_ERRNOS = {"911"}
 
 
+class Pan115DeadlineExceeded(RuntimeError):
+    """宿主调用截止时刻已过，本次请求被丢弃（Q&A AD-1）。
+
+    **不是冷却**：115 账号可能完全健康，只是调用方（宿主）已经放弃等待。
+    上层必须与 ``Pan115CooldownError`` 分流——不得展示「账号冷却中」，
+    也不得据此跳过直链失效清理（Z-2 门只认冷却）。
+    """
+
+    def __init__(self, reason: str, remaining: float = 0.0):
+        super().__init__(f"宿主调用超时：{reason}")
+        self.reason = reason
+        self.retry_after = max(0.0, float(remaining))
+
+
 class Pan115CooldownError(RuntimeError):
     """账号处于风控冷却期，本次调用未发出（不计入 115 调用次数）"""
 
@@ -253,8 +267,15 @@ def _wait_cap(kind: str) -> float:
     return global_cap
 
 
-def before_call(cookie: str, kind: str) -> None:
-    """发请求前：冷却中直接拒绝；否则按桶排队，等太久也拒绝（不把线程无限挂住）"""
+def before_call(cookie: str, kind: str, deadline: float | None = None) -> None:
+    """发请求前：冷却中直接拒绝；否则按桶排队，等太久也拒绝（不把线程无限挂住）。
+
+    首扫 partial 修法②（fix/sidecar-deadline）：``deadline`` 是调用方（sidecar
+    侧）传来的**绝对截止时刻**（``time.time()`` 口径）。排队上限取
+    ``min(自身上限, deadline 剩余 - 1s)``；排队等到的请求若将过宿主截止时刻，
+    宿主早已放弃，发出去的 115 请求就是纯浪费。过期抛**独立类型**
+    ``Pan115DeadlineExceeded``（QA AD-1：不是冷却，账号可能完全健康）。
+    """
     if not enabled():
         return
     scope = scope_of(cookie)
@@ -262,6 +283,12 @@ def before_call(cookie: str, kind: str) -> None:
     if state is not None:
         raise Pan115CooldownError(*state)
     max_wait = _wait_cap(kind)
+    if deadline is not None:
+        remaining = float(deadline) - time.time()
+        if remaining <= 0:
+            raise Pan115DeadlineExceeded("宿主截止时刻已过（请求未发出）", 0.0)
+        # 排队上限收紧到 deadline 剩余（多留 1s 给真实 HTTP 往返）
+        max_wait = min(max_wait, max(0.0, remaining - 1.0))
     waited = 0.0
     for name, rate, burst in _bucket_params(kind):
         key = f"{_KEY_PREFIX}:bucket:{scope}:{name}"
@@ -271,6 +298,9 @@ def before_call(cookie: str, kind: str) -> None:
                 break
             if waited + wait > max_wait:
                 raise Pan115CooldownError("本机限速排队超时", wait)
+            if deadline is not None and time.time() + wait > deadline:
+                raise Pan115DeadlineExceeded("宿主截止时刻将过（请求未发出）",
+                                             max(0.0, deadline - time.time()))
             time.sleep(wait)
             waited += wait
 

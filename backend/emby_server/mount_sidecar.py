@@ -29,15 +29,20 @@
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
 import uuid
 from typing import Iterator, Optional
+
+logger = logging.getLogger(__name__)
 
 from backend.emby_server import disc_filter
 from backend.emby_server.mounts import (
     MountEntry,
     MountError,
     MountCooldownError,
+    MountTimeoutError,
     MountFile,
     require_capability,
     MountProvider,
@@ -85,6 +90,10 @@ def _wrap_sidecar_error(exc: ProviderRuntimeError, prefix: str) -> MountError:
     """
     if exc.kind == "throttled":
         return MountCooldownError(f"{prefix}：{exc}", retry_after=exc.retry_after)
+    # QA AD-1：宿主截止已过 → 独立超时类型（不是冷却，不触发冷却文案与
+    # Z-2 的冷却门）；retry_after 由 AD-3 的序列化透传。
+    if exc.kind == "deadline_exceeded":
+        return MountTimeoutError(f"{prefix}：{exc}", retry_after=exc.retry_after)
     return MountError(f"{prefix}：{exc}")
 
 
@@ -141,15 +150,27 @@ class SidecarMountProvider(MountProvider):
 
     # ---- 目录 ----
     def list_dir(self, rel: str = "/") -> list[MountEntry]:
+        """列目录：**逐页重试**；某页重试仍失败时返回已拿到的部分并置
+        ``_partial_listing``（首扫 partial 修法①）。
+
+        背景：华语电影根目录 1020 项，按页列举；旧实现任何一页超时都会让
+        整个 list_dir 抛错 → 整根失败（run8 added=0）。现在每页独立重试
+        （3 次、0.5s/1s 退避），仍失败只标记 partial、把已拿到的页返回；
+        walk_media 在遍历结束后看到 partial 标记会抛 MountError —— 已入库
+        的部分保留，同时 failed_roots 触发清理保护（不会把读不到的当删除）。
+        """
         rel = "/" + (rel or "").lstrip("/")
         rel = rel.rstrip("/") or "/"
         entries: list[MountEntry] = []
         token = None
+        self._partial_listing = False
         while True:
-            try:
-                page = self.client.list_page(self.session_id, rel, token)
-            except ProviderRuntimeError as exc:
-                raise _wrap_sidecar_error(exc, "sidecar 列目录失败") from exc
+            page = self._list_page_with_retry(rel, token)
+            if page is None:
+                self._partial_listing = True
+                logger.warning("sidecar 列目录分页失败（已取 %d 项，标记 partial）：%s",
+                               len(entries), rel)
+                break
             for item in page.get("entries") or []:
                 entries.append(MountEntry(
                     name=item.get("name") or "",
@@ -165,15 +186,33 @@ class SidecarMountProvider(MountProvider):
         entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
         return entries
 
+    def _list_page_with_retry(self, rel: str, token):
+        """单页列举：3 次尝试（0.5s/1s 退避）；全失败返回 None（调用方标记 partial）。"""
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return self.client.list_page(self.session_id, rel, token)
+            except ProviderRuntimeError as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.5 * (2 ** attempt))
+        logger.warning("sidecar 列目录单页重试 3 次仍失败：%s token=%s（%s）",
+                       rel, token, last_exc)
+        return None
+
     def walk_media(self, root: str = "/") -> Iterator[MountFile]:
         stack: list[str] = [root]
         seen: set[str] = set()
+        partial: list[str] = []
         while stack:
             rel = stack.pop()
             if rel in seen:
                 continue
             seen.add(rel)
-            for entry in self.list_dir(rel):
+            entries = self.list_dir(rel)
+            if getattr(self, "_partial_listing", False):
+                partial.append(rel)
+            for entry in entries:
                 if entry.is_dir:
                     if disc_filter.is_disc_subtree_dir(entry.name):
                         continue
@@ -184,6 +223,12 @@ class SidecarMountProvider(MountProvider):
                 yield MountFile(rel=entry.rel, name=entry.name, size=entry.size,
                                 is_strm=_is_strm_name(entry.name),
                                 file_id=entry.file_id or "")
+        if partial:
+            # 部分页读取失败：本轮已产出的文件照常入库；抛错让扫描器记
+            # failed_roots → 清理阶段跳过（不把读不到的目录当已删除）。
+            raise MountError(
+                f"sidecar 列目录部分分页失败（{len(partial)} 个目录，"
+                f"已入库其余可见部分）：{partial[0]}")
 
     def stat(self, rel: str = "/") -> dict:
         """sidecar stat 直通（MountProvider 基类没有 stat，本口是 sidecar 专属加法）。"""

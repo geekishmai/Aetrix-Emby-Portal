@@ -391,6 +391,20 @@ def year_from_name_suffix(name):
 #    标题只用于展示与匹配、不生成文件名，砍掉会把正确标题改错。
 #    冒号已在 ① 处理（切完的主标题里不可能再有冒号）。
 _TITLE_SPLIT_RE = re.compile(r"[:：]")
+# 保留副标题模式（TITLE_KEEP_SUBTITLE=1）下仍要切掉的季/部后缀：
+# 「黑鸟：第一季」「Show: Season 2」——这类是季信息，不是片名的一部分
+_TITLE_SEASON_SUFFIX_RE = re.compile(
+    r"^\s*(第\s*[一二三四五六七八九十百零〇两\d]+\s*[季部]|season\s*\d+|s\d{1,2})\s*$",
+    re.IGNORECASE)
+
+
+def _keep_subtitle() -> bool:
+    """TITLE_KEEP_SUBTITLE=1：标题保留冒号副标题（「复仇者联盟：终局之战」）。
+
+    默认关（切掉副标题，既有口径）。中文片库系列片多，切掉副标题会让
+    「哈利·波特」「复仇者联盟」整套同名，按需开启。
+    """
+    return (os.getenv("TITLE_KEEP_SUBTITLE") or "").strip() in ("1", "true", "yes")
 _TITLE_CTRL_RE = re.compile(r'[\x00-\x1f\x7f\\"<>|]')
 _TITLE_INVISIBLE_RE = re.compile(
     "[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
@@ -406,7 +420,19 @@ def clean_title(name) -> str:
     s = strip_year_suffix(name)
     if not s:
         return ""
-    if _TITLE_SPLIT_RE.search(s):
+    if _keep_subtitle() and _TITLE_SPLIT_RE.search(s):
+        head, tail = _TITLE_SPLIT_RE.split(s, 1)
+        head = head.rstrip(" ·—–-").strip()
+        tail = tail.strip()
+        if head and (not tail or _TITLE_SEASON_SUFFIX_RE.match(tail)):
+            s = head
+        elif head:
+            # 中文主标题用全角冒号，其余保留半角冒号+空格（「Mission: Impossible」）
+            sep = "：" if re.search(r"[\u4e00-\u9fff]", head) else ": "
+            s = head + sep + tail
+        else:
+            s = tail
+    elif _TITLE_SPLIT_RE.search(s):
         head = _TITLE_SPLIT_RE.split(s, 1)[0]
         # 切掉副标题后，主标题尾部悬空的分隔符（"标题 ·：副标题"）一并修剪
         s = head.rstrip(" ·—–-").strip()
@@ -1238,6 +1264,26 @@ def _is_placeholder_episode_title(name):
     return False
 
 
+def _is_scanner_episode_name(name, season_no, ep_no):
+    """扫描器按文件名生成的单集名（「剧名 S01E12」「剧名 第 12 集」）判定。
+
+    比 _is_placeholder_episode_title 多一个条件：结尾的 SxxEyy / 第 N 集必须与
+    这一集自己的季号、集号一致。扫描器 _episode_display_name 恰好这样拼名，
+    真实标题几乎不可能以与本集编号完全一致的 SxxEyy 结尾，所以不会误伤。
+    季号或集号未知时不判（宁可漏判）。
+    """
+    n = (name or "").strip()
+    if not n or season_no is None or ep_no is None:
+        return False
+    m = re.match(r"^.+ S(\d{1,2})E(\d{1,3})$", n)
+    if m:
+        return int(m.group(1)) == int(season_no) and int(m.group(2)) == int(ep_no)
+    m = re.match(r"^.+ 第\s*(\d+)\s*[集话話]$", n)
+    if m:
+        return int(m.group(1)) == int(ep_no)
+    return False
+
+
 class TmdbClient:
     """轻量 TMDB 客户端（未配置 key 时静默跳过）
 
@@ -1260,6 +1306,7 @@ class TmdbClient:
 
     def __init__(self) -> None:
         self._keys_lock = threading.Lock()
+        self._keys_checked_at = 0.0
         # 当前 key 来源：env（环境变量）/ db（后台填写）/ none（未配置），界面展示用
         self.key_source = "none"
         self.api_keys: list[str] = []
@@ -1293,6 +1340,7 @@ class TmdbClient:
             self.api_key = self.api_keys[0] if self.api_keys else ""
             self._key_index = 0
             self.key_source = source if keys else "none"
+            self._keys_checked_at = time.monotonic()
             # 已被换掉的 key 不再留着冷却记录（它不在池子里了，记着也没用）
             alive = set(self.api_keys)
             self._cooldown = {k: v for k, v in self._cooldown_map().items() if k in alive}
@@ -1316,6 +1364,30 @@ class TmdbClient:
         self._set_keys(keys, source)
         self._ensure_session()
         return {"source": self.key_source, "count": len(self.api_keys)}
+
+    def _maybe_refresh_keys(self) -> None:
+        """跨进程补刷密钥池：后台保存只在 API 进程调 ``refresh_keys``，
+        worker / EA 是别的进程，单例在启动时读一次就再也不知道后台加了 key——
+        刚加 key 后的补全会当成「未配置」直接走多源兜底并记为完成。
+
+        这里按 ``TMDB_KEYS_REFRESH_SEC``（默认 60 秒，0 关闭）节流地重读一次配置，
+        池子真变了才替换（不打乱轮转与冷却记录）。读到空池不替换：删光 key 这种
+        少见操作留给重启生效，换来不会因一次读库失败把可用的池子清空。
+        """
+        interval = env_float("TMDB_KEYS_REFRESH_SEC", 60.0)
+        now = time.monotonic()
+        if interval <= 0 or now - self._keys_checked_at < interval:
+            return
+        self._keys_checked_at = now
+        keys = _env_keys()
+        source = "env"
+        if not keys:
+            keys = _db_keys(None)
+            source = "db" if keys else "none"
+        if keys and keys != self.api_keys:
+            logger.info("TMDB 密钥池已变化（%d → %d 把），本进程热更新", len(self.api_keys), len(keys))
+            self._set_keys(keys, source)
+            self._ensure_session()
 
     def _keyed_limiter(self, key: str) -> "_RequestLimiter":
         """取某次请求该走的令牌桶：按 key 独立（v2.57.0 item3）。
@@ -1630,6 +1702,7 @@ class TmdbClient:
 
     @property
     def configured(self) -> bool:
+        self._maybe_refresh_keys()
         return bool(self.api_keys)
 
     def stats(self) -> dict:
@@ -2285,7 +2358,9 @@ class TmdbClient:
             or bool(re.match(r"^第\s*\d+\s*集$", tmdb_name))
         )
         current = (getattr(episode_item, "name", "") or "").strip()
-        is_generic = _is_placeholder_episode_title(current)
+        is_generic = _is_placeholder_episode_title(current) or _is_scanner_episode_name(
+            current, getattr(episode_item, "season_number", None),
+            getattr(episode_item, "episode_number", None))
 
         if enabled["title"] and not is_placeholder and is_generic:
             # 当前是"第X集"占位，TMDB 有真实标题 → 覆盖。先过统一标题清洗

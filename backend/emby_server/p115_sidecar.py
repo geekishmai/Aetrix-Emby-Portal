@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 import signal
 import sys
 import threading
@@ -59,7 +60,7 @@ from backend.emby_server.provider_runtime import (
 )
 
 PROVIDER = "p115"
-DEFAULT_PAGE_SIZE = 200
+DEFAULT_PAGE_SIZE = 1000  # 115 /files 单页上限 1000（QA AC-3 P1：减少根目录页数）
 MAX_PAGE_SIZE = 1000
 MAX_SYNC_ENTRIES = 100000
 
@@ -74,6 +75,12 @@ def _map_115_error(exc: Exception) -> ProviderRuntimeError:
     """
     if isinstance(exc, transfer115.Pan115AuthError):
         return ProviderRuntimeError("cookie_expired", str(exc))
+    if type(exc).__name__ == "Pan115DeadlineExceeded":
+        # QA AD-1：宿主截止时刻已过 ≠ 冷却——独立 kind，面板不得显示
+        # 「账号冷却中」，Z-2 缓存清理门也不得据此跳过。
+        return ProviderRuntimeError(
+            "deadline_exceeded", str(exc),
+            retry_after=getattr(exc, "retry_after", None))
     if isinstance(exc, transfer115.Pan115CooldownError) \
             or type(exc).__name__ == "Pan115CooldownError":
         return ProviderRuntimeError(
@@ -91,7 +98,15 @@ class _SessionState:
     root_cid: str
     client: object = None
     cid_cache: dict = field(default_factory=dict)
+    # QA AE-3②：cid 缓存加 TTL（与 dir_cache 同为 30s）——目录被移动/重命名后
+    # 旧 cid 会 404/空列；过期 + 失败即清，避免长期用死 cid。
+    cid_cache_at: dict = field(default_factory=dict)
     pick_cache: dict = field(default_factory=dict)
+    # 目录列举缓存：cid -> (expire_monotonic, items)。首扫 partial 根因之一：
+    # 每个 list_page 都 _raw_list 全目录，且每个条目的 _cid_of/_locate 都重列
+    # 父目录（1020 项的根 = 每部 6 次 115 list）。会话内 30s TTL 复用，
+    # 与宿主 mounts.cached_listing 的 30s 同口径；错误不缓存。
+    dir_cache: dict = field(default_factory=dict)
     # life_poll 快照：key = 监视目录元组，value = {path: 指纹}；
     # 只存本 sidecar 进程内存，不落盘、不跨进程（与 full_sync 的 generation 同口径）。
     life_snapshots: dict = field(default_factory=dict)
@@ -142,36 +157,80 @@ class P115SidecarHandler:
         return state
 
     # ---- 目录解析（与 Pan115Mount._cid_of/_locate 同语义，sidecar 内单份） ----
-    def _raw_list(self, state: _SessionState, cid: str) -> list[dict]:
+    def _raw_list(self, state: _SessionState, cid: str,
+                  deadline: float | None = None) -> list[dict]:
+        """列目录（会话内 30s TTL 缓存，键 = cid）。
+
+        sidecar 的每次 list_page / _cid_of / _locate 都走这里；不缓存时
+        1020 项的根目录会被每个条目的路径解析重列一遍（首扫 16.6 list/部
+        的主因）。TTL 与宿主 cached_listing 同为 30s；读失败不缓存。
+        """
+        import time as _t
+        now = _t.monotonic()
+        hit = state.dir_cache.get(cid)
+        if hit is not None and hit[0] > now:
+            return list(hit[1])
         try:
-            return state.client.list_dir(cid or "0")
+            items = state.client.list_dir(cid or "0", deadline=deadline)
         except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
             raise _map_115_error(exc) from exc
+        state.dir_cache[cid] = (now + 30.0, list(items))
+        if len(state.dir_cache) > 512:   # 单会话上限，防大库长扫描吃内存
+            for k in list(state.dir_cache)[:256]:
+                state.dir_cache.pop(k, None)
+        return items
 
-    def _cid_of(self, state: _SessionState, rel: str) -> str:
+    _CID_TTL_SEC = 30.0
+
+    def _drop_cid_prefix(self, state: _SessionState, rel: str) -> None:
+        """清掉某路径及其子路径的 cid 缓存（目录移动/重命名/不存在时）。"""
         rel = "/" + (rel or "").lstrip("/")
         rel = rel.rstrip("/") or "/"
-        if rel in state.cid_cache and state.cid_cache[rel]:
+        for key in [k for k in state.cid_cache
+                    if k == rel or k.startswith(rel.rstrip("/") + "/")]:
+            state.cid_cache.pop(key, None)
+            state.cid_cache_at.pop(key, None)
+
+    def _cid_of(self, state: _SessionState, rel: str,
+                deadline: float | None = None) -> str:
+        rel = "/" + (rel or "").lstrip("/")
+        rel = rel.rstrip("/") or "/"
+        now = time.monotonic()
+        if rel in state.cid_cache and state.cid_cache[rel] \
+                and state.cid_cache_at.get(rel, 0.0) > now:
             return state.cid_cache[rel]
         cid = state.root_cid
+        prefix = ""
         for part in [p for p in rel.split("/") if p]:
+            prefix = f"{prefix}/{part}"
+            cached = state.cid_cache.get(prefix)
+            if cached and state.cid_cache_at.get(prefix, 0.0) > now:
+                cid = cached
+                continue
             child = next(
-                (e for e in self._raw_list(state, cid)
+                (e for e in self._raw_list(state, cid, deadline=deadline)
                  if e.get("name") == part and e.get("is_dir")),
                 None,
             )
             if child is None:
+                # AE-3②：路径不存在 → 清该前缀（可能目录被移动/改名）
+                self._drop_cid_prefix(state, prefix)
                 raise ProviderRuntimeError("not_found", f"115 上找不到目录：{rel}")
             cid = str(child.get("cid") or "")
+            state.cid_cache[prefix] = cid
+            state.cid_cache_at[prefix] = now + self._CID_TTL_SEC
         state.cid_cache[rel] = cid
+        state.cid_cache_at[rel] = now + self._CID_TTL_SEC
         return cid
 
-    def _locate(self, state: _SessionState, rel: str) -> dict:
+    def _locate(self, state: _SessionState, rel: str,
+                deadline: float | None = None) -> dict:
         rel = "/" + (rel or "").lstrip("/")
         if rel in state.pick_cache:
             return {"pickcode": state.pick_cache[rel], "name": os.path.basename(rel)}
         parent, _, name = rel.rpartition("/")
-        for item in self._raw_list(state, self._cid_of(state, parent or "/")):
+        for item in self._raw_list(state, self._cid_of(state, parent or "/", deadline=deadline),
+                                   deadline=deadline):
             if item.get("name") == name and not item.get("is_dir"):
                 return {"pickcode": str(item.get("pickcode") or ""), "name": name,
                         "size": int(item.get("size") or 0)}
@@ -193,11 +252,12 @@ class P115SidecarHandler:
         }
 
     # ---- 8 项基础能力 ----
-    def list_page(self, session, path: str, page_token, page_size) -> dict:
+    def list_page(self, session, path: str, page_token, page_size,
+                  deadline: float | None = None) -> dict:
         state = self._state(session)
         rel = "/" + (path or "").lstrip("/")
         rel = rel.rstrip("/") or "/"
-        cid = self._cid_of(state, rel)
+        cid = self._cid_of(state, rel, deadline=deadline)
         try:
             offset = int(page_token) if page_token is not None else 0
         except (TypeError, ValueError):
@@ -206,7 +266,11 @@ class P115SidecarHandler:
             raise ProviderRuntimeError("invalid_request", "page_token 为负")
         size = DEFAULT_PAGE_SIZE if page_size is None else int(page_size)
         size = max(1, min(size, MAX_PAGE_SIZE))
-        items = self._raw_list(state, cid)
+        items = self._raw_list(state, cid, deadline=deadline)
+        if not items and rel != "/":
+            # AE-3②：解析出的 cid 列不出任何条目——可能是目录已移动/重命名的
+            # 死 cid；清缓存让下次调用重新解析（空目录只是多一次解析，无副作用）。
+            self._drop_cid_prefix(state, rel)
         page = items[offset:offset + size]
         entries = [self._entry(item, rel) for item in page]
         nxt = offset + size
@@ -231,16 +295,17 @@ class P115SidecarHandler:
         raise ProviderRuntimeError("not_found", f"115 上找不到：{rel}")
 
     def _fetch_range(self, state: _SessionState, rel: str,
-                     byte_offset: int, byte_length) -> bytes:
+                     byte_offset: int, byte_length,
+                     deadline: float | None = None) -> bytes:
         if byte_offset < 0 or (byte_length is not None and byte_length <= 0):
             raise ProviderRuntimeError(
                 "invalid_request", f"无效的取段范围：offset={byte_offset} length={byte_length}")
-        entry = self._locate(state, rel)
+        entry = self._locate(state, rel, deadline=deadline)
         pickcode = entry.get("pickcode") or ""
         if not pickcode:
             raise ProviderRuntimeError("not_found", f"115 未返回该文件的 pickcode：{rel}")
         try:
-            url = state.client.download_url(pickcode)
+            url = state.client.download_url(pickcode, deadline=deadline)
         except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
             raise _map_115_error(exc) from exc
         end = None if byte_length is None else byte_offset + byte_length - 1
@@ -267,25 +332,30 @@ class P115SidecarHandler:
         # 正确性有保证，只是多拉了字节）。
         return body[byte_offset:] if byte_length is None else body[byte_offset:byte_offset + byte_length]
 
-    def open_range(self, session, path: str, byte_offset: int, byte_length) -> dict:
+    def open_range(self, session, path: str, byte_offset: int, byte_length,
+                   deadline: float | None = None) -> dict:
         state = self._state(session)
-        body = self._fetch_range(state, path, int(byte_offset or 0), byte_length)
+        body = self._fetch_range(state, path, int(byte_offset or 0), byte_length,
+                                 deadline=deadline)
         return {"data_b64": encode_bytes(body), "byte_offset": int(byte_offset or 0),
                 "byte_length": len(body)}
 
-    def resolve_display_asset(self, session, path: str, byte_offset: int, byte_length) -> dict:
+    def resolve_display_asset(self, session, path: str, byte_offset: int, byte_length,
+                              deadline: float | None = None) -> dict:
         """展示资产直接复用 open_range（FMBY 口径：display_asset 不另起取图路径）。"""
-        return self.open_range(session, path, byte_offset, byte_length)
+        return self.open_range(session, path, byte_offset, byte_length,
+                               deadline=deadline)
 
-    def resolve_play_target(self, session, path: str) -> dict:
+    def resolve_play_target(self, session, path: str,
+                            deadline: float | None = None) -> dict:
         """换链：只回直链与非秘密头，不搬字节、不回 Cookie（宿主重贴）。"""
         state = self._state(session)
-        entry = self._locate(state, path)
+        entry = self._locate(state, path, deadline=deadline)
         pickcode = entry.get("pickcode") or ""
         if not pickcode:
             raise ProviderRuntimeError("not_found", f"115 未返回该文件的 pickcode：{path}")
         try:
-            url = state.client.download_url(pickcode)
+            url = state.client.download_url(pickcode, deadline=deadline)
         except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
             raise _map_115_error(exc) from exc
         return {
