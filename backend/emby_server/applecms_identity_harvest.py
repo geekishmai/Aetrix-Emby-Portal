@@ -44,6 +44,7 @@ from typing import Iterable, Optional
 from backend.emby_server import models as em
 from backend.emby_server.applecms_fetcher import fetch_page
 from backend.emby_server.enrich_queues import identify_filter
+from backend.emby_server.upstream_playback import _source_headers
 from backend.emby_server.identify_two_stage import (
     _douban_binding_dict,
     _merge_external_id,
@@ -166,12 +167,15 @@ def harvest_source(db, source, *, limit: int = 2000, ids_per_call: int = 50,
         vods_by_source.setdefault(m.source_id, set()).add(
             str(m.upstream_item_id)
         )
-    source_urls = {
-        s.id: (s.base_url or "").rstrip("/")
-        for s in db.query(em.UpstreamSource)
+    src_rows = (
+        db.query(em.UpstreamSource)
         .filter(em.UpstreamSource.id.in_(list(vods_by_source)))
         .all()
-    }
+    )
+    source_urls = {s.id: (s.base_url or "").rstrip("/") for s in src_rows}
+    # 与同步路径同一套请求头（源级 UA/Referer/附加头）：不少源按 UA
+    # 拦默认爬虫头，不带头 detail 直接 403（2026-11-03 试点实证）。
+    source_headers = {s.id: _source_headers(s) for s in src_rows}
     found: dict = {}
     for sid, vods in vods_by_source.items():
         base_url = source_urls.get(sid)
@@ -186,7 +190,7 @@ def harvest_source(db, source, *, limit: int = 2000, ids_per_call: int = 50,
             try:
                 payload = fetch_page(
                     base_url, ac="detail", ids=",".join(chunk),
-                    http_get=http_get,
+                    http_get=http_get, headers=source_headers.get(sid),
                 )
             except Exception:  # noqa: BLE001 - 单批失败隔离，不拖整轮
                 stats["fetch_errors"] += 1
