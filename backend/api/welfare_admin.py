@@ -299,6 +299,9 @@ WELFARE_CONFIG_KEYS = {
     "bot_rankpush_enabled": "true",
     "bot_rankpush_reward_enabled": "false",
     "bot_rankpush_reward_table": "10,8,6,5,4,3,2,1,1,1",
+    # 更新入库播报：总开关默认开 / 攒批间隔默认 30 分钟
+    "bot_update_digest_enabled": "true",
+    "bot_update_digest_interval_minutes": "30",
     # 频道马甲治理＋退群处置（2026-10-30 借鉴 embyboss 第 1 项；读侧
     # tg_bot.policy，缺省与 policy.DEFAULTS 逐字对齐）
     "bot_channel_guard_enabled": "true",

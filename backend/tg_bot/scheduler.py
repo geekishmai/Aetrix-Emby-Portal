@@ -55,6 +55,11 @@ def start_tg_bot_poller() -> bool:
         start_rankpush_scheduler()
     except Exception:
         logger.exception("rankpush 调度启动失败（可忽略）")
+    # 顺带启动「更新入库」攒批播报调度（同上，失败不拖垮 poller）
+    try:
+        start_update_digest_scheduler()
+    except Exception:
+        logger.exception("updatedigest 调度启动失败（可忽略）")
     return True
 
 
@@ -99,4 +104,48 @@ def start_rankpush_scheduler() -> bool:
 
     threading.Thread(target=_loop, daemon=True, name="tg-rankpush").start()
     logger.info("TG 观影榜海报日推调度已启动（日榜 20:30 / 周榜周日 21:00）")
+    return True
+
+
+# ---------------- 更新入库播报调度（定时任务区） ----------------
+# 每分钟巡检一拍，攒批间隔（默认 30 分钟）与防重复逻辑在
+# tg_bot.updatedigest.run_scheduled_tick；这里只负责起线程。
+
+_update_digest_started = False
+
+
+def start_update_digest_scheduler() -> bool:
+    """启动更新入库播报调度线程（进程内只起一次）。"""
+    global _update_digest_started
+    if _update_digest_started:
+        return False
+    _update_digest_started = True
+    interval = 60
+
+    def _tick() -> None:
+        from backend.database import SessionLocal
+        from backend.tg_bot import updatedigest
+
+        db = SessionLocal()
+        try:
+            actions = updatedigest.run_scheduled_tick(db)
+            if actions:
+                logger.info("updatedigest 调度动作：%s", actions)
+        except Exception:
+            logger.exception("updatedigest 调度 tick 失败")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    def _loop() -> None:
+        waiter = threading.Event()
+        while True:
+            waiter.wait(interval)
+            _tick()
+
+    threading.Thread(target=_loop, daemon=True, name="tg-updatedigest").start()
+    logger.info("TG 更新入库播报调度已启动（攒批间隔见 bot_update_digest_interval_minutes）")
     return True

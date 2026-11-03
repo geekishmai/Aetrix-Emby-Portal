@@ -231,6 +231,9 @@ WELFARE_CONFIG_SCHEMA: dict[str, tuple] = {
     "bot_rankpush_enabled": ("bool",),
     "bot_rankpush_reward_enabled": ("bool",),
     "bot_rankpush_reward_table": ("int_list", 0, _BIG),
+    # 更新入库播报（tg_bot.updatedigest 读侧宽容解析）：总开关 + 攒批间隔分钟
+    "bot_update_digest_enabled": ("bool",),
+    "bot_update_digest_interval_minutes": ("int", 5, 1440),
 
     "lottery_group_ids": ("str",),
 }

@@ -2042,6 +2042,26 @@ class TgBindCode(Base):
     fail_count = Column(Integer, default=0)
 
 
+class TgUpdateDigestSent(Base):
+    """TG「更新入库」播报已播记录（防重复播报，tg_bot.updatedigest 专用）。
+
+    item_id = emby_items 行 id：电影记顶层行 id，新集记集行 id。
+    kind：movie / episode = 已实际播报；baseline = 上线首跑的基线种子
+    （功能上线前已在货架上的条目不翻旧账，只播上线后新入库的）。
+    """
+    __tablename__ = 'tg_update_digest_sent'
+
+    __table_args__ = (
+        UniqueConstraint('item_id', name='uq_tg_digest_sent_item'),
+        Index('idx_tg_digest_sent_kind', 'kind'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    item_id = Column(Integer, nullable=False, index=True)
+    kind = Column(String(16), nullable=False, default='movie')
+    sent_at = Column(DateTime, default=datetime.now)
+
+
 class ChatPointsLog(Base):
     """群发言积分明细表（M1）
 
