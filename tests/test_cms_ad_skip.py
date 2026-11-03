@@ -107,16 +107,20 @@ def _unext_grid():
     raise AssertionError("unext seed missing")
 
 
-def test_analyze_hits_black_background_unext_card():
-    # U-NEXT 黑底卡平均亮度只有约 8：不能被片头黑场跳过逻辑吞
-    # 掉（黑场按最亮格判），静止 6 秒应判 ad。
+def test_analyze_unext_card_quarantined_until_reseeded():
+    # U-NEXT 种子已被种子强度门隔离（墨迹格仅 2 格、无判别力）：
+    # 2026-11-03 家宽狩猎实证它误中采昌发行 logo（置信 0.80 且
+    # 真剪得动）、近黑正片镜头（0.79）等多类正片内容，与唯一真
+    # 卡实例（0.82）无阈值可分。宁漏勿误：哪怕片头摆着与种子
+    # 一模一样的卡，也只记 static_unknown、绝不剪；待更强签名
+    # 重新播种后本例应改回判 ad。
     grid = _unext_grid()
     grids = [grid] * 12 + [tuple((i * 37 + j * 11) % 251 for j in range(64))
                            for i in range(6)]
     res = adskip.analyze_head(_samples_from_grids(grids))
-    assert res["status"] == "ad"
-    assert res["seed_name"].startswith("fullscreen-unext")
-    assert res["skip_seconds"] == pytest.approx(6.0)
+    assert res["status"] == "static_unknown"
+    assert res["skip_seconds"] is None
+    assert adskip.match_fingerprint(grid) is None
 
 
 def test_pure_black_head_never_matches_black_card():
@@ -184,6 +188,136 @@ def test_analyze_short_static_card_below_min_duration_is_clean():
 def test_analyze_insufficient_samples():
     res = adskip.analyze_head(_samples_from_grids([_seed_grid()] * 2))
     assert res["status"] == "insufficient"
+    assert res["skip_seconds"] is None
+
+
+# ------------------------------------------------ 全窗扫描（1.1 回归）
+
+
+def _flash_white():
+    # 近全白闪帧（曝光/闪光）：无可辨内容，《诅咒2025》片头第 0
+    # 帧即此形态——旧版锚点被它占住，静止段 0.5s 即断、真卡够不着。
+    return tuple([250.0] * 64)
+
+
+def _logo_grid():
+    # 非均匀的未知静止画面（片头 logo 形态）：与指纹库距离足够远。
+    return tuple(205.0 if 24 <= j < 40 else (90.0 if j < 32 else 150.0)
+                 for j in range(64))
+
+
+def test_analyze_flash_frame_then_card_hits():
+    grid = _seed_grid()
+    grids = [_flash_white()] + [grid] * 12 + \
+        [tuple((i * 37 + j * 11) % 251 for j in range(64))
+         for i in range(6)]
+    res = adskip.analyze_head(_samples_from_grids(grids))
+    assert res["status"] == "ad"
+    # 闪帧 0.5s + 卡 6.0s → 跳过 6.5s（闪帧不是正片，一并计入）
+    assert res["skip_seconds"] == pytest.approx(6.5)
+    assert res["confidence"] >= adskip.HIGH_CONFIDENCE
+
+
+def test_analyze_black_and_flash_lead_then_card_hits():
+    grid = _seed_grid()
+    black = tuple([2.0] * 64)
+    grids = [black, black, _flash_white()] + [grid] * 12 + \
+        [tuple((i * 53 + j * 7) % 239 for j in range(64))
+         for i in range(4)]
+    res = adskip.analyze_head(_samples_from_grids(grids))
+    assert res["status"] == "ad"
+    # 黑场 1.0s + 闪帧 0.5s + 卡 6.0s → 跳过 7.5s
+    assert res["skip_seconds"] == pytest.approx(7.5)
+
+
+def test_analyze_dynamic_intro_then_card_hits():
+    grid = _seed_grid()
+    grids = [tuple((i * 37 + j * 11) % 251 for j in range(64))
+             for i in range(8)] + [grid] * 12 + \
+        [tuple((i * 53 + j * 7) % 239 for j in range(64))
+         for i in range(4)]
+    res = adskip.analyze_head(_samples_from_grids(grids))
+    assert res["status"] == "ad"
+    # 动态片头 4.0s + 卡 6.0s → 广告止于 10.0s
+    assert res["ad_start"] == pytest.approx(4.0)
+    assert res["skip_seconds"] == pytest.approx(10.0)
+
+
+def test_analyze_unknown_static_then_card_still_hits():
+    # 前面有一段达标但不认识的静止段（logo），不能挡住后面真卡
+    # 的判定：逐段验指纹，不许在第一段 unknown 上提前收工。
+    grid = _seed_grid()
+    grids = [_logo_grid()] * 8 + [grid] * 12 + \
+        [tuple((i * 37 + j * 11) % 251 for j in range(64))
+         for i in range(4)]
+    res = adskip.analyze_head(_samples_from_grids(grids))
+    assert res["status"] == "ad"
+    assert res["skip_seconds"] == pytest.approx(10.0)
+
+
+def test_analyze_clean_head_with_short_logos_stays_clean():
+    # 纯净片头：黑场 + 两段短 logo（各 2.0s，未达静止段下限）+
+    # 正片动态画面 → clean，绝不因全窗扫描把 logo 误当卡。
+    black = tuple([2.0] * 64)
+    grids = [black, black] + [_logo_grid()] * 4 + [black, black] + \
+        [_logo_grid()] * 4 + \
+        [tuple((i * 37 + j * 11) % 251 for j in range(64))
+         for i in range(10)]
+    res = adskip.analyze_head(_samples_from_grids(grids))
+    assert res["status"] == "clean"
+    assert res["skip_seconds"] is None
+
+
+def test_analyze_burned_in_band_head_is_clean():
+    # 字幕带片头：画面本体逐帧在动、只有底部带是压印不动的——
+    # 整屏静止段不存在，绝不许误判成整屏卡（带归选线降权管）。
+    band = [210.0, 40.0, 200.0, 60.0, 190.0, 30.0, 220.0, 50.0,
+            205.0, 45.0, 195.0, 55.0, 215.0, 35.0, 185.0, 65.0]
+
+    def frame(i):
+        cells = []
+        for j in range(64):
+            if j >= 48:
+                cells.append(band[j - 48])
+            else:
+                cells.append(float((i * 67 + j * 29) % 251))
+        return tuple(cells)
+
+    grids = [frame(i) for i in range(24)]
+    res = adskip.analyze_head(_samples_from_grids(grids))
+    assert res["status"] == "clean"
+    assert res["skip_seconds"] is None
+
+
+def test_analyze_slow_drift_segment_is_not_a_card():
+    # 慢漂移段（台标光晕汇聚/渐亮）不许冒充静止卡。家宽实证
+    # （2026-11-03《突如其来》）：diaphana 台标光晕汇聚段逐帧对
+    # 段首都过静止双门、中位签名蹭中 U-NEXT 种子（距离 7.9、
+    # 置信 0.75），但段首尾距离 7.61——它不是静止画面。本例用
+    # 种子签名整体渐暗复现同型漂移：首尾距离 ≈9.2（逐帧对段首
+    # 仍在静止门 10.0 之内、段照样成形；连贯门 5.0 之外）、中位
+    # 离种子 ≈4.6（置信 0.86），没有连贯门必然误判 ad。
+    seed = _seed_grid()
+    grids = []
+    for k in range(12):
+        scale = 1.0 - 0.4 * k / 11
+        grids.append(tuple(v * scale for v in seed))
+    res = adskip.analyze_head(_samples_from_grids(grids))
+    assert res["status"] == "clean"
+    assert res["skip_seconds"] is None
+
+
+def test_analyze_low_confidence_hit_is_not_recorded_as_ad():
+    # 离指纹太远的「命中」不记 ad。家宽实证：FANDANGO 发行
+    # logo 距 U-NEXT 种子 15.4（置信 0.52）曾被记成 ad——这种
+    # 记录永远够不上剪除门槛、只污染台账。ad 的唯一用途是
+    # 剪：够不上剪的标准，只配 static_unknown。
+    seed = _seed_grid()
+    noisy = tuple(
+        v + (30.0 if idx % 2 == 0 else 0.0)
+        for idx, v in enumerate(seed))
+    res = adskip.analyze_head(_samples_from_grids([noisy] * 8))
+    assert res["status"] == "static_unknown"
     assert res["skip_seconds"] is None
 
 
