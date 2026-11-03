@@ -216,7 +216,7 @@ def test_simple_upload_small_reader_passes_guard(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-        def post(self, url, data=None, files=None, headers=None):
+        def post(self, url, data=None, files=None, headers=None, **kwargs):
             return _Resp()
 
     monkeypatch.setattr(transfer115, "_http_json", _fake_call)

@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from base64 import b64encode
 from email.utils import formatdate
@@ -246,17 +247,16 @@ def _http_full(method: str, url: str, *, headers: Optional[dict] = None,
     import httpx
 
     own = client is None
-    c = client or httpx.Client(
-        timeout=httpx.Timeout(connect=30.0, read=600.0, write=600.0,
-                              pool=30.0),
-        follow_redirects=True)
+    oss_timeout = httpx.Timeout(connect=30.0, read=600.0, write=600.0,
+                                pool=30.0)
+    c = client or _get_http_client()
     try:
-        resp = c.request(method, url, headers=headers or {}, data=data)
+        resp = c.request(method, url, headers=headers or {}, data=data,
+                         timeout=oss_timeout, follow_redirects=True)
     except httpx.HTTPError as exc:
+        if own and _is_connection_level_error(exc):
+            _discard_http_client(c)
         raise Pan115Error(f"115 OSS 请求失败：{exc}") from exc
-    finally:
-        if own:
-            c.close()
     if resp.status_code >= 400:
         raise Pan115Error(
             f"115 OSS 返回 HTTP {resp.status_code}："
@@ -498,10 +498,16 @@ def _http_bytes(method: str, url: str, *, params: Optional[dict] = None,
         headers["Cookie"] = auth_ck
     if content_type:
         headers["Content-Type"] = content_type
-    with httpx.Client(timeout=timeout or PAN115_TIMEOUT,
-                      follow_redirects=True) as client:
+    client = _get_http_client()
+    try:
         resp = client.request(method, url, params=params, data=data,
-                              headers=headers)
+                              headers=headers,
+                              timeout=timeout or PAN115_TIMEOUT,
+                              follow_redirects=True)
+    except httpx.HTTPError as exc:
+        if _is_connection_level_error(exc):
+            _discard_http_client(client)
+        raise
     if resp.status_code in (401, 403):
         raise Pan115AuthError(
             f"115 返回 HTTP {resp.status_code}，Cookie 可能已失效")
@@ -722,6 +728,86 @@ def ensure_single_default(db: Session, keep_id: int) -> None:
 # 115 用 state/errno 表达失败；这几个 errno 说明是登录态问题（而不是业务错误）
 _AUTH_ERRNOS = {"401", "403", "40101017", "40101002", "990002", "990009"}
 
+# ---- 进程级共享 HTTP 客户端（keep-alive） ----
+# 每次调用都新建 httpx.Client 意味着每个请求重做 TCP+TLS 握手：2 次/秒的
+# 列目录就是 2 个新 TLS 连接/秒，既放大握手超时概率，也不像正常客户端。
+# 共享一个客户端即可复用连接；Cookie/UA 仍然逐次放进请求头（不进 client
+# 级 headers），不同账号不会串。
+#
+# - 线程安全：httpx.Client 本身可并发；创建/丢弃由 _http_client_lock 串行化。
+# - 连接池上限刻意压小（4 条、空闲 30s 回收），与 pan115_guard 的并发口径
+#   一致，不因为 keep-alive 放大对 115 的连接数。
+# - fork 后子进程不能复用父进程连接：按 pid 检测并重建（旧引用直接丢弃，
+#   不 close——fd 属于父进程，关闭只影响子进程副本，没必要动）。
+# - 连接级错误（连接被对端关掉/协议错/连接超时）后丢弃当前客户端，下一次
+#   调用重建；超时/HTTP 状态错误不重建。
+_http_client_lock = threading.Lock()
+_http_client = None
+_http_client_pid = None
+
+
+def _reset_http_client_after_fork() -> None:
+    """fork 子进程里换掉锁与客户端引用。
+
+    父进程 fork 时若别的线程正持锁，子进程里这把锁会永远锁着——必须先
+    换新锁再去碰状态；连接对象本身也不复用（fd 属于父进程）。
+    """
+    global _http_client_lock, _http_client, _http_client_pid
+    _http_client_lock = threading.Lock()
+    _http_client = None
+    _http_client_pid = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_http_client_after_fork)
+
+
+def _new_http_client():
+    import httpx
+
+    return httpx.Client(
+        timeout=PAN115_TIMEOUT,
+        follow_redirects=False,     # 逐请求传：json/bytes/OSS 要跟随，上传不跟随
+        limits=httpx.Limits(max_connections=4, max_keepalive_connections=4,
+                            keepalive_expiry=30.0),
+    )
+
+
+def _get_http_client():
+    """取进程级共享客户端；fork 后按 pid 重建（不复用父进程连接）。"""
+    global _http_client, _http_client_pid
+    pid = os.getpid()
+    with _http_client_lock:
+        if _http_client is not None and _http_client_pid != pid:
+            _http_client = None
+            _http_client_pid = None
+        if _http_client is None:
+            _http_client = _new_http_client()
+            _http_client_pid = pid
+        return _http_client
+
+
+def _discard_http_client(client) -> None:
+    """连接级错误后丢弃共享客户端；只丢弃当前那一个（并发下不误杀新实例）。"""
+    global _http_client, _http_client_pid
+    with _http_client_lock:
+        if _http_client is not client:
+            return
+        _http_client = None
+        _http_client_pid = None
+    try:
+        client.close()
+    except Exception:  # noqa: BLE001 — 丢弃路径不因关闭失败而报错
+        pass
+
+
+def _is_connection_level_error(exc: BaseException) -> bool:
+    """连接本身坏了（而非 115 业务/HTTP 状态错误）——需要重建连接池。"""
+    import httpx
+
+    return isinstance(exc, (httpx.NetworkError, httpx.RemoteProtocolError,
+                            httpx.ConnectTimeout))
+
 
 def _http_json(
     method: str,
@@ -743,8 +829,16 @@ def _http_json(
     }
     if cookie:
         headers["Cookie"] = cookie
-    with httpx.Client(timeout=timeout or PAN115_TIMEOUT, follow_redirects=True) as client:
-        resp = client.request(method, url, params=params, data=data, headers=headers)
+    client = _get_http_client()
+    try:
+        resp = client.request(method, url, params=params, data=data,
+                              headers=headers,
+                              timeout=timeout or PAN115_TIMEOUT,
+                              follow_redirects=True)
+    except httpx.HTTPError as exc:
+        if _is_connection_level_error(exc):
+            _discard_http_client(client)
+        raise
     if resp.status_code in (401, 403):
         raise Pan115AuthError(f"115 返回 HTTP {resp.status_code}，Cookie 可能已失效")
     if resp.status_code >= 400:
@@ -1230,15 +1324,18 @@ class Pan115Client:
             raise Pan115Error("115 简单上传初始化未返回完整 OSS 参数")
         timeout = httpx.Timeout(connect=30.0, read=300.0, write=300.0,
                                 pool=30.0)
+        client = _get_http_client()
         try:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.post(
-                    host, data=fields,
-                    files={"file": (filename, fileobj)},
-                    headers={"User-Agent": self.ua,
-                             "Referer": "https://115.com/"},
-                )
+            resp = client.post(
+                host, data=fields,
+                files={"file": (filename, fileobj)},
+                headers={"User-Agent": self.ua,
+                         "Referer": "https://115.com/"},
+                timeout=timeout, follow_redirects=False,
+            )
         except httpx.HTTPError as exc:
+            if _is_connection_level_error(exc):
+                _discard_http_client(client)
             raise Pan115Error(f"115 简单上传请求失败：{exc}") from exc
         if resp.status_code in (401, 403):
             raise Pan115AuthError(
