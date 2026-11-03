@@ -46,7 +46,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DETECTOR_VERSION = "1.0"
+DETECTOR_VERSION = "1.1"
 
 #: 只有置信度 ≥ 此值且 status=ad 的记录才允许剪（宁漏勿误）。
 HIGH_CONFIDENCE = 0.7
@@ -57,17 +57,39 @@ STATIC_HAMMING = 5
 STATIC_GRID_DIST = 10.0
 #: 指纹命中：静止段中位签名与指纹的 mask 后平均亮度差上限。
 FINGERPRINT_MAX_DIST = 16.0
+#: 静止段连贯门：段首尾帧签名距离上限。逐帧对段首过门只保证每
+#: 帧离段首 ≤ STATIC_GRID_DIST，慢漂移的动画（logo 渐亮/光晕
+#: 汇聚）能整段蹭过——那种段不是静止卡。实测：真卡段首尾距离
+#: 0.64、出品 logo 定格段 ≤3.7，diaphana 光晕汇聚段 7.61（家宽
+#: 狩猎实证 2026-11-03），门取 5.0 把慢漂移段挡在候选之外。
+STATIC_COHERENCE_MAX = 5.0
 #: 黑场帧判定：最亮格也不超过此值才算纯黑（黑场引导不算内容）。
 #: 不能按平均亮度判——U-NEXT 那种黑底白字整屏卡平均亮度同样很
 #: 低（实测 7.8），按平均值会被当黑场吞掉；它的最亮格（文字）
 #: 有约 60，纯黑帧最亮格只有个位数，靠最亮格能干净分开。
 BLACK_CELL_MAX = 24.0
+#: 闪帧判定：最暗格也不低于此值的帧是近全白闪帧（曝光/闪光，
+#: 无可辨内容）。它不能当静止段锚点——《诅咒2025》片头第 0 帧
+#: 即此形态（约 0.5s），1.0 版锚点被它占住后，其后真正的静止
+#: 卡在结构上够不着（2026-11-03 家宽验收诊断，见 1.1 改动）。
+FLASH_CELL_MIN = 235.0
 #: 指纹墨迹门：种子里亮度 ≥ 此值的格算「墨迹格」（卡上的字），
 #: 候选帧在墨迹格上的平均亮度须 ≥ INK_MIN_MEAN 才算命中——防
 #: 纯黑/近黑静止帧靠「大面积同黑」蹭中黑底卡种子（实测纯黑帧
 #: 到 U-NEXT 种子的全格平均差仅 6.3，不设此门必然误剪）。
 INK_CELL_MIN = 40.0
 INK_MIN_MEAN = 30.0
+#: 种子强度门：墨迹格少于此数的种子不许触发命中（只配记
+#: static_unknown）。8x8 签名下，墨迹格太少的种子没有判别力——
+#: U-NEXT 种子墨迹格仅 2 格（值 52/60），本质是「黑底＋中间一
+#: 小团亮」，2026-11-03 家宽狩猎 20 部实证它误中四类正片内容：
+#: 采昌國際多媒體发行 logo（距离 6.4/置信 0.80、且真剪得动）、
+#: 近全黑的正片静止镜头（6.7/0.79）、diaphana 台标（7.9/0.75）、
+#: FANDANGO 发行 logo（15.4/0.52）；而唯一真卡实例（同种子、
+#: 《幻犬诳猫》）距离 5.67/置信 0.82——与误报同带、无阈值可分。
+#: 宁漏勿误：弱种子隔离，待更强签名（如 16x16）重新播种后再
+#: 启用；天下会种子墨迹格 11 格（值 42–95）不受影响。
+SEED_MIN_INK_CELLS = 4
 #: 抽帧采样间隔（秒）：fps=2。
 SAMPLE_INTERVAL = 0.5
 #: 检测拉段的字节上限（只拉片头，防失控拖全片）。
@@ -201,24 +223,27 @@ def load_fingerprints() -> list:
 def match_fingerprint(grid, seeds=None):
     """签名与指纹库比对：返回 (名称, 距离) 或 None（无一命中）。
 
-    两道门都过才算命中：①mask 后平均亮度差 ≤ FINGERPRINT_MAX_
+    三道门都过才算命中：①mask 后平均亮度差 ≤ FINGERPRINT_MAX_
     DIST；②墨迹门——种子墨迹格（亮度 ≥ INK_CELL_MIN）在候选帧
-    上平均亮度 ≥ INK_MIN_MEAN（种子无墨迹格时跳过此门）。②专
-    治黑底卡：整屏大面积同黑会让纯黑帧蹭过①，只有字真在才算。
+    上平均亮度 ≥ INK_MIN_MEAN。②专治黑底卡：整屏大面积同黑会
+    让纯黑帧蹭过①，只有字真在才算；③种子强度门——种子墨迹格
+    少于 SEED_MIN_INK_CELLS 的弱种子直接跳过（见常数注释的狩猎
+    实证：弱种子与误报无阈值可分，宁漏勿误先行隔离）。
     """
     if seeds is None:
         seeds = load_fingerprints()
     best = None
     for seed in seeds:
+        ink = [i for i, v in enumerate(seed["grid"])
+               if seed["mask"][i] and v >= INK_CELL_MIN]
+        if len(ink) < SEED_MIN_INK_CELLS:
+            continue
         dist = grid_distance(grid, seed["grid"], seed["mask"])
         if dist > FINGERPRINT_MAX_DIST:
             continue
-        ink = [i for i, v in enumerate(seed["grid"])
-               if seed["mask"][i] and v >= INK_CELL_MIN]
-        if ink:
-            ink_mean = sum(float(grid[i]) for i in ink) / len(ink)
-            if ink_mean < INK_MIN_MEAN:
-                continue
+        ink_mean = sum(float(grid[i]) for i in ink) / len(ink)
+        if ink_mean < INK_MIN_MEAN:
+            continue
         if best is None or dist < best[1]:
             best = (seed["name"], dist)
     return best
@@ -237,16 +262,62 @@ def _median_grid(grids):
     return tuple(out)
 
 
+def _is_anchorless(grid) -> bool:
+    """纯黑/近全白的极端帧：无可辨内容，不许当静止段锚点。
+
+    黑帧按最亮格判（见 BLACK_CELL_MAX 注释：黑底白字卡最亮格
+    高，不会被误吞）；近全白闪帧按最暗格判（见 FLASH_CELL_MIN）。
+    """
+    return max(grid) <= BLACK_CELL_MAX or min(grid) >= FLASH_CELL_MIN
+
+
+def _static_runs(samples) -> list:
+    """把片头帧序切成静止段 [(起帧下标, 止帧下标), ...]。
+
+    每段从一个可锚帧起、逐帧与段首帧双门比对（汉明距离 + 签名
+    距离，门槛与 1.0 同值、一格未动），任一帧不过门即段止；段与
+    段不重叠。1.0 只量黑场后第一段——锚点被片头闪帧占住、或卡
+    前面垫着动态片头时，真卡在结构上够不着；1.1 改为全窗扫描：
+    每段都单独验指纹（见 analyze_head）。
+    """
+    runs = []
+    n = len(samples)
+    i = 0
+    while i < n:
+        if _is_anchorless(samples[i][1]):
+            i += 1
+            continue
+        anchor = samples[i][1]
+        anchor_hash = ahash_from_grid(anchor)
+        j = i
+        while j + 1 < n:
+            nxt = samples[j + 1][1]
+            if hamming(ahash_from_grid(nxt), anchor_hash) \
+                    <= STATIC_HAMMING and \
+                    grid_distance(nxt, anchor) <= STATIC_GRID_DIST:
+                j += 1
+            else:
+                break
+        runs.append((i, j))
+        i = j + 1
+    return runs
+
+
 def analyze_head(samples, *, seeds=None) -> dict:
     """片头帧序列 → 判定。samples = [(t, grid, luma), ...]（等间隔）。
 
-    判定口径（宁漏勿误）：
-    - 先跳过开头近黑帧（黑场引导）；其后第一个画面起找静止段
-      （与段首帧逐帧比对，汉明距离 + 签名距离双钳制）；
-    - 静止段 < MIN_STATIC_SEC → 不是卡（clean）；
-    - 静止段达标但指纹不认识 → static_unknown（只记账不剪）；
-    - 静止段达标且指纹命中 → ad，skip = 静止段结束时刻（黑场
-      引导一并计入：它在卡之前、本就不是正片内容）。
+    判定口径（宁漏勿误，判定阈值与 1.0 全同）：
+    - 全窗扫描静止段（_static_runs）：闪帧与动态片头只会让所在
+      位置起不了段，挡不住其后的静止卡；
+    - 达标段（≥ MIN_STATIC_SEC 且首尾连贯 ≤ STATIC_COHERENCE_MAX：
+      慢漂移的动画段不算静止段）按时间顺序逐段验指纹：任一段
+      命中且置信达剪除门槛 → ad，skip = 该段结束时刻（段之前
+      的黑场/闪帧引导一并计入：它们在卡之前、本就不是正片
+      内容）；置信够不上剪除门槛的命中不记 ad（同 static_unknown
+      处理）；
+    - 达标段全不认识 → static_unknown（报最长一段，只记账
+      不剪）；无达标段 → clean。字幕带片头画面逐帧在动、没有
+      整屏静止段，天然落在 clean，不归本模块管。
     """
     result = {"status": "insufficient", "ad_start": None, "ad_end": None,
               "skip_seconds": None, "confidence": 0.0, "seed_name": "",
@@ -256,48 +327,54 @@ def analyze_head(samples, *, seeds=None) -> dict:
     interval = SAMPLE_INTERVAL
     if len(samples) >= 2:
         interval = max(0.05, samples[1][0] - samples[0][0])
-    # 跳过开头纯黑帧（按最亮格判，见 BLACK_CELL_MAX 注释：黑底
-    # 白字卡平均亮度低但最亮格高，不会被误吞）
-    i = 0
-    while i < len(samples) and max(samples[i][1]) <= BLACK_CELL_MAX:
-        i += 1
-    if i >= len(samples) - 1:
-        result["status"] = "clean"
+
+    def _span(i, j):
+        return samples[j][0] - samples[i][0] + interval
+
+    def _coherent(i, j):
+        return grid_distance(samples[j][1], samples[i][1]) \
+            <= STATIC_COHERENCE_MAX
+
+    runs = _static_runs(samples)
+    if runs:
+        result["static_run_sec"] = round(
+            max(_span(i, j) for i, j in runs), 3)
+    qualifying = [(i, j) for i, j in runs
+                   if _span(i, j) >= MIN_STATIC_SEC and _coherent(i, j)]
+    for i, j in qualifying:
+        median = _median_grid([s[1] for s in samples[i:j + 1]])
+        hit = match_fingerprint(median, seeds)
+        if hit is None:
+            continue
+        name, dist = hit
+        if 1.0 - dist / 32.0 < HIGH_CONFIDENCE:
+            # 离指纹太远（置信够不上剪除门槛）：这种「认识但拿不
+            # 准」不许记 ad——ad 记录的唯一用途就是剪，够不上剪
+            # 的标准就不该顶着 ad 的名头（实测 FANDANGO 发行
+            # logo 距 U-NEXT 种子 15.4、置信 0.52 被记 ad 的教训）。
+            continue
+        ad_end = samples[j][0] + interval
+        # 卡之前若只有黑场/闪帧，广告块从 0 起算（与 1.0 口径一致）
+        lead_only = all(_is_anchorless(s[1]) for s in samples[:i])
+        result.update({
+            "status": "ad",
+            "ad_start": round(0.0 if lead_only else samples[i][0], 3),
+            "ad_end": round(ad_end, 3),
+            "skip_seconds": round(ad_end, 3),
+            "confidence": round(max(0.0, min(1.0, 1.0 - dist / 32.0)), 3),
+            "seed_name": name,
+            "static_run_sec": round(_span(i, j), 3),
+        })
         return result
-    black_lead_end = samples[i][0]
-    first_grid = samples[i][1]
-    first_hash = ahash_from_grid(first_grid)
-    j = i
-    while j + 1 < len(samples):
-        nxt = samples[j + 1][1]
-        if hamming(ahash_from_grid(nxt), first_hash) <= STATIC_HAMMING and \
-                grid_distance(nxt, first_grid) <= STATIC_GRID_DIST:
-            j += 1
-        else:
-            break
-    run_sec = samples[j][0] - samples[i][0] + interval
-    result["static_run_sec"] = round(run_sec, 3)
-    if run_sec < MIN_STATIC_SEC:
-        result["status"] = "clean"
-        return result
-    median = _median_grid([s[1] for s in samples[i:j + 1]])
-    hit = match_fingerprint(median, seeds)
-    if hit is None:
+    if qualifying:
+        i, j = max(qualifying, key=lambda ij: _span(*ij))
         result["status"] = "static_unknown"
         result["confidence"] = 0.3
         result["ad_start"] = round(samples[i][0], 3)
         result["ad_end"] = round(samples[j][0] + interval, 3)
+        result["static_run_sec"] = round(_span(i, j), 3)
         return result
-    name, dist = hit
-    ad_end = samples[j][0] + interval
-    result.update({
-        "status": "ad",
-        "ad_start": round(0.0 if black_lead_end > 0 else samples[i][0], 3),
-        "ad_end": round(ad_end, 3),
-        "skip_seconds": round(ad_end, 3),
-        "confidence": round(max(0.0, min(1.0, 1.0 - dist / 32.0)), 3),
-        "seed_name": name,
-    })
+    result["status"] = "clean"
     return result
 
 
