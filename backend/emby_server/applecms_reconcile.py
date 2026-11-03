@@ -8,8 +8,9 @@
    窗口），拿到每个源本轮在目录里实际见到的全部 vod_id
    （seen 在分类过滤之前记录：在不在源目录里，与本库收不收
    是两件事）；
-2. 完整性红线：任一配置源本轮出错（拉取失败 / 源缺失 / 停用）
-   或同步被 blocked，seen 集合不可信，整轮**不对账**——抖动
+2. 完整性红线：任一配置源本轮出错（拉取失败 / 源缺失 / 停用 /
+   撞页数安全阀截断）或同步被 blocked，seen 集合不可信，整轮
+   **不对账**——抖动
    绝不许误判成下架（``reconcile_hosted_lifecycle`` 的调用前提
    本就要求整轮可信）；
 3. 完整跑完才对每源调既有 ``reconcile_hosted_lifecycle``：
@@ -67,11 +68,20 @@ def reconcile_interval_sec(explicit: Optional[float] = None) -> float:
 
 
 def reconcile_library(db: Session, library, *, http_get=None,
-                      sleep_fn=None) -> Dict[str, object]:
-    """一个库的月度对账：全量同步 + 完整性校验 + 生命周期对账。"""
+                      sleep_fn=None, done_source_ids=None
+                      ) -> Dict[str, object]:
+    """一个库的月度对账：全量同步 + 完整性校验 + 生命周期对账。
+
+    ``done_source_ids``：本轮已完成生命周期对账的源集合（多库
+    共源去重，PA-069）。``reconcile_hosted_lifecycle`` 按源全量
+    行计数、不分库，同一轮内对同一源重复调用会让 missing_rounds
+    一轮多计、宽限期被静默缩短；传入集合时已对账的源本轮跳过，
+    只同步不再计轮。单库直调不传，行为不变。
+    """
     out: Dict[str, object] = {
         "library_id": int(library.id), "reconciled": False,
         "reason": None, "sync": None, "lifecycle": {},
+        "skipped_shared_sources": [],
     }
     stats = als.sync_library(db, library, http_get=http_get,
                              full=True, sleep_fn=sleep_fn)
@@ -88,11 +98,17 @@ def reconcile_library(db: Session, library, *, http_get=None,
         return out
     lifecycle: Dict[int, object] = {}
     for source_id, seen in (stats.get("seen_by_source") or {}).items():
-        source = us.get_source(db, int(source_id))
+        sid = int(source_id)
+        if done_source_ids is not None and sid in done_source_ids:
+            out["skipped_shared_sources"].append(sid)
+            continue
+        source = us.get_source(db, sid)
         if source is None:
             continue
-        lifecycle[int(source_id)] = uimp.reconcile_hosted_lifecycle(
+        lifecycle[sid] = uimp.reconcile_hosted_lifecycle(
             db, source, set(seen))
+        if done_source_ids is not None:
+            done_source_ids.add(sid)
     db.commit()
     out["lifecycle"] = lifecycle
     out["reconciled"] = True
@@ -118,6 +134,9 @@ def run_reconcile_round(*, session_factory=None, http_get=None
         library_ids = [lib.id for lib in libraries]
     finally:
         db.close()
+    # 跨库源去重（PA-069）：同一源被多个库共用时，本轮只对它做
+    # 一次生命周期对账，避免 missing_rounds 一轮多计。
+    done_source_ids: set = set()
     for library_id in library_ids:
         lib_db = session_factory()
         try:
@@ -125,7 +144,8 @@ def run_reconcile_round(*, session_factory=None, http_get=None
             if row is None:
                 continue
             results.append(reconcile_library(
-                lib_db, row, http_get=http_get))
+                lib_db, row, http_get=http_get,
+                done_source_ids=done_source_ids))
         except Exception:
             logger.exception("applecms 对账整库失败 library_id=%s",
                              library_id)
