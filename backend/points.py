@@ -95,6 +95,10 @@ POINT_TYPE_SELF_EARNED: dict[str, bool] = {
     "slots_bet": False,
     "admin_deduct": False,
     "redpacket_fee": False,
+    # 骰子对决：押注是支出，赢和退回都是运气/退款，不算自挣
+    "duel_stake": False,
+    "duel_win": False,
+    "duel_refund": False,
 }
 
 SELF_EARNED_POINT_TYPES = frozenset(
