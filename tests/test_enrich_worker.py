@@ -484,7 +484,7 @@ def test_mount_id_of():
 
 
 def test_claim_batch_groups_series_parent_first(db):
-    """成组抢单（处方 2）：同一部剧整组抢走，父级排在最前；组按最近入库倒序"""
+    """成组抢单：父级未终态时只抢父级，单集留在队里；父级终态后按集号认领。"""
     now = datetime.now()
     series = _make_item(db, item_type="series", name="组抢剧",
                         enrich_status="pending",
@@ -503,20 +503,24 @@ def test_claim_batch_groups_series_parent_first(db):
                        date_added=now)  # 最新 → 组排最前
     claimed = enrich_worker._claim_batch(db, 10)
     ids = [c.id for c in claimed]
-    # 组之间：最新的电影组在前；组内：父级（剧）先于集；整组连在一起
-    assert ids[0] == movie.id
-    assert ids[1] == series.id
-    assert ids[2:] == [e.id for e in eps]
-    assert len(ids) == 5
-    # 抢到的都置 enriching + 租约
+    # 组之间：最新的电影组在前；父级未终态时单集不进本批
+    assert ids == [movie.id, series.id]
     assert all(c.enrich_status == "enriching" and c.enrich_claimed_at for c in claimed)
+    for ep in eps:
+        db.refresh(ep)
+        assert ep.enrich_status == "pending"
+    db.refresh(series)
+    series.enrich_status = "done"
+    db.commit()
+    claimed_eps = enrich_worker._claim_batch(db, 10)
+    assert [c.id for c in claimed_eps] == [e.id for e in eps]
 
 
 def test_claim_batch_keeps_group_whole_across_batches(db):
-    """批量截断时组剩余部分仍在队里，下一批继续抢（同一部剧不被打散）"""
+    """父级终态后，批量截断留下的单集下一批继续抢（同一部剧不被打散）"""
     now = datetime.now()
     series = _make_item(db, item_type="series", name="长剧",
-                        enrich_status="pending", date_added=now)
+                        enrich_status="done", date_added=now)
     for n in (1, 2, 3, 4):
         _make_item(db, item_type="episode", name=f"E{n}",
                    file_path=f"mount://9/长剧/S1/E{n}.mkv",
@@ -525,11 +529,11 @@ def test_claim_batch_keeps_group_whole_across_batches(db):
                    date_added=now - timedelta(minutes=n))
     first = enrich_worker._claim_batch(db, 2)
     assert len(first) == 2
-    assert first[0].id == series.id          # 父级先抢
+    assert all(c.series_id == series.id for c in first)
     rest = enrich_worker._claim_batch(db, 10)
-    # 剩余三集（同组）被下一批抢走
+    # 剩余两集（同组）被下一批抢走
     assert all(c.series_id == series.id for c in rest)
-    assert len(rest) == 3
+    assert len(rest) == 2
 
 
 def test_claim_batch_skips_locked_out_and_not_due_groups(db):
@@ -558,10 +562,10 @@ def test_claim_batch_repair_jumps_the_queue(db):
                     date_added=now - timedelta(hours=2))
     claimed = enrich_worker._claim_batch(db, 10)
     ids = [c.id for c in claimed]
-    # repair 组最高优先：整组在前，父级先于集
-    assert ids[0] == repair_series.id
-    assert ids[1] == ep.id
-    assert ids[2] == normal_movie.id
+    # repair 剧优先于新电影；父级未终态时单集不跟着被抢
+    assert ids == [repair_series.id, normal_movie.id]
+    db.refresh(ep)
+    assert ep.enrich_status == "pending"
 
 
 def test_claim_fresh_group_beats_library_turn(db, monkeypatch):

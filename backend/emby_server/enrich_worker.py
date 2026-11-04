@@ -114,6 +114,22 @@ ENRICH_FRESH_FIRST_HOURS = env_int("ENRICH_FRESH_FIRST_HOURS", 48, 0)
 ENRICH_EPISODE_INHERIT_PARENT = (os.getenv("ENRICH_EPISODE_INHERIT_PARENT", "1") or "1").strip().lower() not in {
     "0", "false", "no", "off",
 }
+# 单集认领门（默认开）：只认领父级已终态的单集。父级 series 仍 pending/enriching
+# 时单集会被认领后又被 _parent_should_wait 打回，双队列下这些组占满 identify
+# 批次，父级已完成的单集挤不进来（2026-11-04 现网：单集占积压 77%，完成≈0）。
+# 0 = 回到「父级未终态也照抢」的旧抢单。
+ENRICH_CLAIM_EPISODE_PARENT_READY = env_int(
+    "ENRICH_CLAIM_EPISODE_PARENT_READY", 1, 0, 1)
+# 等父级打回（默认开）：打回时不把 enrich_priority 抬到 0（积压是 -10，抬到 0
+# 会插到全队最前被立刻重抢），且等待次数不计入「超 20 次转 none」的上限
+# （父级还没做完就标 none 是误杀）。0 = 旧行为（抬到 0，超 20 次放行走 none）。
+ENRICH_PARENT_WAIT_NO_FALSE_NONE = env_int(
+    "ENRICH_PARENT_WAIT_NO_FALSE_NONE", 1, 0, 1)
+# 上游托管单集纯继承（默认开）：无 file_path 的托管单集原来进不了纯继承分支，
+# 写库几乎全标 none。开时与有本地文件的单集同一套继承语义（metadata_source=inherit）。
+# 0 = 旧行为（只走 TMDB，落 none）。
+ENRICH_UPSTREAM_EPISODE_INHERIT = env_int(
+    "ENRICH_UPSTREAM_EPISODE_INHERIT", 1, 0, 1)
 # 零 API 别名索引（处方 12）：进程内 TTL 缓存的重建周期与行数上限
 _ALIAS_INDEX_TTL = env_int("ENRICH_ALIAS_INDEX_TTL", 300, 30)
 _ALIAS_INDEX_MAX = env_int("ENRICH_ALIAS_INDEX_MAX", 50000, 1000)
@@ -169,8 +185,9 @@ _ep_fields_cfg_cache: dict = {"at": 0.0, "cfg": None}
 
 # 单集等父级 ping-pong 上限（P2 修复，完美审查 C-P2-4）：父级长期 pending
 #（如长退避链）时，单集每 300s 被抢单打回一次、"不计失败次数"→无限循环，
-# 每次消耗抢单与写库。进程内计连续等待次数：指数退避 300s→600s…（上限 2h），
-# 超 20 次按父级终态失败处理（走 none，管理端"重试未匹配项"可捞回）。
+# 每次消耗抢单与写库。进程内计连续等待次数：指数退避 300s→600s…（上限 2h）。
+# ENRICH_PARENT_WAIT_NO_FALSE_NONE=1（默认）时超限不再转 none：父级未完成就
+# 标 none 是误杀（现网 3h 内单集完成 8476/8478 是 none）。=0 时仍超 20 次放行。
 _PARENT_WAIT_MAX_TIMES = 20
 _PARENT_WAIT_BASE_SEC = 300
 _PARENT_WAIT_MAX_SEC = 7200
@@ -1743,6 +1760,20 @@ def _enrich_fetch_pre(item: Any, holder: Optional[dict] = None,
                 logger.debug("补全 NFO 失败 %s: %s", item.file_path, exc)
     elif kind in ("episode", "movie") and getattr(
             item, "upstream_source_id", None):
+        # 上游托管单集没有本地文件，进不了上面的 scan_file 纯继承分支。
+        # 父级已具备继承条件时与有文件的单集同一套语义：标 pure_inherit
+        # （写库落 metadata_source=inherit），不再落到下面的 none。
+        # 开关关时逐字走原来的「仅 TMDB」调试日志。
+        if (ENRICH_UPSTREAM_EPISODE_INHERIT
+                and kind == "episode" and inherit_parent):
+            result["pure_inherit"] = True
+            progress.note_stage("enrich_pure_inherit")
+            from backend.emby_server.tmdb import TmdbTransientError as _TTE3
+            try:
+                _fetch_episode_tmdb(item, inherit_parent, result)
+            except _TTE3:
+                raise
+            return result, None
         # 上游托管行（进库一期）：无本地文件是常态，与容器条目同款
         # 只走 TMDB 补全（片名/年份/tmdb_id 都在行上）；判失败会让它
         # 永远在重试队列里空转锁死，绝不走下面的判死分支。
@@ -2407,8 +2438,10 @@ def _parent_should_wait(db, item: Any) -> bool:
 
     P2 修复（完美审查 C-P2-4）：等待计次 + 指数退避（300s→600s…上限 2h），
     防 300s ping-pong 无限循环（父级长期 pending 时每 300s 被抢单打回一次、
-    "不计失败次数"→无限空转烧抢单与写库）。超 20 次返回 False，按父级终态
-    失败处理（走 none，管理端"重试未匹配项"可捞回）。
+    "不计失败次数"→无限空转烧抢单与写库）。
+    ENRICH_PARENT_WAIT_NO_FALSE_NONE=0 时超 20 次返回 False，调用方走 none。
+    默认开：超限仍返回 True（继续等，不误标 none），且不把优先级抬到 0
+    （积压优先级是 -10，抬到 0 会被最先重抢）。
     """
     parent_status = ""
     if item.series_id:
@@ -2423,7 +2456,10 @@ def _parent_should_wait(db, item: Any) -> bool:
         _parent_wait_counts.pop(item.id, None)
         return False
     waits = _parent_wait_counts.get(item.id, 0) + 1
-    if waits > _PARENT_WAIT_MAX_TIMES:
+    # 默认不把「等父级」计进误标 none 的上限：父级还在 pending/enriching
+    # 时转 none 是误杀。开关关时保留超 20 次放行走 none 的旧口径。
+    if (not ENRICH_PARENT_WAIT_NO_FALSE_NONE
+            and waits > _PARENT_WAIT_MAX_TIMES):
         _parent_wait_counts.pop(item.id, None)
         logger.warning("单集等待父级超限转 none id=%s 等待次数=%s",
                        item.id, waits)
@@ -2431,13 +2467,17 @@ def _parent_should_wait(db, item: Any) -> bool:
     _parent_wait_counts[item.id] = waits
     if len(_parent_wait_counts) > 20000:
         _parent_wait_counts.clear()
-    backoff = min(_PARENT_WAIT_BASE_SEC * (2 ** (waits - 1)),
-                  _PARENT_WAIT_MAX_SEC)
+    # 退避指数到 2h 封顶即可，不必让 2**(waits-1) 随着永不放弃的计数无限涨。
+    backoff = min(
+        _PARENT_WAIT_BASE_SEC * (2 ** min(waits - 1, 16)),
+        _PARENT_WAIT_MAX_SEC)
     item.enrich_status = "pending"
     item.enrich_next_retry_at = datetime.now() + timedelta(seconds=backoff)
     item.enrich_claimed_at = None
     item.enrich_claim_token = None
-    item.enrich_priority = 0
+    if not ENRICH_PARENT_WAIT_NO_FALSE_NONE:
+        # 旧口径：打回时优先级抬到 0。积压行是 -10，抬到 0 会插到队首被重抢。
+        item.enrich_priority = 0
     return True
 
 
@@ -3443,6 +3483,48 @@ def enrich_episode_quota_status(db) -> dict:
     }
 
 
+def _episode_parent_ready_clause():
+    """单集认领谓词：父级（series，以及 season 若有）已离开 pending/enriching。
+
+    父级行不存在，或已软删：不挡。与 ``_parent_should_wait`` 查不到父级即放行
+    同口径，避免父级被删后单集永远排不进认领。
+
+    用相关 EXISTS 反连接，父级按主键查找。未终态的 series/season 另有部分索引
+    ``idx_item_enrich_open_parent``（只含未终态父级的 id），供 PG 把反连接
+    做成对小集合的哈希，而不是对全部 pending 单集逐行嵌套回表。
+    SQLite / PG 都走这条 SQLAlchemy 表达式，不另写方言 SQL。
+    """
+    from sqlalchemy import and_ as _and
+    from sqlalchemy import exists as _exists
+    from sqlalchemy import or_ as _or
+    from sqlalchemy import select as _select
+    from sqlalchemy.orm import aliased as _aliased
+
+    series = _aliased(em.MediaItem)
+    season = _aliased(em.MediaItem)
+    # 父级仍待处理才挡。deleted_at 必须写在子查询里：全局软删钩子下推不到
+    # EXISTS（identity_gate 同款），漏写会让已删父级把单集永久挡住。
+    series_open = _exists(
+        _select(series.id).where(
+            series.id == em.MediaItem.series_id,
+            series.deleted_at.is_(None),
+            series.enrich_status.in_(("pending", "enriching")),
+        ).correlate(em.MediaItem)
+    )
+    season_open = _exists(
+        _select(season.id).where(
+            season.id == em.MediaItem.parent_id,
+            season.item_type == "season",
+            season.deleted_at.is_(None),
+            season.enrich_status.in_(("pending", "enriching")),
+        ).correlate(em.MediaItem)
+    )
+    return _or(
+        em.MediaItem.item_type != "episode",
+        _and(~series_open, ~season_open),
+    )
+
+
 def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
     """原子抢一批待补全条目（多 worker/多进程不重复）。
 
@@ -3515,6 +3597,10 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
         _ban_backfill_hold = False
     not_ban_backfill = True if not _ban_backfill_hold else (
         em.MediaItem.enrich_priority != ENRICH_PRIORITY_DOUBAN_BACKFILL)
+    # 单集只在父级终态后认领。identify / fill / 单队列都走下面两处 filter，
+    # 所以两条队列同一条谓词。开关关时谓词为 True，SQL 与改前一致。
+    parent_ready = (_episode_parent_ready_clause()
+                    if ENRICH_CLAIM_EPISODE_PARENT_READY else True)
     group_key = _func.coalesce(em.MediaItem.series_id, em.MediaItem.id)
 
     base_order = (
@@ -3557,7 +3643,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
                          _func.max(em.MediaItem.date_added).label("latest"),
                          em.MediaItem.library_id.label("lib"))
                 .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
-                        not_episode, not_merged, not_ban_backfill, queue_pred)
+                        not_episode, not_merged, not_ban_backfill, queue_pred,
+                        parent_ready)
                 # library_id 必须显式入组（PG 要求）：组键是全局 id，
                 # 同一组恒在同一库内，(group_key, library_id) 与 group_key 等价。
                 .group_by(group_key, em.MediaItem.library_id))
@@ -3570,7 +3657,7 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
         q = (db.query(em.MediaItem)
              .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
                      not_episode, not_merged, not_ban_backfill, queue_pred,
-                     group_key == gid)
+                     parent_ready, group_key == gid)
              .order_by(
                  # 父级（剧/电影）先于子级：父级先落 done，子集才能纯继承
                  _case((em.MediaItem.item_type.in_(["series", "movie"]), 0), else_=1),
