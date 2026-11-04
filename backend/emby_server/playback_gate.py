@@ -130,6 +130,34 @@ def binding_gate_enabled(db: Session) -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def _item_is_user_owned(item) -> bool:
+    """条目是否来自用户自备盘（``byos://<binding_id>/...``）。
+
+    这类条目的字节在用户自己的网盘里，必须用该用户的绑定凭据取流——
+    即使库行开了免绑定，也永远要求 active 绑定。
+    """
+    path = (getattr(item, "file_path", "") or "").strip()
+    return path.startswith("byos://")
+
+
+def _library_exempts_binding(db: Session, library_id) -> bool:
+    """库行是否显式免绑定（``no_binding_required``，默认关）。
+
+    2026-11-04 按 Claude 拍板重贴（R2 上游接口）：上游 #1797 的
+    ``binding_required_for_item`` 只豁免 CMS 库；这里把 fork 的库级开关
+    并进来，服务端挂载（``mount://``）片源在显式开启的库上免绑定。
+    """
+    if library_id is None:
+        return False
+    try:
+        library = (db.query(em.Library)
+                   .filter(em.Library.id == int(library_id)).first())
+    except Exception:  # noqa: BLE001 — 查不到库按不免（fail-closed）
+        return False
+    return bool(library is not None
+                and getattr(library, "no_binding_required", False))
+
+
 def binding_required_for_item(db: Session, item) -> bool:
     """该条目的播放是否需要过绑定门禁（按条目判定的单一入口）。
 
@@ -141,7 +169,12 @@ def binding_required_for_item(db: Session, item) -> bool:
     library_id = getattr(item, "library_id", None)
     if library_id is None:
         return True
-    return not _library_is_cms(db, library_id)
+    # byos:// 用户自备盘条目永远要求绑定（库开关不能豁免它）
+    if _item_is_user_owned(item):
+        return True
+    if _library_is_cms(db, library_id):
+        return False
+    return not _library_exempts_binding(db, library_id)
 
 
 def binding_required_for_upstream(
