@@ -104,6 +104,16 @@ ENRICH_FAILED_AUTO_RESCHEDULE_BATCH = 2000
 ENRICH_LIBRARY_FAIRNESS = (os.getenv("ENRICH_LIBRARY_FAIRNESS", "1") or "1").strip().lower() not in {
     "0", "false", "no", "off",
 }
+# 新入库优先窗口（小时）：组内最新 date_added 落在窗口内的组，排在库轮转之前。
+# 存量大库仍按 ENRICH_LIBRARY_FAIRNESS 绕圈，不会被永久饿死。0 = 关闭，排序回到
+# 「只按库轮转 + 优先级 + date_added」。只影响认领顺序，不改任何已有行。
+ENRICH_FRESH_FIRST_HOURS = env_int("ENRICH_FRESH_FIRST_HOURS", 48, 0)
+# 父级结果继承（默认开）：批量路径先写完非单集再处理单集，使同批单集能看到
+# 父级刚落库的结论；父级已是终态 none（搜过、无 tmdb_id、无海报）时，单集
+# 直接继承、不再逐集读 NFO / 打 TMDB。0 = 回到「整批一起 pre」的旧行为。
+ENRICH_EPISODE_INHERIT_PARENT = (os.getenv("ENRICH_EPISODE_INHERIT_PARENT", "1") or "1").strip().lower() not in {
+    "0", "false", "no", "off",
+}
 # 零 API 别名索引（处方 12）：进程内 TTL 缓存的重建周期与行数上限
 _ALIAS_INDEX_TTL = env_int("ENRICH_ALIAS_INDEX_TTL", 300, 30)
 _ALIAS_INDEX_MAX = env_int("ENRICH_ALIAS_INDEX_MAX", 50000, 1000)
@@ -1676,6 +1686,14 @@ def _enrich_fetch_pre(item: Any, holder: Optional[dict] = None,
     # NFO kind 口径：series→tvshow.nfo，season→season.nfo，episode→episodedetails，movie→movie
     kind = {"series": "series", "season": "season",
             "episode": "episode", "movie": "movie"}.get(item_type, "")
+    # 阴性继承放在 side/NFO 之前：父级已确认搜过没有，本集不再付挂载 IO。
+    # 写库阶段仍走 pure_inherit（metadata_source=inherit），父级日后若补到
+    # tmdb_id，既有的空壳 inherit 联动会把这些集翻回来补单集数据。
+    if (inherit_parent and inherit_parent.get("negative") and kind == "episode"):
+        result["pure_inherit"] = True
+        result["inherit_negative"] = True
+        progress.note_stage("enrich_inherit_negative")
+        return result, None
     scan_file = _scanfile_from_item(item)
 
     # series / season 是目录聚合出来的容器条目，天生没有 file_path（文件在 episode 上）。
@@ -3506,14 +3524,23 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
     )
 
     def _order_with_fairness(q):
+        # 排序：优先级（repair / 重试未匹配仍置顶）→ 新鲜窗口 → 库轮转 → 入库时间。
+        # 新鲜窗口只把「最近入库的组」挪到库轮转之前；窗口外的存量大库仍绕圈。
+        # 同优先级且同样新鲜时，库轮转 + date_added 与原先的组间次序一致。
+        order = list(base_order[:1])  # max(enrich_priority) desc
+        if ENRICH_FRESH_FIRST_HOURS > 0:
+            fresh_cutoff = now - timedelta(hours=ENRICH_FRESH_FIRST_HOURS)
+            order.append(_case(
+                (_func.max(em.MediaItem.date_added) >= fresh_cutoff, 0),
+                else_=1))
         if ENRICH_LIBRARY_FAIRNESS:
             # 上一轮消费过的库沉到队尾（不是置顶）：这样轮转才是真正的「绕圈」——
             # 消费 A → 下一轮 B 先 → 消费 B → 再下一轮 A 先。若置顶，游标库会
             # 连续吃满批次，轮转退化为静态优先级。
-            return (q.order_by(_case((em.MediaItem.library_id == _library_turn(), 1),
-                                     else_=0),
-                               *base_order))
-        return q.order_by(*base_order)
+            order.append(_case((em.MediaItem.library_id == _library_turn(), 1),
+                               else_=0))
+        order.extend(base_order[1:])  # max(date_added) desc
+        return q.order_by(*order)
 
     # 多版本（电影/剧集/单集）：被合并的版本不独立补全，元数据走主记录。
     # （probe/subtitle/thumbnail worker 已有同口径过滤。）
@@ -4905,9 +4932,17 @@ def _inherit_parent_info(db, item: Any) -> Optional[dict]:
         return None
     if (series.enrich_status or "") != "done":
         return None
-    if not (series.poster_path or series.primary_image_url or series.tmdb_id):
-        return None
-    return {"series_id": series.id, "tmdb_id": series.tmdb_id}
+    if series.poster_path or series.primary_image_url or series.tmdb_id:
+        return {"series_id": series.id, "tmdb_id": series.tmdb_id,
+                "negative": False}
+    # 父级已终态「搜过没有」：无 tmdb、无海报。单集再逐集读 NFO / 查 TMDB
+    # 也不会有剧集级命中。继承这个阴性结论，跳过网络（开关关时保持旧行为：
+    # 返回 None，走完整抓取）。
+    if (ENRICH_EPISODE_INHERIT_PARENT
+            and (series.metadata_source or "") == "none"
+            and not series.tmdb_id):
+        return {"series_id": series.id, "tmdb_id": None, "negative": True}
+    return None
 
 
 def _apply_write_phase(db, item: Any, fetched: dict,
@@ -5200,6 +5235,26 @@ def _process_item(db, item: Any, holder: Optional[dict] = None,
                             claim_token=snapshot.enrich_claim_token)
 
 
+def _split_batch_for_inherit(batch: list) -> list:
+    """同批里既有父级又有单集时，拆成「先父级、后单集」两段。
+
+    批量路径默认整批先 pre 再写库，单集在 pre 时父级还是 enriching，
+    ``_inherit_parent_info`` 看不到本批刚搜完的结论，于是每集各自读 NFO。
+    逐条路径没有这个问题（父级 commit 之后才处理下一集）。拆开后再递归
+    进 ``_process_batch``，单集段就能继承父级结果（命中走季缓存，
+    未命中走阴性继承）。开关关、或本批只有一种角色时，原样返回一段。
+    """
+    if not ENRICH_EPISODE_INHERIT_PARENT or not batch:
+        return [batch]
+    episodes = [it for it in batch
+                if (getattr(it, "item_type", None) or "") == "episode"]
+    if not episodes or len(episodes) == len(batch):
+        return [batch]
+    heads = [it for it in batch
+             if (getattr(it, "item_type", None) or "") != "episode"]
+    return [heads, episodes]
+
+
 def _process_batch(db, batch: list) -> None:
     """批量处理已抢到的条目：pre（逐条）→ TMDB 批量 → post+写库（逐条）。
 
@@ -5210,6 +5265,13 @@ def _process_batch(db, batch: list) -> None:
 
     批量级异常 → 回退到逐条 `_process_item`；单条 transient → 该条 ok=False 进重试。
     """
+    parts = _split_batch_for_inherit(batch)
+    if len(parts) > 1:
+        for part in parts:
+            if _stop_event.is_set():
+                break
+            _process_batch(db, part)
+        return
     from backend.emby_server import mounts as mount_lib
 
     # ---- Phase 1：逐条 pre ----

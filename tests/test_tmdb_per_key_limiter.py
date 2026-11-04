@@ -51,12 +51,12 @@ def test_buckets_are_independent_per_key():
     b1 = lim.limiter_for("k1")
     b2 = lim.limiter_for("k2")
     assert b1 is not b2
-    # 把 k1 的桶打空（2 token），k2 不受影响
-    b1.acquire()
-    b1.acquire()
+    # 子桶速率跟模块默认（ENRICH_TMDB_PER_SEC），把 k1 打空，k2 不受影响
+    for _ in range(int(b1.ceiling)):
+        b1.acquire()
     # k1 桶已空、k2 桶仍满：直接看内部 token（同进程单线程测试）
     assert b1._tokens < 1.0
-    assert b2._tokens >= 2.0
+    assert b2._tokens >= b2.ceiling - 0.01
 
 
 def test_429_only_throttles_the_offending_key(monkeypatch):
