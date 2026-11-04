@@ -750,7 +750,12 @@ def list_storage_binding_providers(
     """
     from backend.emby_server import user_bindings
 
-    return {"providers": user_bindings.list_binding_providers(db)}
+    # 模式 B：绑定入口总开关关闭时 providers 为空 + enabled=false，
+    # 前端据此整段不渲染「我的网盘」（不是「没有可用 provider」的降级）。
+    return {
+        "providers": user_bindings.list_binding_providers(db),
+        "enabled": user_bindings.user_storage_binding_enabled(db),
+    }
 
 
 @user_emby_router.post("/storage-bindings", status_code=201)
@@ -832,8 +837,14 @@ def start_drive_oauth_binding(
     名下”的链（见 drive_oauth.assert_callback_browser_binding）。
     nonce 原文只进 cookie，绝不进返回 JSON。
     """
-    from backend.emby_server import drive_oauth
+    from backend.emby_server import drive_oauth, user_bindings
 
+    # 模式 B：总开关关闭时拒绝新绑定（重绑已有行保留入口，已有行不删除）。
+    if (body.rebind_binding_id is None
+            and not user_bindings.user_storage_binding_enabled(db)):
+        raise HTTPException(
+            status_code=403,
+            detail="网盘绑定已关闭：本站由服务器统一提供片源，无需绑定自己的网盘。")
     try:
         result = drive_oauth.start_drive_oauth(
             db, request_user.id, body.account_label,
