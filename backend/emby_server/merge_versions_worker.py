@@ -403,6 +403,16 @@ def _repair_series_tmdb_loose(db, cfg) -> int:
     return repaired
 
 
+#: 副本行从主条目继承的展示字段（merge_group 与 repair_merged_enrich_status 同口径）
+_COPY_INHERIT_FIELDS = (
+    "name", "sort_name", "original_title", "overview", "tagline",
+    "production_year", "poster_path", "primary_image_url",
+    "backdrop_path", "backdrop_image_url", "genres", "studios",
+    "official_rating", "community_rating", "metadata_source",
+    "last_scraped_at",
+)
+
+
 def merge_group(db, group: List) -> int:
     """合并一组：选主记录，其余 merged_into_id 指向主记录。
 
@@ -421,6 +431,10 @@ def merge_group(db, group: List) -> int:
         if item.merged_into_id is not None:
             continue
         item.merged_into_id = primary.id
+        # 2026-11-04（38 条 retrying 副本实证）：副本 enrich 一律收终态。
+        # _claim_batch 的 not_merged 谓词（merged_into_id.is_(None)）会永久
+        # 排除副本行——留在 pending/retrying 的副本永远不会被认领，也不会
+        # 从 backlog 消失。主条目已 done（它承接了元数据），副本行终态跟随。
         # 合并跟随（进库一期）：被合并行的上游映射迁到主记录——映射
         # 读契约只认活行，不迁线路就凭空消失；冲突保留置信高者
         # （口径见 upstream_item_mappings.migrate_mappings）。
@@ -432,7 +446,18 @@ def merge_group(db, group: List) -> int:
         # P2 修复（完美审查 C-P2-1）：被合并条目元数据走主记录，enrich 直接记 done——
         # 否则 _claim_batch 用 merged_into_id.is_(None) 永久排除它们，而 health_report
         # 的 backlog 照计 pending/enriching：永远不会被处理，也永远不会从 backlog 消失。
+        if item.enrich_status in ("pending", "retrying"):
+            item.enrich_claimed_at = None
+            item.enrich_claim_token = None
+            item.enrich_next_retry_at = None
         item.enrich_status = "done"
+        # 2026-11-04 运营快照：29 条带尾巴副本的主条目全部干净——副本行
+        # 展示字段继承主条目（管理端列表/backlog 不再出现脏名；客户端本来
+        # 就走主条目，播放零影响）。主条目有值才覆盖。
+        for field in _COPY_INHERIT_FIELDS:
+            val = getattr(primary, field, None)
+            if val is not None and val != "":
+                setattr(item, field, val)
         merged += 1
         logger.debug(
             "多版本合并：%s (id=%d) → 主记录 %s (id=%d)",
@@ -498,6 +523,15 @@ def _follow_series_episodes(db, group: List) -> None:
             main_ep = main_map.get(key)
             if main_ep is not None and main_ep.id != ep.id:
                 ep.merged_into_id = main_ep.id
+                if ep.enrich_status in ("pending", "retrying"):
+                    ep.enrich_claimed_at = None
+                    ep.enrich_claim_token = None
+                    ep.enrich_next_retry_at = None
+                ep.enrich_status = "done"
+                for field in _COPY_INHERIT_FIELDS:
+                    val = getattr(main_ep, field, None)
+                    if val is not None and val != "":
+                        setattr(ep, field, val)
                 # 集跟随同口径：被合并集的上游映射迁到主集（见 merge_group）。
                 from backend.emby_server import upstream_item_mappings as _uim
                 _uim.migrate_mappings(db, ep.id, main_ep.id)
