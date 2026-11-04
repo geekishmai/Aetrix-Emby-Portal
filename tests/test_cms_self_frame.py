@@ -131,16 +131,82 @@ def test_hint_is_prior_only_conflict_recorded():
     assert det["conflict"] is True
 
 
-def test_gate_subtitle_conflict_when_unsplittable():
-    # 条带整个落在底部字幕区内且全行静态持续（无法证明不含字幕
-    # 行）→ fail-closed 整条放弃
+def test_bottom_strip_fully_persistent_accepted():
+    # 校准（E2E 实证 1878241）：赞助行本就贴底、整段静态烧录、
+    # 字幕区内行全高持续——没有字幕行可伤，放行整段，不许误杀
     strip = (252, 266)
     frames = _series(
         30, scene_at=lambda t: 1 if t < 10 else 2,
         strip_at=lambda t: strip if t < 20 else None)
     det = sf.detect_band(frames, H)
-    assert det["ok"] is False
-    assert det["reason"] == "gate_subtitle_conflict"
+    assert det["ok"] is True
+    assert det["band_end_sec"] == 20.0
+
+
+def test_isolate_subtitle_rows_units():
+    dh = 270  # 字幕区起点 = 248
+    # 断崖须 2 行确认：单行凹陷（赞助字行间空隙）不许误切
+    rp = [1.0] * 20 + [0.4] + [1.0] * 9 + [0.27] * 10
+    out, triggered = sf.isolate_subtitle_rows((220, 260), dh, rp)
+    assert triggered is True
+    assert out == (220, 250)  # 切在 0.27 连片处（index 30）
+    # 字幕区行全高持续 → 整段放行
+    rp2 = [1.0] * 40
+    out2, _ = sf.isolate_subtitle_rows((220, 260), dh, rp2)
+    assert out2 == (220, 260)
+    # 字幕区有中间态行（0.55 与高行交替、无成片断崖）→ 放弃
+    rp3 = [1.0] * 30 + [0.55, 1.0] * 5
+    out3, triggered3 = sf.isolate_subtitle_rows((220, 260), dh, rp3)
+    assert triggered3 is True and out3 is None
+    # 未进字幕区 → 不触发
+    out4, triggered4 = sf.isolate_subtitle_rows((100, 140), dh,
+                                                [0.0] * 40)
+    assert triggered4 is False and out4 == (100, 140)
+
+
+def test_persistence_via_scene_cut_black_card():
+    # 黑卡形态（E2E 实证 1818047）：带外近黑、块间 MAD≈0，但带
+    # 跨过一次场景切变（切变只持续 2 秒、被 5s 块中位冲淡）——
+    # 切变两侧带都在场即算跨场景持续
+    frames = []
+    for s in range(20):
+        for k in range(FPS2):
+            img = _frame(1, strip=(200, 230), text_seed=7,
+                         frame_idx=s * FPS2 + k)
+            if s in (5, 6):  # 切变证据：带外一角亮块只活 2 秒
+                draw = ImageDraw.Draw(img)
+                draw.rectangle([0, 0, 90, 50], fill=235)
+            frames.append(img)
+    blocks = sf.block_medians(frames)
+    secs = sf.second_medians(frames)
+    tpl = sf.grad_strip(blocks[0], 199, 231)
+    hits, distinct, _ = sf._persistence(blocks, secs, 0, (199, 231),
+                                        tpl)
+    assert len(hits) >= 2
+    assert distinct is True
+
+
+def test_hint_zone_wins_over_other_band():
+    # 双带并存（E2E 实证 1879267）：底带命中块更多，但摸底先验
+    # 指向中带且中带自证成立 → 以先验为准（修的是标注的那条带）
+    frames = []
+    for s in range(30):
+        for k in range(FPS2):
+            img = _frame(1 if s < 10 else 2,
+                         strip=(200, 230) if s < 25 else None,
+                         text_seed=7, frame_idx=s * FPS2 + k)
+            if s < 15:  # 中带（先验目标）：另一组字形（外亮内暗）
+                draw = ImageDraw.Draw(img)
+                for i in range(14):
+                    x0 = (i * 83) % (W - 60)
+                    draw.rectangle([x0, 121, x0 + 26, 137], fill=245)
+                    draw.rectangle([x0 + 5, 124, x0 + 12, 134],
+                                   fill=10)
+            frames.append(img)
+    det = sf.detect_band(frames, H, hint_zone="mid")
+    assert det["ok"] is True
+    assert det["zone"] == "mid"
+    assert det["conflict"] is False
 
 
 def test_subtitle_rows_narrowed_not_repaired_over():

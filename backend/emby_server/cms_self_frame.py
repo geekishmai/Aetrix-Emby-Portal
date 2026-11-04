@@ -258,18 +258,34 @@ def _zone_candidate(blocks, zlo, zhi):
     return best
 
 
-def _persistence(blocks, peak_b, strip_det, template):
-    """跨场景持续性：命中块数 + 场景互异命中对。
+#: 场景切变证据：相邻秒带外 MAD ≥ 此值视为带外内容换了一轮
+#: （黑卡赞助带实证：出品卡 20 秒不动、卡内演职员字行换了两
+#: 次，切变 5.5——块间 MAD 被 5 秒中位冲淡到 ≤3，此口径才抓
+#: 得住；单卡静态画面相邻秒 MAD ≈0）。
+SCENE_CUT_MIN = 5.0
+#: 切变路径附加条件：切变两侧逐秒比值都 ≥ 此值（带须全强度
+#: 在场，不许拿半强度边缘命中凑切变证据）
+SCENE_CUT_RATIO_MIN = 0.6
 
-    命中 = 该块中位帧条带与模板的 2D 梯度比 ≥RATIO_THR；
-    场景互异 = 两命中块的带外 MAD ≥SCENE_DIFF_MIN。
-    返回 (hit_blocks, has_distinct_scene_pair)。
+
+def _persistence(blocks, sec_meds, peak_b, strip_det, template):
+    """跨场景持续性：命中块数 + 场景互异证据。
+
+    命中 = 该块中位帧条带与模板的 2D 梯度比 ≥RATIO_THR。
+    场景互异（任一成立）：①两命中块的带外 MAD ≥SCENE_DIFF_MIN；
+    ②带跨过一次场景切变——某秒与前一秒带外 MAD ≥SCENE_CUT_MIN
+    且切变两侧逐秒比值都 ≥RATIO_THR（黑卡赞助带的实证形态：
+    卡与卡之间画面大变、带纹丝不动；提示文字只活在一张卡里，
+    两侧凑不齐）。返回 (hit_blocks, distinct, sec_ratios)。
     """
     hits = []
     for b, med in enumerate(blocks):
         g = grad_strip(med, strip_det[0], strip_det[1])
         if grad_ratio(template, g) >= RATIO_THR:
             hits.append(b)
+    sec_ratios = [grad_ratio(template, grad_strip(m, strip_det[0],
+                                                  strip_det[1]))
+                  for m in sec_meds]
     distinct = False
     for i in range(len(hits)):
         for j in range(i + 1, len(hits)):
@@ -279,7 +295,15 @@ def _persistence(blocks, peak_b, strip_det, template):
                 break
         if distinct:
             break
-    return hits, distinct
+    if not distinct:
+        for s in range(1, len(sec_meds)):
+            if (sec_ratios[s - 1] >= SCENE_CUT_RATIO_MIN
+                    and sec_ratios[s] >= SCENE_CUT_RATIO_MIN
+                    and outside_mad(sec_meds[s - 1], sec_meds[s],
+                                    strip_det) >= SCENE_CUT_MIN):
+                distinct = True
+                break
+    return hits, distinct, sec_ratios
 
 
 def _band_end_from_ratios(ratios):
@@ -339,9 +363,10 @@ def isolate_subtitle_rows(strip_det, dh, row_persist):
     if y1 <= sub_top:
         return (y0, y1), False
     # 赞助行起点：首个高持续行（条带 ±1 扩边行本身无字、持续性
-    # 必然低，不许让它把起点毒化）；断崖 = 起点后 ≥4 行处首个
-    # 低持续行（字幕行随对白换字、持续性天然低）。高/低界取
-    # 0.7：合成实测赞助行 ≈1.0、被并入的字幕行 0.45–0.55。
+    # 必然低，不许让它把起点毒化）；断崖 = 起点后 ≥4 行处的首个
+    # 低持续行，且须 2 行确认（单行凹陷是赞助字行间的空隙，不许
+    # 误切；实测事故条的凹陷行 0.4 单行、字幕行 0.27 连片）。
+    # 高/低界取 0.7：实测赞助行 ≈1.0、字幕行 0.27–0.55。
     start = None
     for i, p in enumerate(row_persist):
         if p >= 0.7:
@@ -351,17 +376,25 @@ def isolate_subtitle_rows(strip_det, dh, row_persist):
         return None, True
     cut = None
     for i in range(start + 4, len(row_persist)):
-        if row_persist[i] < 0.7:
+        if row_persist[i] < 0.7 and (
+                row_persist[i] < 0.4
+                or (i + 1 < len(row_persist)
+                    and row_persist[i + 1] < 0.7)):
             cut = y0 + i
             break
-    if cut is None:
-        # 底部区内全行高持续：整段都是静态烧录（含压在字幕区上
-        # 的赞助行）——但无法证明不含字幕行，fail-closed 放弃。
-        return None, True
-    top = y0 + start
-    if cut - top < max(4, int(0.4 * (y1 - y0))):
-        return None, True
-    return (top, cut), True
+    if cut is not None:
+        top = y0 + start
+        if cut - top < max(4, int(0.4 * (y1 - y0))):
+            return None, True
+        return (top, cut), True
+    # 无断崖：字幕区内的行若全是高持续 → 整段是静态烧录本身
+    # （赞助行本就贴底的实证形态），没有字幕行可伤，放行整段；
+    # 有中间态行（0.4–0.7）→ 证明不了，fail-closed 放弃。
+    zone_rows = [p for i, p in enumerate(row_persist)
+                 if y0 + i >= sub_top]
+    if zone_rows and all(p >= 0.7 for p in zone_rows):
+        return (y0, y1), True
+    return None, True
 
 
 def detect_band(frames, dh, *, hint_zone=None):
@@ -390,12 +423,13 @@ def detect_band(frames, dh, *, hint_zone=None):
         ly0 = max(zlo, run[0] - 1)
         ly1 = min(zhi, run[1] + 1)
         template = grad_strip(blocks[peak_b], ly0, ly1)
-        hits, distinct = _persistence(blocks, peak_b, (ly0, ly1),
-                                       template)
+        hits, distinct, sec_ratios = _persistence(
+            blocks, sec_meds, peak_b, (ly0, ly1), template)
         candidates.append({
             "zone": zone, "peak_block": peak_b, "score": score,
             "strip_det": (ly0, ly1), "template": template,
             "hit_blocks": hits, "distinct_scene": distinct,
+            "sec_ratios": sec_ratios,
             "persistent": len(hits) >= 2 and distinct,
         })
     if not candidates:
@@ -407,17 +441,22 @@ def detect_band(frames, dh, *, hint_zone=None):
                     f"{c['zone']}:hits={len(c['hit_blocks'])}"
                     f":distinct={c['distinct_scene']}"
                     for c in candidates)}
-    # 持续性更强者优先（命中块多 > 峰值分高）；hint 只作先验，
-    # 与结论不同区即记 conflict（摸底标注错位的实证形态）。
-    viable.sort(key=lambda c: (len(c["hit_blocks"]), c["score"]),
-                reverse=True)
-    chosen = viable[0]
-    conflict = bool(hint_zone and hint_zone in ZONES
-                    and chosen["zone"] != hint_zone)
+    # 选择口径：hint 区有可持续候选时以 hint 为准（摸底 strip 是
+    # 人工裁决的先验，本检测在该区自证成立就该信它——双带并存
+    # 时按命中数选会选错主带，实证 1879267）；hint 区无候选或
+    # 候选不过门控时，全区按峰值分最强者为准并记 conflict
+    # （摸底标注错位的实证形态 1927459）。
+    hint_cand = next((c for c in viable if c["zone"] == hint_zone),
+                     None)
+    if hint_cand is not None:
+        chosen = hint_cand
+        conflict = False
+    else:
+        chosen = max(viable, key=lambda c: c["score"])
+        conflict = bool(hint_zone and hint_zone in ZONES)
     ly0, ly1 = chosen["strip_det"]
     template = chosen["template"]
-    ratios = [grad_ratio(template, grad_strip(med, ly0, ly1))
-              for med in sec_meds]
+    ratios = chosen["sec_ratios"]
     band_end = _band_end_from_ratios(ratios)
     result = {"ok": True, "zone": chosen["zone"],
               "strip_det": (ly0, ly1), "band_end_sec": band_end,
@@ -442,8 +481,9 @@ def detect_band(frames, dh, *, hint_zone=None):
             return {"ok": False, "reason": "gate_subtitle_conflict",
                     "detail": f"strip_det={ly0}-{ly1} sub_top={sub_top}"}
         if triggered:
+            result["narrowed"] = tuple(narrowed) != tuple(
+                result["strip_det"])
             result["strip_det"] = narrowed
-            result["narrowed"] = True
             # 收窄后重算带尾（模板行段变了，旧比值不作数）
             tpl2 = grad_strip(blocks[chosen["peak_block"]],
                               narrowed[0], narrowed[1])
