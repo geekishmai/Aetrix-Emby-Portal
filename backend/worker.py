@@ -768,6 +768,34 @@ def main() -> int:
                 logger.info("苹果 CMS 同步未开启，定时同步不启动")
         except Exception as e:
             logger.warning(f"启动苹果 CMS 定时同步失败（可忽略）: {e}")
+        # 苹果 CMS 媒体库同步（新库类型一期）：仅
+        # APPLECMS_LIBRARY_SYNC_ENABLED=1 时启动；关时不启动、不发
+        # 任何上游请求。本块只加自己的启动行，不动上面的接线行。
+        try:
+            from backend.emby_server import applecms_library_sync
+
+            if applecms_library_sync.start_library_sync_scheduler(
+                    _shutdown_event):
+                started.append("applecms_library_sync")
+                logger.info("✅ 苹果 CMS 媒体库同步已启动")
+            else:
+                logger.info("苹果 CMS 媒体库同步未开启，调度不启动")
+        except Exception as e:
+            logger.warning(f"启动苹果 CMS 媒体库同步失败（可忽略）: {e}")
+        # 苹果 CMS 月度全量对账（新库类型一期）：独立开关
+        # APPLECMS_LIBRARY_RECONCILE_ENABLED，与增量同步分开两道
+        # 闸；关时不启动。本块只加自己的启动行。
+        try:
+            from backend.emby_server import applecms_reconcile
+
+            if applecms_reconcile.start_reconcile_scheduler(
+                    _shutdown_event):
+                started.append("applecms_library_reconcile")
+                logger.info("✅ 苹果 CMS 月度对账已启动")
+            else:
+                logger.info("苹果 CMS 月度对账未开启，调度不启动")
+        except Exception as e:
+            logger.warning(f"启动苹果 CMS 月度对账失败（可忽略）: {e}")
         # 上游聚合定时调度（准备线，开关默认关）：仅
         # UPSTREAM_AGGREGATE_SCHEDULE_ENABLED=1 时启动；关时不启动、
         # 不发任何上游请求，全站行为逐字不变。本块只加自己的启动行，
@@ -800,18 +828,6 @@ def main() -> int:
                 logger.info("上游聚合认领工人未启动")
         except Exception as e:
             logger.warning(f"启动上游聚合认领工人失败（可忽略）: {e}")
-        # 302 Next 数据集同步：默认关（总闸与子开关双关），关时不起线程；
-        # 开后按 NEXT302_DATASET_SYNC_INTERVAL_SEC（下限 600 秒）跑榜单同步。
-        try:
-            from backend.emby_server import tmdb_dataset
-
-            if tmdb_dataset.start_dataset_scheduler():
-                started.append("next302_dataset")
-                logger.info("✅ 302 Next 数据集同步已启动")
-            else:
-                logger.info("302 Next 数据集同步未开启，不启动")
-        except Exception as e:
-            logger.warning(f"启动 302 Next 数据集同步失败（可忽略）: {e}")
         # 上游探活守护 + 健康落库同步（FMBY #25 25-3/25-14，生产接线）：
         # 只接线，不改守护本体、不碰投影工人、不碰扫描/播放逻辑。
         # 两守护各有总开关（默认关），关时线程空转、不发请求、不读写；

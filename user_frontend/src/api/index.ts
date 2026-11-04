@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { toUserMessage } from '@/utils/toUserMessage'
+import { getEmbyApiKey, setEmbyApiKey } from '@/api/imageKey'
 
 // 使用空 baseURL，让请求自动适配当前域名（前后端同源部署）
 const api = axios.create({
@@ -386,6 +387,9 @@ export interface AccountCard {
   allow_download?: boolean
   /** 我在这几个服各自的地址与会员（多服时客户端该连哪台一目了然） */
   realms?: AccountRealmCard[]
+  /** PA-036：图片端点鉴权后网页端拼图用的专用 Emby token（每次读卡轮换，
+   *  没查看权限 / 外部模式为空串）；由 getAccountCard 同步进 imageKey 持有者 */
+  emby_api_key?: string
 }
 
 export interface WatchStats {
@@ -516,7 +520,18 @@ export interface SetEmbyPasswordResult {
 
 export const embyApi = {
   // 账号卡（服务器地址 / Emby 用户名 / 播放器一键导入 scheme，scheme 不含密码）
-  getAccountCard: () => api.get<never, AccountCard>('/api/user/emby/server'),
+  getAccountCard: () => {
+    // PA-054：把手里那把图片 key 经请求头带回去，够新后端就复用不轮换；
+    // 多处视图反复读卡不再互相踢掉对方的 key。没 key 时不带头，走轮换老路。
+    const currentKey = getEmbyApiKey()
+    return api.get<never, AccountCard>(
+      '/api/user/emby/server',
+      currentKey ? { headers: { 'X-Web-Image-Key': currentKey } } : undefined,
+    ).then((card) => {
+      if (card?.emby_api_key) setEmbyApiKey(card.emby_api_key)
+      return card
+    })
+  },
 
   // 公益服：花能量解锁 Emby 账号/线路查看权限（幂等）
   unlockView: (realmId?: number) =>
@@ -787,64 +802,6 @@ export interface MySubscription {
   status: string
   auto_renew: boolean
   days_left: number
-}
-
-/** 302 Next MVP 非商店部分：本地数据集搜索 + 库外详情 + 播放状态 */
-export interface Next302Result {
-  tmdb_id: string
-  media_type: string
-  title: string
-  original_title: string
-  year?: number | null
-  overview: string
-  genres: string[]
-  poster_path: string
-  vote_average?: number | null
-  in_library: boolean
-  library_item_id?: number | null
-  library_known: boolean
-  dataset_only: boolean
-}
-
-export interface Next302Freshness {
-  last_success_at: string | null
-  total_rows: number
-  last_error: string | null
-  synced: boolean
-}
-
-export interface Next302SearchResponse {
-  results: Next302Result[]
-  total: number
-  freshness: Next302Freshness
-}
-
-export interface Next302PlayStatus {
-  item_id: number
-  route: string
-  detail: string
-  action: 'play' | 'wait' | 'failed' | 'want' | 'bind'
-  has_binding: boolean
-  has_user_ready_copy: boolean
-  job_status: string | null
-}
-
-export const next302Api = {
-  /** 本地数据集搜索（不调 TMDB）：库内混排、库内优先标出 */
-  search: (q: string, type?: string) =>
-    api.get<never, Next302SearchResponse>('/api/user/next302/search', {
-      params: { q, ...(type && type !== 'all' ? { type } : {}) },
-    }),
-
-  /** 详情：库内给播放状态入口，库外只展示、不给播放入口 */
-  details: (mediaType: string, tmdbId: string) =>
-    api.get<never, Next302Result>(`/api/user/next302/details/${mediaType}/${tmdbId}`),
-
-  /** 播放状态（E4，只读）：这部库内片能不能播、为什么 */
-  playStatus: (itemId: number) =>
-    api.get<never, Next302PlayStatus>('/api/user/next302/play-status', {
-      params: { item_id: itemId },
-    }),
 }
 
 /**

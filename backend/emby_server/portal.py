@@ -468,6 +468,27 @@ def _account_card(user: models.WebUser, db: Session, realm_id: int | None = None
             "expires_at": unlock.expires_at.isoformat() if unlock and unlock.expires_at else None,
         },
     }
+    # PA-036：图片端点加鉴权后，网页端 <img> 只能靠 URL 里的 api_key 带凭据，
+    # 账号卡顺带下发一把专用 web token（见 auth.rotate_web_portal_token）。
+    # PA-054：前端读卡时会把手里那把 key 经 X-Web-Image-Key 头带回来，
+    # 带得回来且剩余有效期够长就复用（不轮换），多处视图反复读卡不再互相
+    # 踢掉对方的 key；带不回来时仍走轮换老路。没查看权限 / 外部模式
+    # （账号归对方管、本项目无权签发它的 token）不下发；签发失败不许拖垮
+    # 账号卡——前端拿不到 key 时图片走 401 占位，与「未开通」的表现一致。
+    # 该头只在 JWT 已鉴权的账号卡请求内传递，不记日志、不进 URL。
+    card["emby_api_key"] = ""
+    if granted and not external:
+        try:
+            from backend.emby_server.auth import rotate_web_portal_token
+
+            current_key = None
+            if request is not None:
+                current_key = (request.headers.get("X-Web-Image-Key") or "").strip() or None
+            card["emby_api_key"] = rotate_web_portal_token(db, user, current_key=current_key)
+        except Exception:  # noqa: BLE001
+            logger.warning("下发网页端图片 token 失败 user=%s", user.id,
+                           exc_info=True)
+            card["emby_api_key"] = ""
     card["realms"] = _user_realm_cards(user, db, request)
     return card
 
@@ -558,7 +579,11 @@ def unlock_emby_view(
 
     幂等：已解锁且未过期直接返回成功，不重复扣费。扣费是 SQL 级原子
     更新（余额检查写在 WHERE 里），并发下不会扣成负数；解锁记录有
-    (user_id, realm_id) 唯一约束，建记录冲突时回滚重读走幂等路径。
+    (user_id, realm_id) 唯一约束一人一服一行——已有行过期走原地续开
+    （从现在重算到期，与 codes 打包发放同口径），不新建；只有无行时
+    才新建，建行冲突时回滚重读、只认未过期行才报幂等成功（PA-022：
+    旧实现对过期行也新建，撞约束回滚后却不滤过期谎报 already 成功，
+    钱没扣、权限没给）。
     付费服不走这里——查看权限来自有效订阅。
     """
     realm_id = req.realm_id or realms.active_realm_id(db)
@@ -595,17 +620,34 @@ def unlock_emby_view(
     _append_points_log(db, request_user.id, -price_points, balance, "view_unlock",
                        f"解锁{realm.name}查看权限", f"emby-view:{realm_id}")
     expires_at = None if price_days <= 0 else now + timedelta(days=price_days)
-    db.add(models.EmbyViewUnlock(user_id=request_user.id, realm_id=realm_id,
-                                 unlocked_at=now, expires_at=expires_at,
-                                 points_spent=price_points))
+    # 一人一服一行：已有行（走到这里必为过期行，未过期已在上方幂等返回）
+    # 原地续开。续开用条件 UPDATE（仍过期才更新）防并发双扣：另一请求
+    # 先续开/建行后本条命中 0 行，落到新建分支撞唯一约束→回滚撤销本次
+    # 扣费→重读按未过期口径裁决，绝不出现「报成功但没生效」。
+    renewed = (db.query(models.EmbyViewUnlock)
+                 .filter(models.EmbyViewUnlock.user_id == request_user.id,
+                         models.EmbyViewUnlock.realm_id == realm_id,
+                         models.EmbyViewUnlock.expires_at.isnot(None),
+                         models.EmbyViewUnlock.expires_at <= now)
+                 .update({models.EmbyViewUnlock.expires_at: expires_at,
+                          models.EmbyViewUnlock.unlocked_at: now,
+                          models.EmbyViewUnlock.points_spent: price_points},
+                         synchronize_session="fetch"))
+    if not renewed:
+        db.add(models.EmbyViewUnlock(user_id=request_user.id, realm_id=realm_id,
+                                     unlocked_at=now, expires_at=expires_at,
+                                     points_spent=price_points))
     try:
         db.commit()
     except IntegrityError:
-        # 并发下另一请求已建记录：回滚后走幂等路径（对方那次扣费有效）
+        # 并发下另一请求已建记录：回滚后走幂等路径（对方那次扣费有效）。
+        # 重读必须与前置检查同口径只认未过期行——仍过期绝不报成功。
         db.rollback()
         existing = (db.query(models.EmbyViewUnlock)
                       .filter(models.EmbyViewUnlock.user_id == request_user.id,
-                              models.EmbyViewUnlock.realm_id == realm_id)
+                              models.EmbyViewUnlock.realm_id == realm_id,
+                              or_(models.EmbyViewUnlock.expires_at.is_(None),
+                                  models.EmbyViewUnlock.expires_at > datetime.now()))
                       .first())
         if existing:
             return {"success": True, "already": True,
@@ -723,6 +765,8 @@ def _binding_error_status(exc) -> int:
         return 404
     if exc.kind == "transient":
         return 502
+    if exc.kind == "conflict":
+        return 409
     return 400
 
 
@@ -1870,6 +1914,17 @@ class LibraryCreate(BaseModel):
     # 扫描策略开关（v2.44.0，默认开）
     incremental_scan: bool = True
     fs_watch: bool = True
+    # 库类型（苹果 CMS 媒体库类型，2026-11-02）：local（默认）/ applecms。
+    # applecms 时内容来源是上游 CMS 源而非本地路径/挂载：paths 与
+    # mount_ids 不再必填，改由 upstream_source_ids 必填（见 create_library）。
+    kind: str = "local"
+    # kind=applecms 时收哪些苹果 CMS 型上游源（upstream_sources.id）
+    upstream_source_ids: list[int] = []
+    # kind=applecms 时的分类映射：源分类名 → "in"/"out"；省略/空 = 全收
+    cms_type_map: dict[str, str] | None = None
+    # kind=applecms 时的地区分流桶：huayu/oumei/rihan（见
+    # applecms_library.AREA_BUCKET_LABELS）；省略/空 = 不分地区
+    cms_area_bucket: str | None = None
 
 
 class LibraryUpdate(BaseModel):
@@ -1894,9 +1949,15 @@ class LibraryUpdate(BaseModel):
     # 扫描策略开关（v2.44.0）：不传 = 不修改
     incremental_scan: bool | None = None
     fs_watch: bool | None = None
-    # 免绑定播放（2026-11-03，与上游 #1797 binding_required_for_item 同接口）：
-    # 库行开关，默认关；开启后该库的服务端挂载条目不再要求用户绑定网盘。
-    no_binding_required: bool | None = None
+    # 库类型：建库后不可更改——传了且与现值不同直接 400（见 update_library）
+    kind: str | None = None
+    # kind=applecms 的库可改来源清单；local 库传了直接 400
+    upstream_source_ids: list[int] | None = None
+    # kind=applecms 的分类映射：显式传 null = 清空（回全收），省略 = 不修改
+    cms_type_map: dict[str, str] | None = None
+    # kind=applecms 的地区分流桶：显式传 null/空 = 清空（回不分
+    # 地区），省略 = 不修改；非法桶值 400
+    cms_area_bucket: str | None = None
 
 
 def _validate_library_sources(db: Session, paths: list[str], mount_ids: list[int]) -> None:
@@ -2053,6 +2114,8 @@ def admin_overview(staff: models.WebUser = Depends(require_staff), db: Session =
 def list_libraries(staff: models.WebUser = Depends(require_staff), db: Session = Depends(get_db),
                          realm_id: int | None = None):
     """媒体库清单（按服；realm_id=0 表示全部服）"""
+    from backend.emby_server import applecms_library as _cms_lib
+
     scope_id = None if realm_id == 0 else (realm_id or realms.active_realm_id(db))
     query = realms.scope_inclusive(db.query(em.Library), em.Library.realm_id, scope_id)
     libs = query.order_by(em.Library.id).all()
@@ -2130,6 +2193,12 @@ def list_libraries(staff: models.WebUser = Depends(require_staff), db: Session =
             "scrape_policy": normalize_scrape_policy(lib.scrape_policy),
             "is_virtual": bool(getattr(lib, "is_virtual", False)),
             "platform": lib.platform,
+            # 库类型与 CMS 来源（苹果 CMS 媒体库类型）：kind 给表单分流，
+            # 来源/映射下发解析后的结构，表单不用自己拆逗号/JSON
+            "kind": _cms_lib.library_kind(lib),
+            "upstream_source_ids": _cms_lib.parse_upstream_source_ids(lib),
+            "cms_type_map": _cms_lib.parse_cms_type_map(lib) or None,
+            "cms_area_bucket": _cms_lib.parse_cms_area_bucket(lib) or None,
             "cover_url": f"/api/admin/emby/libraries/{lib.id}/cover" if lib.cover_path else None,
             # 封面配置：样式回显 + “新片入库后自动更新”开关（老库没这列时按关闭处理）
             "cover_template": lib.cover_template,
@@ -2172,18 +2241,66 @@ def list_libraries(staff: models.WebUser = Depends(require_staff), db: Session =
         ]}
 
 
+def _cms_source_ids_field(db: Session, source_ids) -> str:
+    """校验 CMS 库的来源清单并拼成入库文本（逗号分隔）。
+
+    来源必须存在且是苹果 CMS 型上游源；一家都不给直接 400——CMS 库
+    没有来源就是空库，建出来只会让人以为同步坏了。启用与否不在这里
+    卡：源的启停是源管理页的独立动作，关着的源同步时自动跳过。
+    """
+    from backend.emby_server import applecms_library as cms_lib
+
+    ids = cms_lib.parse_upstream_source_ids(
+        ",".join(str(x) for x in (source_ids or [])))
+    if not ids:
+        raise HTTPException(status_code=400,
+                            detail="苹果 CMS 库至少要选一个 CMS 来源")
+    rows = {s.id: s for s in db.query(em.UpstreamSource)
+            .filter(em.UpstreamSource.id.in_(ids)).all()}
+    for sid in ids:
+        src = rows.get(sid)
+        if src is None:
+            raise HTTPException(status_code=400,
+                                detail=f"上游源不存在: #{sid}")
+        if src.source_type != "applecms":
+            raise HTTPException(
+                status_code=400,
+                detail=f"上游源「{src.name}」不是苹果 CMS 型，不能用作 CMS 库来源")
+    return cms_lib.format_upstream_source_ids(ids)
+
+
 @admin_emby_router.post("/libraries")
 def create_library(req: LibraryCreate, staff: models.WebUser = Depends(require_staff), db: Session = Depends(get_db)):
     import uuid
 
+    from backend.emby_server import applecms_library as cms_lib
+
+    kind = (req.kind or "local").strip().lower()
+    if kind not in cms_lib.LIBRARY_KINDS:
+        raise HTTPException(status_code=400, detail=f"未知库类型: {req.kind}")
+    is_cms = kind == cms_lib.KIND_APPLECMS
+    cms_source_field = ""
+    cms_map_field = None
+    cms_bucket_field = None
+    if is_cms:
+        cms_source_field = _cms_source_ids_field(db, req.upstream_source_ids)
+        cms_map_field = cms_lib.format_cms_type_map(req.cms_type_map)
+        try:
+            cms_bucket_field = cms_lib.format_cms_area_bucket(
+                req.cms_area_bucket)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     # 简化形式优先：界面传的是「裸路径 + 存储后端」，mount:// 前缀在后端拼回去
+    # （CMS 库没有本地来源，这一段整体不适用）
     backends_field = ""
-    if req.path_entries is not None:
-        paths_field, backends_field = _library_path_payload(db, req.path_entries)
-        req.paths = paths_field.split(",") if paths_field else []
-    if not req.paths and not req.mount_ids:
-        raise HTTPException(status_code=400, detail="请至少配置一个路径或一个存储挂载")
-    _validate_library_sources(db, req.paths, req.mount_ids)
+    if not is_cms:
+        if req.path_entries is not None:
+            paths_field, backends_field = _library_path_payload(db, req.path_entries)
+            req.paths = paths_field.split(",") if paths_field else []
+        if not req.paths and not req.mount_ids:
+            raise HTTPException(status_code=400, detail="请至少配置一个路径或一个存储挂载")
+        _validate_library_sources(db, req.paths, req.mount_ids)
     guid = uuid.uuid4().hex[:32]
     realm_id = req.realm_id or realms.active_realm_id(db)
     if not realms.get_realm(db, realm_id):
@@ -2197,9 +2314,9 @@ def create_library(req: LibraryCreate, staff: models.WebUser = Depends(require_s
             raise HTTPException(status_code=400, detail="这台节点属于另一个服，不能分配本服的媒体库")
     lib = em.Library(
         guid=guid, name=req.name, collection_type=req.collection_type,
-        paths=",".join(req.paths),
+        paths="" if is_cms else ",".join(req.paths),
         storage_backends=backends_field,
-        mount_ids=_mount_ids_field(db, req.mount_ids),
+        mount_ids="" if is_cms else _mount_ids_field(db, req.mount_ids),
         is_enabled=req.is_enabled,
         scrape_policy=normalize_scrape_policy(req.scrape_policy),
         account_115_id=req.account_115_id,
@@ -2209,11 +2326,17 @@ def create_library(req: LibraryCreate, staff: models.WebUser = Depends(require_s
         cover_auto_regen=bool(req.cover_auto_regen),
         incremental_scan=bool(req.incremental_scan),
         fs_watch=bool(req.fs_watch),
+        kind=kind,
+        upstream_source_ids=cms_source_field,
+        cms_type_map=cms_map_field,
+        cms_area_bucket=cms_bucket_field,
     )
     db.add(lib)
     db.flush()  # 落 id，供新表行引用
-    # 清单第 2 项：保存只写新表，旧列反向同步（双写期）
-    mount_sources.write_library_sources(db, lib, req.paths, req.mount_ids)
+    # 清单第 2 项：保存只写新表，旧列反向同步（双写期）。CMS 库没有
+    # 本地来源行可写，跳过。
+    if not is_cms:
+        mount_sources.write_library_sources(db, lib, req.paths, req.mount_ids)
     db.commit()
     db.refresh(lib)
     return {"success": True, "id": lib.id, "guid": lib.guid}
@@ -2319,6 +2442,36 @@ def update_library(lib_id: int, req: LibraryUpdate, staff: models.WebUser = Depe
     lib = db.query(em.Library).filter(em.Library.id == lib_id).first()
     if not lib:
         raise HTTPException(status_code=404, detail="媒体库不存在")
+    # 库类型与 CMS 来源（苹果 CMS 媒体库类型）：类型建库后不可更改
+    # （local 库的内容是扫出来的文件、CMS 库的内容是同步托管行，
+    # 互转等于让两套喂数机制对同一批行打架）；CMS 库没有本地路径/
+    # 挂载，传了直接 400；local 库不许配 CMS 来源/映射。
+    from backend.emby_server import applecms_library as cms_lib
+
+    lib_is_cms = cms_lib.is_applecms_library(lib)
+    if req.kind is not None and req.kind.strip().lower() != cms_lib.library_kind(lib):
+        raise HTTPException(status_code=400, detail="库类型在建库后不可更改")
+    if lib_is_cms:
+        if (req.path_entries is not None or req.paths is not None
+                or req.mount_ids is not None):
+            raise HTTPException(status_code=400,
+                                detail="苹果 CMS 库没有本地路径/挂载，内容由 CMS 同步维护")
+        if req.upstream_source_ids is not None:
+            lib.upstream_source_ids = _cms_source_ids_field(
+                db, req.upstream_source_ids)
+        if "cms_type_map" in req.model_fields_set:
+            lib.cms_type_map = cms_lib.format_cms_type_map(req.cms_type_map)
+        if "cms_area_bucket" in req.model_fields_set:
+            try:
+                lib.cms_area_bucket = cms_lib.format_cms_area_bucket(
+                    req.cms_area_bucket)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+    elif (req.upstream_source_ids is not None
+          or "cms_type_map" in req.model_fields_set
+          or "cms_area_bucket" in req.model_fields_set):
+        raise HTTPException(status_code=400,
+                            detail="只有苹果 CMS 库能配置 CMS 来源、分类映射与地区分流")
     if req.name is not None:
         lib.name = req.name
     if req.collection_type is not None:
@@ -2513,6 +2666,14 @@ async def scan_library_endpoint(lib_id: int, full: bool = False,
         # 后台线程用独立 Session（请求结束时请求级 Session 会被关闭，复用会导致
         # "transaction is closed" 与 SQLite 写锁冲突）——那一层现在在 scan_queue 里。
         result = scan_queue.enqueue(lib, trigger="manual", force_full=bool(full))
+        if result.get("skipped") == "applecms_library":
+            # 苹果 CMS 库不走本地扫描：如实告诉管理员内容归同步管，
+            # 不假装「已入队」（扫描隔离，见 scan_queue._applecms_skip_result）
+            return {"response": {
+                "success": True, "queued": False, "already": False,
+                "skipped": "applecms_library",
+                "message": "苹果 CMS 库不走本地扫描，内容由 CMS 同步维护",
+                "task": result["task"]}}
         task = result["task"]
         if not result["created"]:
             return {"response": {

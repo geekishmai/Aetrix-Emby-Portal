@@ -66,6 +66,17 @@ def section_mix(db) -> None:
     for kind, item_type, count in sorted(rows, key=lambda r: -r[2]):
         print(f"   {kind:<10}{(item_type or '未知'):<10}{count:>9}   {_pct(count, total)}")
     print(f"   {'合计':<20}{total:>9}")
+    # 软删行由 ORM 钩子排除（deleted_at IS NULL）。本合计仍含合并副本
+    # （merged_into_id 非空）。健康接口与 get_progress 再排除副本，数字会更小。
+    visible = (
+        db.query(func.count(em.MediaItem.id))
+        .filter(em.MediaItem.enrich_status.in_(PENDING_STATES),
+                em.MediaItem.merged_into_id.is_(None))
+        .scalar() or 0
+    )
+    print(f"   → 排除合并副本后（健康接口 / get_progress 口径）: {visible}")
+    if total != visible:
+        print(f"   → 差额 {total - visible} 是合并副本：worker 不认领，也不会被处理掉")
     mount_total = sum(r[2] for r in rows if r[0] == "mount://")
     print(f"   → 挂载占比 {_pct(mount_total, total).strip()}"
           f"{'（远程 I/O 是主因，处方 1+2+6 优先）' if mount_total * 2 > total else '（本机盘为主，处方 6+8+12 优先）'}")
@@ -112,6 +123,9 @@ def section_status(db, window_min: int) -> None:
         if status not in ("pending", "enriching", "done", "failed"):
             print(f"   {status:<12}{count:>9}   {_pct(count, total)}")
     print(f"   {'合计':<12}{total:>9}")
+    print("   口径：本段是全部 enrich_status 的合计（含 done/failed），不是积压。")
+    print("   ORM 自动排除软删；合并副本仍算在里面。健康接口只数 pending+enriching，")
+    print("   且排除 merged_into_id 非空。")
 
     window = datetime.now() - timedelta(minutes=max(1, window_min))
     recent = (db.query(func.count(em.MediaItem.id))

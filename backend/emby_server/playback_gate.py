@@ -1,14 +1,23 @@
-"""播放门禁（2026-10-26 用户亲定硬规矩，无开关、无例外）。
+"""播放门禁（2026-10-26 用户亲定硬规矩，无开关）。
 
 规矩：用户只有绑定了自己的网盘账号才能点播；没绑定的用户只能浏览
 片库、不能点播。管理员与普通用户一视同仁，不设豁免。
+
+2026-11-03 用户改定（「无界片库免绑定，本地库门禁照旧」）：无界
+（CMS 上游供源）片库的播放走上游线路直发，不过用户网盘、不耗共享
+盘配额，门禁的防风控理由不成立——条目所属库为 CMS 库时免绑定；
+本地/挂载库原样不变。判定只许走本模块的
+``binding_required_for_item`` / ``binding_required_for_upstream``
+单一入口，调用点不许各写一份；CMS 库的定义与媒体库体检同一份
+（``upstream_source_ids`` 经 ``applecms_library`` 解析后非空）。
 
 执行口径：
 - 只拦播放，不拦浏览：片库浏览、搜索、详情页一律不调本模块；本模块
   只在播放链接/变体下发处与直接流端点被调用。
 - 判定标准：请求播放的用户（WebUser.id）名下至少有一条 status 为
-  ``active`` 的用户存储绑定（drive / pan115 / quark 任一都算）。无绑定、或绑定
-  全是 invalid / expired，一律 403。
+  ``active`` 的用户存储绑定。2026-11-02 起夸克/115 用户绑定线已
+  下线，只认 drive 绑定（存量夸克/115 行视为不存在，见删除单）；
+  无 Drive 绑定、或绑定全是 invalid / expired，一律 403。
 - 只拦新下发的播放，不追溯已下发的链接：请求带有效的 play_sign 时，
   该签名本身就是 PlaybackInfo 门禁后下发的凭证（门禁上线前下发的在
   TTL 内自然过期），本次消费不拦截；无签名、签名无效、或走 Emby token
@@ -31,96 +40,98 @@ from backend.integrations import store
 # 被拦时返回给客户端的大白话（前端点播处据此展示去“我的”页绑定的引导）。
 GATE_MESSAGE = "请先绑定自己的网盘账号才能点播"
 
-#: 绑定门禁兜底开关（SystemConfig 键 + env 缺省）。
-#: 默认 1 = 保持 2026-10-26 的硬规矩；置 0 = 全站播放不再要求用户绑定
-#: （服务器统一供片模式的逃生舱）。SystemConfig 显式值优先于 env。
-KEY_PLAYBACK_REQUIRE_USER_BINDING = "playback_require_user_binding"
-ENV_PLAYBACK_REQUIRE_USER_BINDING = "EMBY_PLAYBACK_REQUIRE_USER_BINDING"
+# 名下存在已下线绑定（115 / 夸克存量行）的人被拦时的专用大白话：
+# 这批人不是“没绑”，是绑的线被下线了——必须明说已下线、改绑
+# Drive 才能播，不许与从未绑定的人混用上面那句笼统提示
+# （2026-11-03 存量收敛单；选文案仍在本模块单一入口里做）。
+GATE_MESSAGE_REMOVED_PROVIDER = (
+    "你之前绑定的 115 / 夸克网盘已下线，请改绑 Google Drive 才能点播")
 
 
-def binding_gate_enabled(db: Session) -> bool:
-    """绑定门是否启用（默认开）。
+def has_active_binding(db: Session, user_id: int) -> bool:
+    """该用户名下是否存在至少一条 active 的 Drive 用户存储绑定。
 
-    服务器统一提供挂载片源的部署可以把 ``playback_require_user_binding``
-    置 false（或 env ``EMBY_PLAYBACK_REQUIRE_USER_BINDING=0``）：播放不再
-    要求用户自备网盘账号。读失败按默认开处理（fail-closed，不因配置抖动
-    悄悄放开全站）。
+    只认 provider == "drive"（夸克/115 绑定线 2026-11-02 已下线，
+    存量行视为不存在）；只认本用户自己的行，绝不跨用户；
+    invalid / expired 行不算。
     """
-    default = "1" if env_int(ENV_PLAYBACK_REQUIRE_USER_BINDING, 1, 0, 1) else "0"
-    try:
-        raw = (store.get_value(
-            db, KEY_PLAYBACK_REQUIRE_USER_BINDING, default) or "").strip().lower()
-    except Exception:  # noqa: BLE001 — 读不到按默认（默认开）
-        return default == "1"
-    return raw not in ("0", "false", "no", "off")
+    return (
+        db.query(em.UserStorageBinding)
+        .filter(
+            em.UserStorageBinding.user_id == user_id,
+            em.UserStorageBinding.provider == "drive",
+            em.UserStorageBinding.status == "active",
+        )
+        .first()
+        is not None
+    )
 
 
-def is_server_mount_item(item) -> bool:
-    """条目是否来自服务器侧挂载（``mount://<id>/<rel>``）。
+def has_removed_provider_binding(db: Session, user_id: int) -> bool:
+    """该用户名下是否存在已下线 provider（115 / 夸克）的存量绑定行。
 
-    这类片源由服务端中继出流（凭据不下发），不需要用户自备网盘账号；
-    绑定门只对用户自备盘（``byos://`` / 用户副本）有意义。
+    不论行状态：active 是删线时未收敛的存量，expired / invalid 同样
+    说明此人绑过这两家——被门禁拦时据此出下线专用文案。provider
+    名单只认 ``user_bindings.REMOVED_PROVIDERS`` 一处（函数内懒引，
+    与本仓既有防循环口径一致）。
     """
-    return bool(item is not None
-                and mount_lib.is_mount_path(getattr(item, "file_path", "")))
+    from backend.emby_server.user_bindings import REMOVED_PROVIDERS
+
+    return (
+        db.query(em.UserStorageBinding)
+        .filter(
+            em.UserStorageBinding.user_id == user_id,
+            em.UserStorageBinding.provider.in_(REMOVED_PROVIDERS),
+        )
+        .first()
+        is not None
+    )
 
 
-def _item_is_user_owned(item) -> bool:
-    """条目是否来自用户自备盘（``byos://<binding_id>/...``）。
+def _library_is_cms(db: Session, library_id) -> bool:
+    """条目所属库是否为 CMS（无界）库。
 
-    这类条目的字节在用户自己的网盘里，必须用该用户的绑定凭据取流——
-    即使库行开了免绑定，也永远要求 active 绑定。
-    """
-    path = (getattr(item, "file_path", "") or "").strip()
-    return path.startswith("byos://")
-
-
-def _library_exempts_binding(db: Session, library_id) -> bool:
-    """库行是否显式免绑定（``no_binding_required``，默认关）。
-
-    与上游 #1797 的 ``binding_required_for_item`` 同一接口：上游把「CMS 库」
-    硬编码为免绑定，本 fork 把范围扩成「库行显式开关」，合并上游时只需在
-    ``binding_required_for_item`` 里保留上游的 CMS 分支（见注释）。
+    定义与媒体库体检（reachability）同一份：库行 ``upstream_source_ids``
+    经 ``applecms_library.parse_upstream_source_ids`` 解析后非空。
+    库 id 为空 / 查不到库行一律 False（归非 CMS，门禁照旧，fail-closed）。
     """
     if library_id is None:
         return False
-    try:
-        library = (db.query(em.Library)
-                   .filter(em.Library.id == int(library_id)).first())
-    except Exception:  # noqa: BLE001 — 查不到库按不免（fail-closed）
+    library = (
+        db.query(em.Library)
+        .filter(em.Library.id == library_id)
+        .first()
+    )
+    if library is None:
         return False
-    return bool(library is not None
-                and getattr(library, "no_binding_required", False))
+    from backend.emby_server import applecms_library as _cms_lib
+
+    return bool(_cms_lib.parse_upstream_source_ids(library))
 
 
 def binding_required_for_item(db: Session, item) -> bool:
-    """该条目的播放是否需要过绑定门禁（与上游 #1797 同名同签名）。
+    """该条目的播放是否需要过绑定门禁（按条目判定的单一入口）。
 
-    判定顺序：
-    1. 条目/库 id 缺失 → True（fail-closed）；
-    2. ``byos://`` 用户自备盘条目 → True（永远要求绑定）；
-    3. 库行 ``no_binding_required=True`` → False（服务端挂载库显式豁免）。
-
-    合并上游时：在上游版的基础上保留第 3 条即可；上游的
-    ``_library_is_cms`` 分支（``upstream_source_ids`` 非空 → 免绑定）应
-    一并保留，两者是「或」关系。
+    CMS 库条目 → False（免绑定）；其余 → True。条目为空、没挂库、
+    查不到库一律 True（fail-closed，照旧过门禁）。
     """
     if item is None:
         return True
     library_id = getattr(item, "library_id", None)
     if library_id is None:
         return True
-    if _item_is_user_owned(item):
-        return True
-    return not _library_exempts_binding(db, library_id)
+    return not _library_is_cms(db, library_id)
 
 
-def binding_required_for_upstream(db: Session, source_id,
-                                  upstream_item_id) -> bool:
+def binding_required_for_upstream(
+    db: Session, source_id, upstream_item_id
+) -> bool:
     """上游兜底口（按源 id + 上游条目 id 寻址）是否需要过绑定门禁。
 
-    与上游 #1797 同实现：经映射表反查本地条目，全部条目都免绑定才免；
-    查不到映射 / 条目已不存在 / 任一要求绑定 → True（fail-closed）。
+    兜底口没有本地条目 id 入参，经映射表反查本地条目再走
+    ``binding_required_for_item`` 同一判定：映射到的本地条目全部
+    属 CMS 库才免；查不到映射、映射条目已不存在、或任一映射条目
+    属本地库 → True（fail-closed）。
     """
     rows = (
         db.query(em.UpstreamItemMapping.local_item_id)
@@ -141,37 +152,6 @@ def binding_required_for_upstream(db: Session, source_id,
     if len(items) != len(item_ids):
         return True
     return any(binding_required_for_item(db, it) for it in items)
-
-
-def can_issue_play_sign(db: Session, user_id, item) -> bool:
-    """是否给该用户签发该条目的播放签名。
-
-    服务端挂载条目（或绑定门整体关闭）不需要绑定；其余仍要求 active 绑定。
-    """
-    if user_id is None:
-        return False
-    if not binding_required_for_item(db, item):
-        return True
-    if not binding_gate_enabled(db):
-        return True
-    return has_active_binding(db, user_id)
-
-
-def has_active_binding(db: Session, user_id: int) -> bool:
-    """该用户名下是否存在至少一条 active 的用户存储绑定。
-
-    不区分 provider（drive / pan115 / quark 任一都算）；只认本用户自己的行，
-    绝不跨用户；invalid / expired 行不算。
-    """
-    return (
-        db.query(em.UserStorageBinding)
-        .filter(
-            em.UserStorageBinding.user_id == user_id,
-            em.UserStorageBinding.status == "active",
-        )
-        .first()
-        is not None
-    )
 
 
 def _request_uses_issued_play_sign(request: Request, db: Session) -> bool:
@@ -239,7 +219,50 @@ def ensure_binding_playback_allowed(
     user_id = getattr(user, "id", None)
     if user_id is not None and has_active_binding(db, user_id):
         return
+    if user_id is not None and has_removed_provider_binding(db, user_id):
+        raise HTTPException(
+            status_code=403, detail=GATE_MESSAGE_REMOVED_PROVIDER)
     raise HTTPException(status_code=403, detail=GATE_MESSAGE)
+
+
+def ensure_binding_playback_allowed_for_item(
+    db: Session,
+    user: models.WebUser,
+    item,
+    request: Request | None = None,
+) -> None:
+    """按条目口径的播放门禁：CMS 库条目免绑定，其余与
+    ``ensure_binding_playback_allowed`` 逐字同口径（403 文案不变、
+    已下发签名消费不追溯）。"""
+    if not binding_required_for_item(db, item):
+        return
+    ensure_binding_playback_allowed(db, user, request)
+
+
+def ensure_binding_playback_allowed_for_upstream(
+    db: Session, user: models.WebUser, source_id, upstream_item_id
+) -> None:
+    """上游兜底口的播放门禁：映射全属 CMS 库条目时免绑定，其余与
+    ``ensure_binding_playback_allowed`` 同口径（兜底口无已下发链接
+    消费一说，不传 request）。"""
+    if not binding_required_for_upstream(db, source_id, upstream_item_id):
+        return
+    ensure_binding_playback_allowed(db, user)
+
+
+def sign_allowed_for_item(db: Session, user_id, item) -> bool:
+    """详情/清单面给该条目下发 play_sign 签名轨的判定（单一入口）。
+
+    播放签名是「已过门禁才下发」的凭证：已绑定用户恒可签；未绑定
+    用户只有条目免门禁（CMS 库）时可签——免门禁等价于已过门禁，
+    不签则直放详情源的客户端拿不到可用地址。user_id 为空恒 False
+    （与既有 ``bool(user_id)`` 前置同口径）。
+    """
+    if not user_id:
+        return False
+    if has_active_binding(db, user_id):
+        return True
+    return not binding_required_for_item(db, item)
 
 
 def raise_for_transfer_gate(gate_result) -> None:

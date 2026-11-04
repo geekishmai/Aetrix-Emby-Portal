@@ -102,11 +102,7 @@ def _copy_variant():
                            pickcode=None)
 
 
-def _v115(pickcode="pc115"):
-    return SimpleNamespace(id=10, owner_scope="user", owner_ref="7",
-                           variant_drive_id="pan115:user-7",
-                           variant_file_id="115fid", status="ready",
-                           pickcode=pickcode)
+
 
 
 def _gate_proceed(monkeypatch):
@@ -216,13 +212,6 @@ def _stream(monkeypatch, db, switch=None):
 
 def test_stream_quota_relay_success_streams(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: _v115())
-
-    def _no_115(db_, uid, pc, ua=""):
-        raise AssertionError("中继成功时不该再走 115")
-
-    monkeypatch.setattr(user_bindings, "resolve_user115_copy_url", _no_115)
     _token_ok(monkeypatch)
     record = {}
     monkeypatch.setattr(api, "serve_drive_relay_async", _relay_fake(
@@ -234,27 +223,11 @@ def test_stream_quota_relay_success_streams(db, monkeypatch):
     assert record["kwargs"]["access_token"] == USER_TOKEN
 
 
-def test_stream_quota_relay_403_falls_back_to_115(db, monkeypatch):
-    monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: _v115())
-    monkeypatch.setattr(user_bindings, "resolve_user115_copy_url",
-                        lambda db_, uid, pc, ua="": f"https://cdn.115.test/{pc}")
-    _token_ok(monkeypatch)
-    record = {}
-    monkeypatch.setattr(api, "serve_drive_relay_async", _relay_fake(
-        record, exc=HTTPException(status_code=403, detail="Forbidden")))
-    resp = _stream(monkeypatch, db)
-    assert resp.status_code == 302
-    assert resp.headers["location"] == "https://cdn.115.test/pc115"
-    assert SHARED_FID not in resp.headers["location"]
-    assert record["kwargs"]["access_token"] == USER_TOKEN
+
 
 
 def test_stream_quota_relay_403_no_115_409_verbatim(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _token_ok(monkeypatch)
     monkeypatch.setattr(api, "serve_drive_relay_async", _relay_fake(
         {}, exc=HTTPException(status_code=403, detail="Forbidden")))
@@ -266,8 +239,6 @@ def test_stream_quota_relay_403_no_115_409_verbatim(db, monkeypatch):
 
 def test_stream_quota_no_token_relay_not_attempted(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _token_missing(monkeypatch)
     record = {}
     monkeypatch.setattr(api, "serve_drive_relay_async", _relay_fake(
@@ -281,8 +252,6 @@ def test_stream_quota_no_token_relay_not_attempted(db, monkeypatch):
 
 def test_stream_quota_switch_off_no_relay(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _token_ok(monkeypatch)
     record = {}
     monkeypatch.setattr(api, "serve_drive_relay_async", _relay_fake(
@@ -326,8 +295,6 @@ def test_relay_leg_never_fetches_sa_token(db, monkeypatch):
     # 已把 drive_changes.get_token_for_drive 钉成 AssertionError——
     # access_token 腿若取 SA 令牌，本测试立刻红。
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _token_ok(monkeypatch)
     calls = []
     _stub_mount_relay(monkeypatch, calls)
@@ -341,8 +308,6 @@ def test_relay_leg_never_fetches_sa_token(db, monkeypatch):
 
 def test_relay_leg_upstream_403_single_attempt_then_409(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _token_ok(monkeypatch)
     calls = []
     _stub_mount_relay(monkeypatch, calls,
@@ -424,8 +389,6 @@ def _binding_absent(monkeypatch):
 
 def test_pi_quota_with_binding_keeps_stream_entry(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _binding_present(monkeypatch)
     resp = _pi(monkeypatch, db)
     _assert_pi_safe(resp)
@@ -439,8 +402,6 @@ def test_pi_quota_with_binding_keeps_stream_entry(db, monkeypatch):
 
 def test_pi_quota_no_binding_strips_as_before(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _binding_absent(monkeypatch)
     resp = _pi(monkeypatch, db)
     _assert_pi_safe(resp)
@@ -453,8 +414,6 @@ def test_pi_quota_no_binding_strips_as_before(db, monkeypatch):
 
 def test_pi_quota_switch_off_with_binding_strips(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota", lambda u, f: "quota")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _binding_present(monkeypatch)
     resp = _pi(monkeypatch, db, switch="false")
     _assert_pi_safe(resp)

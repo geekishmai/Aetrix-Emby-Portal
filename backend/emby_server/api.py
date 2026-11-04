@@ -710,9 +710,23 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
         except Exception as exc:  # noqa: BLE001
             logger.warning("详情 MediaSource 用户查询失败 user_id=%s: %s",
                            user_id, exc)
-        dto["MediaSources"] = [_media_source(item, base, api_key, db, auth_qs,
-                                             synthesize=True, user=_src_user)]
-        dto["MediaSourceCount"] = 1
+        # 托管行（movie/episode 且无 file_path）：没有本地文件，
+        # _media_source 拼出的本地源是空壳——无文件、无流信息、按其
+        # Id 走通用 /stream 必失败，下发到详情面会被客户端渲染成一条
+        # 不可用来源（2026-11-02 Rex 实证：一红一绿）。与 PlaybackInfo
+        # 托管分支（_upstream_only_media_sources）同口径：托管行不放
+        # 本地空壳，MediaSources 只由下方上游线路组成，无可展示线路
+        # 时为空列表；有 file_path 的本地条目与容器类维持原口径。
+        _hosted_row = (item.item_type in ("movie", "episode")
+                       and not item.file_path)
+        if _hosted_row:
+            dto["MediaSources"] = []
+            dto["MediaSourceCount"] = 0
+        else:
+            dto["MediaSources"] = [_media_source(
+                item, base, api_key, db, auth_qs,
+                synthesize=True, user=_src_user)]
+            dto["MediaSourceCount"] = 1
         # 详情源补「回本服务取流」地址（甲方案）：此前详情 MediaSource
         # 申报 SupportsDirectPlay=True 却不带任何地址，不走 PlaybackInfo、
         # 直放详情源的播放器（如 SenPlayer 关掉「始终播放原始路径」时）
@@ -733,22 +747,30 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
                 with_sign=_gate_mod.can_issue_play_sign(db, user_id, item))
             dto["MediaSources"][0]["DirectPlayUrl"] = _detail_url
             dto["MediaSources"][0]["DirectStreamUrl"] = _detail_url
-        # 详情页「上游」线路（U-02）：本地条目有可展示的上游映射时，
-        # 来源列表末尾追加一条上游线路（开关关/无映射/源停用则不出现）。
-        # 与主源同一签名口径：签名轨只给已有 active 绑定的用户；
+        # 详情页「上游」线路（U-02）：有可展示的上游映射时，
+        # 来源列表追加上游线路（开关关/无映射/源停用则不出现）；
+        # 本地条目排在主源之后，托管行（无本地主源）线路即全部
+        # 来源、base_source 传 None 走合成口径（与 PlaybackInfo
+        # 托管分支一致）。
+        # 签名轨判定走 playback_gate.sign_allowed_for_item 单一入口：
+        # 已绑定恒签；未绑定只有条目免门禁（无界/CMS 库，2026-11-03
+        # 改定）时才签，本地条目未绑定仍不给签（与此前口径一致）。
         # 线路地址只回本服务取流口，(source_id, upstream_item_id)
         # 不下发，点播时取流口现查映射复验。
         # 进库一期（2026-11-01）：不再要求 file_path——上游托管行没有
         # 本地文件，有映射即可挂线路（本地主源的 DirectPlayUrl 仍只给
         # 有 file_path 的条目，见上方）；有映射与否由
         # _upstream_line_media_source 内的 get_displayable_mapping 裁决。
-        if (dto["MediaSources"] and item.item_type in ("movie", "episode")):
+        if item.item_type in ("movie", "episode"):
             from backend.emby_server import playback_gate as _gate_mod
-            _up_line = _upstream_line_media_source(
-                item, dto["MediaSources"][0], base, user_id, db, api_key,
-                with_sign=_gate_mod.can_issue_play_sign(db, user_id, item))
-            if _up_line is not None:
-                dto["MediaSources"].append(_up_line)
+            _up_lines = _upstream_line_media_sources(
+                item,
+                dto["MediaSources"][0] if dto["MediaSources"] else None,
+                base, user_id, db, api_key,
+                with_sign=_gate_mod.sign_allowed_for_item(
+                    db, user_id, item))
+            if _up_lines:
+                dto["MediaSources"].extend(_up_lines)
                 dto["MediaSourceCount"] = len(dto["MediaSources"])
         # 片头片尾标记 → Chapters：复用 MediaSource 里已算好的（_chapters_for_item
         # 同一套口径），不重复跑两次 intro 管道
@@ -1231,6 +1253,20 @@ def _is_user_drive_copy_variant(variant) -> bool:
     return drive_id.startswith("userdrive:")
 
 
+def _is_non_drive_variant(variant) -> bool:
+    """变体行是否为非 Drive 落盘（夸克 / 115 副本）。
+
+    这类行的 variant_file_id 是别家网盘的 fid：喂给 Google
+    files.get / usercontent 只会得 404 还原样出门（2026-11-02
+    user 829 播夸克 ready 副本实锤），Drive 各出口一律先挡。
+    """
+    if variant is None:
+        return False
+    drive_id = str(getattr(variant, "variant_drive_id", "") or "")
+    return drive_id.startswith("quark:") or \
+        drive_id.startswith("pan115:")
+
+
 def _apply_usercopy_direct(db, user, source, file_id) -> bool:
     """用户副本直链：免凭证 usercontent 地址 + 空头。
 
@@ -1402,11 +1438,15 @@ def _signed_local_stream_url(item, base: str, user_id, db,
 
 
 def _signed_upstream_line_url(item, base: str, user_id, db,
-                              api_key: str = "", with_sign: bool = True):
+                              api_key: str = "", with_sign: bool = True,
+                              mapping_id=None):
     """详情页「上游」线路的本站取流地址（U-02，与 _signed_local_stream_url 同口径）。
 
     地址只带本地条目 guid：/emby/Videos/{guid}/upstream/stream，
-    MediaSourceId={guid}:upstream 与来源列表里的线路 Id 对应。
+    MediaSourceId={guid}:upstream:{mapping_id} 与来源列表里的线路
+    Id 对应——点哪条取流口就定向解析哪条映射（选错硬报错、不换
+    线，见 upstream_playback.resolve_mapped_upstream_stream）。
+    mapping_id=None 时保持旧形态 {guid}:upstream（最佳映射口径）。
     (source_id, upstream_item_id) 永不下发——点播时取流口按本地条目
     现查映射复验（见 upstream_item_stream）。签名不另起签发点：
     向唯一构造点 _signed_local_stream_url 借同一 (uid, guid) 的
@@ -1423,41 +1463,119 @@ def _signed_upstream_line_url(item, base: str, user_id, db,
             item, base, user_id, db, api_key, with_sign=True)
         signed_qs = f"&uid={user_id}&exp={play_exp}&sign={play_sig}"
     key_qs = f"&api_key={api_key}" if api_key else ""
+    msid = (f"{item.guid}:upstream:{mapping_id}" if mapping_id is not None
+            else f"{item.guid}:upstream")
     url = (f"{base}/emby/Videos/{item.guid}/upstream/stream"
-           f"?MediaSourceId={item.guid}:upstream{key_qs}{signed_qs}")
+           f"?MediaSourceId={msid}{key_qs}{signed_qs}")
     return url, play_exp, play_sig
 
 
-def _upstream_line_media_source(item, base_source: dict, base: str, user_id,
-                                db, api_key: str = "",
-                                with_sign: bool = True):
-    """详情/PlaybackInfo 来源列表的上游线路 MediaSource（U-02）。
+def _synthetic_cms_base_source(item, mapping, base: str,
+                               api_key: str = "", db=None) -> dict:
+    """CMS 托管行线路的合成基础源：本地行空壳 + 画质缓存叠加。
 
-    本地条目有可展示的上游映射（开关开、映射命中、源存在且启用，
-    见 upstream_playback.get_displayable_mapping）时返回一条深拷贝
-    基础源改写的线路 dict，否则返回 None。线路排在既有来源之后：
-    Id={guid}:upstream、Name={条目名} · 上游 · {源名}（与既有变体行
-    「名 · 标签」同形）、Protocol=Http/IsRemote=True（字节在上游那侧）、
-    只报直放/直流（上游取流口 302 到上游直链，我方不转码）。
+    CMS 行没有本地文件、参数也不现查 CMS 接口（detail 只在点播
+    取流时现取）：先用本地行数据走 _media_source 拼同形空壳，再把
+    取流路径回填的画质缓存（m3u8 主清单解析出的宽高/范围、
+    备注画质标记，见 upstream_playback.read_cms_quality）叠成
+    一条视频轨摘要；缓存带 media playlist 分段时长
+    （duration_sec）且本地行时长为空时，再用它填 RunTimeTicks。
+    没缓存时除空壳外再补一条无参数的视频轨占位（见函数尾）：
+    零轨道的 MediaSource 会被按媒体规格选源的三方客户端判为
+    不可用（2026-11-03 Reflix 实证），不再只是「展示粗糙」。
+    Size 永远不报：m3u8 推不出文件大小，不编造。画质缓存里的
+    BANDWIDTH 同理只是主清单的模板声明，不当真实码率下发。
     """
     from backend.emby_server import upstream_playback as _up
-    if db is None or not _up.detail_line_enabled(db):
-        return None
-    found = _up.get_displayable_mapping(db, item.id)
-    if found is None:
-        return None
-    _mapping, source = found
-    if base_source is None:
+    dto = _media_source(item, base, api_key, db, synthesize=True)
+    cached = _up.read_cms_quality(mapping.id) or {}
+    width = cached.get("width") or 0
+    height = cached.get("height") or 0
+    duration_sec = cached.get("duration_sec") or 0
+    if duration_sec and not dto.get("RunTimeTicks"):
+        # 本地行时长为空时用分段时长求和回填（ticks 口径与
+        # _run_time_ticks 一致）；本地已有真实时长时不覆盖。
+        try:
+            dto["RunTimeTicks"] = int(float(duration_sec) * TICKS)
+        except (TypeError, ValueError):
+            pass
+    if width or height:
+        video = {
+            "Index": 0, "Type": "Video",
+            "Width": width or None, "Height": height or None,
+            "VideoRange": cached.get("video_range") or None,
+            "DisplayTitle": cached.get("label") or None,
+            "IsDefault": True, "IsForced": False, "IsExternal": False,
+        }
+        rest = [s for s in dto["MediaStreams"]
+                if (s.get("Type") or "").lower() != "video"]
+        dto["MediaStreams"] = [_strip_nulls(video)] + rest
+        dto["DefaultAudioStreamIndex"] = _default_audio_stream_index(
+            dto["MediaStreams"])
+    if not any((s.get("Type") or "").lower() == "video"
+               for s in dto["MediaStreams"]):
+        # 无画质缓存（或缓存只有带宽/时长、没宽高）时补一条视频轨
+        # 占位：Emby 官方形态里 MediaSource 恒带视频轨，按媒体
+        # 规格选源的三方聚合客户端（Reflix 类）会把零轨道的源
+        # 直接判为不可用、报「没有可用的源」（2026-11-03 实证：
+        # 同一片有缓存的线路带真实视频轨、无缓存线路零轨道）。
+        # 占位只报结构事实（这是一条视频线路、默认轨），codec /
+        # 宽高 / 码率一律不编造——真值等取流回填画质缓存后走
+        # 上面的叠加分支替换本占位。
+        used = {s.get("Index") for s in dto["MediaStreams"]}
+        index = 0
+        while index in used:
+            index += 1
+        dto["MediaStreams"] = [{
+            "Index": index, "Type": "Video",
+            "IsDefault": True, "IsForced": False, "IsExternal": False,
+        }] + dto["MediaStreams"]
+    return dto
+
+
+def _upstream_line_for_mapping(item, mapping, source, base_source,
+                               base: str, user_id, db, api_key: str,
+                               with_sign: bool) -> dict:
+    """一条映射 = 一条上游线路 MediaSource（U-02 多线形态）。
+
+    Id={guid}:upstream:{mapping_id}、取流地址带同一 MediaSourceId
+    ——点哪条、取流口定向解析哪条。Name 纯画质标（站主
+    2026-11-02 亲定，不带源名/片名）：
+
+    - 有本地基础源（本地条目挂的上游线路）：沿 U-02 深拷贝口径
+      与主源同形，Name 用条目自身画质标（与主源一致）；
+    - 托管行 + Emby 型源：现查参数的轨道摘要拼标（见
+      _synthetic_upstream_base_source），查不到回落条目名；
+    - 托管行 + CMS 源：画质缓存里的标签（取流回填），没缓存
+      回落条目名（Emby 默认形态，不拿源名凑数）。
+
+    Protocol=Http/IsRemote=True（字节在上游那侧）、只报直放/直流
+    （上游取流口 302 到上游直链，我方不转码）。
+    """
+    from backend.emby_server import quality_label as ql
+    from backend.emby_server import upstream_playback as _up
+    if base_source is not None:
+        line = copy.deepcopy(base_source)
+        name = _quality_name_for_item(item)
+    elif getattr(source, "source_type", None) == "applecms":
+        line = _synthetic_cms_base_source(item, mapping, base, api_key, db)
+        cached = _up.read_cms_quality(mapping.id) or {}
+        name = (cached.get("label")
+                or ql.label_from_streams(line.get("MediaStreams"))
+                or item.name)
+    else:
         # 无本地源（上游托管行，进库一期）：合成基础源——本地行数据
         # 打底、媒体参数现查上游补强（见 _synthetic_upstream_base_source）。
-        base_source = _synthetic_upstream_base_source(
-            item, _mapping, source, base, api_key, db)
-    line = copy.deepcopy(base_source)
+        line = _synthetic_upstream_base_source(
+            item, mapping, source, base, api_key, db)
+        name = (ql.label_from_streams(line.get("MediaStreams"))
+                or item.name)
     url, _exp, _sig = _signed_upstream_line_url(
-        item, base, user_id, db, api_key, with_sign=with_sign)
+        item, base, user_id, db, api_key, with_sign=with_sign,
+        mapping_id=mapping.id)
     line.update({
-        "Id": f"{item.guid}:upstream",
-        "Name": f"{item.name} · 上游 · {source.name}",
+        "Id": f"{item.guid}:upstream:{mapping.id}",
+        "Name": name,
         "Path": None,
         "Protocol": "Http",
         "IsRemote": True,
@@ -1469,6 +1587,34 @@ def _upstream_line_media_source(item, base_source: dict, base: str, user_id,
     })
     line.pop("TranscodingUrl", None)
     return line
+
+
+def _upstream_line_media_sources(item, base_source, base: str, user_id,
+                                 db, api_key: str = "",
+                                 with_sign: bool = True) -> list:
+    """详情/PlaybackInfo 来源列表的上游线路（全部可展示映射各一条）。
+
+    开关关/无可展示映射返回空列表。线路排在既有来源之后，偏好序
+    与 get_best_mapping 一致（最佳在前）。
+    """
+    from backend.emby_server import upstream_playback as _up
+    if db is None or not _up.detail_line_enabled(db):
+        return []
+    return [
+        _upstream_line_for_mapping(
+            item, mapping, source, base_source, base, user_id, db,
+            api_key, with_sign)
+        for mapping, source in _up.get_displayable_mappings(db, item.id)
+    ]
+
+
+def _upstream_line_media_source(item, base_source: dict, base: str, user_id,
+                                db, api_key: str = "",
+                                with_sign: bool = True):
+    """单条口径兼容包装：返回最佳一条线路或 None（新代码用复数版）。"""
+    lines = _upstream_line_media_sources(
+        item, base_source, base, user_id, db, api_key, with_sign)
+    return lines[0] if lines else None
 
 
 def _synthetic_upstream_base_source(item, mapping, source, base: str,
@@ -1504,15 +1650,35 @@ def _synthetic_upstream_base_source(item, mapping, source, base: str,
     return dto
 
 
-def _upstream_only_media_source(db, item, request, user):
-    """PlaybackInfo 托管行专用：只组装上游线路一条源（同步，run_db 内跑）。
+def _upstream_only_media_sources(db, item, request, user):
+    """PlaybackInfo 托管行专用：组装全部上游线路源（同步，run_db 内跑）。
 
     签名轨与主流程同口径恒签（PlaybackInfo 入口已过付费墙与绑定
-    门禁）；无可展示映射返回 None，调用方回空源（原口径）。
+    门禁）；无可展示映射返回空列表，调用方回空源（原口径）。
     """
     base = _base_url(request)
-    return _upstream_line_media_source(
+    return _upstream_line_media_sources(
         item, None, base, user.id if user else None, db, "", True)
+
+
+def _quality_name_for_item(item: em.MediaItem) -> str:
+    """MediaSource.Name 的画质口径（站主 2026-11-02 亲定）。
+
+    纯画质标签（探测宽高/video_range 优先、文件名解析补缺，见
+    quality_label）；判不出回落条目名——Emby 默认形态，不许拿
+    片名以外的信息凑数。播放器来源卡的标题与分辨率页签都吃这个
+    字段：下发片名时卡片只剩「文件」、落进「其他」页签（用户
+    2026-11-02 截图实证）。
+    """
+    from backend.emby_server import quality_label as ql
+    video_range = None
+    for s in (item.streams or []):
+        if (s.stream_type or "").lower() == "video":
+            video_range = s.video_range
+            break
+    label = ql.label_for(item.width, item.height, video_range,
+                       item.file_path)
+    return label or item.name
 
 
 def _media_source(item: em.MediaItem, base: str, api_key: str = "", db: Session = None,
@@ -1523,7 +1689,7 @@ def _media_source(item: em.MediaItem, base: str, api_key: str = "", db: Session 
     _supports_transcoding = False
     dto = {
         "Id": item.guid,
-        "Name": item.name,
+        "Name": _quality_name_for_item(item),
         # 隐藏时置 None，由下面的 _strip_nulls 整个去掉（官方 Path 可空，客户端兼容）
         "Path": None if hide_media_path() else item.file_path,
         "Protocol": "File",
@@ -2328,13 +2494,19 @@ def user_views(user_id: str, user: models.WebUser = Depends(get_emby_user),
         if is_virtual and not virtual_on:
             continue
         # 媒体库封面：有 cover_path 才给 Primary 标记，客户端才会去拉 /Images/Primary。
-        # 虚拟库无 cover_path 时派生封面（借代表海报 / 回退首个有海报成员 /
-        # SVG 占位），走同一 Primary 口径；真实库与已有显式封面的虚拟库
-        # 逻辑逐字不动（primary_aspect 对真实库恒等于旧的 cover_path 条件）。
+        # 虚拟库与 CMS 库（kind=applecms）无 cover_path 时派生封面（借代表
+        # 海报 / 回退首个有海报成员 / SVG 占位），走同一 Primary 口径；
+        # 真实库与已有显式封面的库逻辑逐字不动（primary_aspect 对真实库
+        # 恒等于旧的 cover_path 条件）。
         cover_path = getattr(lib, "cover_path", None)
         primary_aspect = 0.6666667 if cover_path else None
-        if is_virtual and not cover_path:
-            _derived = library_covers.resolve_virtual_library_cover(db, lib)
+        _is_cms = library_covers.is_applecms_library(lib)
+        if not cover_path and (is_virtual or _is_cms):
+            _derived = (
+                library_covers.resolve_virtual_library_cover(db, lib)
+                if is_virtual
+                else library_covers.resolve_cms_library_cover(db, lib)
+            )
             if _derived["source"] in ("borrow", "fallback"):
                 cover_tag = _derived["tag"]
                 image_tags = {"Primary": cover_tag}
@@ -2403,6 +2575,57 @@ def user_views(user_id: str, user: models.WebUser = Depends(get_emby_user),
     return {"Items": items, "TotalRecordCount": len(items), "StartIndex": 0}
 
 
+def _request_wants_media_sources(request: Request) -> bool:
+    """列表请求是否在 Fields 里明确要 MediaSources / MediaStreams。
+
+    官方 Emby 口径：列表 DTO 的 MediaSources 只在客户端用 Fields
+    明确请求时才填充，未请求时为空（本服务一直如此）。判读与
+    选集接口的既有 Fields 口径一致（逗号分隔、大小写不敏感）。
+    """
+    raw = request.query_params.get("Fields") or ""
+    fields = {f.strip().lower() for f in raw.split(",")}
+    return "mediasources" in fields or "mediastreams" in fields
+
+
+def _fill_list_media_sources(result: dict, user: models.WebUser,
+                             db: Session, base: str) -> None:
+    """按详情面同口径给列表 DTO 补 MediaSources（仅 Fields 明确请求时）。
+
+    背景（2026-11-03 Reflix 实证）：我方列表 DTO 此前无视 Fields、
+    MediaSources 恒为 []，而真实 Emby 被明确要求时会带上来源；
+    部分三方客户端（如 Reflix）详情页只凭列表 DTO＋PlaybackInfo
+    判源，列表面空来源直接判「没有可用的源」、连 stream 都不发。
+    补齐方式不另起一套：按 guid 取回本页条目，逐条走详情 DTO
+    （``_item_dto(full=True)``）取其 MediaSources 填回——托管行只放
+    上游线路、本地行走既有本地源＋线路追加，签名轨与详情面完全
+    一致。只处理 movie/episode（容器类无播放源）；未请求 Fields
+    的列表不进本函数、行为逐字不变（不给海报墙等列表加成本）。
+    单条补齐失败只跳过该条，不许拖垮列表本体。
+    """
+    dtos = result.get("Items") or []
+    if not dtos:
+        return
+    guids = [d.get("Id") for d in dtos if d.get("Id")]
+    if not guids:
+        return
+    rows = (db.query(em.MediaItem)
+            .filter(em.MediaItem.guid.in_(guids)).all())
+    by_guid = {r.guid: r for r in rows}
+    for dto in dtos:
+        row = by_guid.get(dto.get("Id"))
+        if row is None or row.item_type not in ("movie", "episode"):
+            continue
+        try:
+            full = _item_dto(row, base, user.id, db, full=True)
+        except Exception as exc:  # noqa: BLE001 — 单条补齐失败不拖垮列表
+            logger.warning("列表 MediaSources 补齐失败 item=%s: %s",
+                           row.id, exc)
+            continue
+        sources = full.get("MediaSources") or []
+        dto["MediaSources"] = sources
+        dto["MediaSourceCount"] = len(sources)
+
+
 @json_route(emby_router, "/emby/Users/{user_id}/Items", "/Users/{user_id}/Items", "/emby/Items", "/Items")
 def get_items(
     request: Request,
@@ -2410,6 +2633,14 @@ def get_items(
     db: Session = Depends(get_db),
 ):
     result = _query_items(request, user, db, _base_url(request))
+    # Fields 明确要 MediaSources/MediaStreams 时按详情面同口径补齐
+    # （官方 Emby 口径；未请求时列表行为逐字不变）。补齐失败不许
+    # 拖垮列表本体——列表可用性优先于字段完整性。
+    if _request_wants_media_sources(request):
+        try:
+            _fill_list_media_sources(result, user, db, _base_url(request))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("列表 MediaSources 补齐整体失败: %s", exc)
     # 首次播放预热：恰好一条 Ids 是点名直达（点播前常走这条而不是详情路由），
     # 后台暖这一条。否则才用 ParentId 暖父级第一集未看（最多 1 条，响应不动；
     # ParentId 为库 guid 或查不到时线程内空转）。两条不叠加，避免一次列表打两次谷歌。
@@ -5687,9 +5918,10 @@ async def playback_info(
     await run_db(ensure_playback_allowed, db, user)
     # 播放门禁（2026-10-26 用户亲定硬规矩，无开关）：名下无 active 绑定
     # 的用户不发放播放地址；浏览、搜索、详情页不受影响（本函数只管下发）。
+    # 2026-11-03 改定：无界（CMS）库条目免绑定，判定走 playback_gate
+    # 的 binding_required_for_item 单一入口（本地/挂载库原样）。
     from backend.emby_server import playback_gate as _gate
-    # item 传入：服务端挂载（mount://）条目由服务端中继出流，不需要用户绑定。
-    await run_db(_gate.ensure_binding_playback_allowed, db, user, None, item)
+    await run_db(_gate.ensure_binding_playback_allowed_for_item, db, user, item)
     _pt.mark("auth")
     # 按需媒体信息探测：远程文件缺 codec 时入队，后台限流探测，不阻塞播放（v2.51.0）
     try:
@@ -5722,12 +5954,12 @@ async def playback_info(
             # 口径不变。无映射仍回空源（原口径）。
             if item.item_type in ("movie", "episode"):
                 _up_only = await run_db(
-                    _upstream_only_media_source, db, item, request, user)
-                if _up_only is not None:
+                    _upstream_only_media_sources, db, item, request, user)
+                if _up_only:
                     _pt.mark("upstream_only_source")
                     _pt.done()
                     return _strip_nulls({
-                        "MediaSources": [_up_only],
+                        "MediaSources": _up_only,
                         "PlaySessionId": secrets.token_hex(8),
                         "ErrorCode": None,
                     })
@@ -5742,13 +5974,13 @@ async def playback_info(
                     _resolve_hosted_series_episode, db, user, item)
                 if _hosted_episode is not None:
                     _up_only = await run_db(
-                        _upstream_only_media_source, db,
+                        _upstream_only_media_sources, db,
                         _hosted_episode, request, user)
-                    if _up_only is not None:
+                    if _up_only:
                         _pt.mark("upstream_only_source_hosted_series")
                         _pt.done()
                         return _strip_nulls({
-                            "MediaSources": [_up_only],
+                            "MediaSources": _up_only,
                             "PlaySessionId": secrets.token_hex(8),
                             "ErrorCode": None,
                         })
@@ -5767,12 +5999,17 @@ async def playback_info(
             "剧级点播落集 series=%s -> episode=%s user=%s",
             item.guid, _series_episode.guid, user.id)
         item = _series_episode
-    # 播放交付编排器预计算（换代线 step 5）：计划缺失/过期时顺手
-    # 算一份落库（探针全 fail-open），点播热路径只读计划；本处
-    # 失败只记日志，绝不影响本次 PlaybackInfo。
+    # 播放交付编排器预计算（换代线 step 5，起播优化件二）：
+    # 原先这里同步跑 ensure_plan，计划缺失/过期时现算 build
+    # （探针串行 3–5.7 秒，2026-11-02 起播分析实测），而本次
+    # PlaybackInfo 根本不消费其返回值——纯粹是搭在关键路径上
+    # 的预热写操作。改成后台线程建计划（spawn_ensure_plan，
+    # 线程内自开会话、同键在途去重），本次请求不再等 build；
+    # 计划的消费方（video_stream 只读、转存完成刷新）逐字不变。
+    # 启动失败只记日志，绝不影响本次 PlaybackInfo。
     try:
         from backend.emby_server import delivery_plan as _dp
-        await run_db(_dp.ensure_plan, db, user, item)
+        _dp.spawn_ensure_plan(user.id, item.id)
     except Exception:  # noqa: BLE001 — 预计算失败不影响本次播放
         logger.warning("交付计划预计算失败 item=%s",
                        getattr(item, "id", "?"), exc_info=True)
@@ -6076,8 +6313,7 @@ async def playback_info(
                                     _ub_alt.get_active_binding,
                                     db, user.id, _ub_alt.PROVIDER_DRIVE) \
                                     is not None
-                            _v115 = await run_db(_tv_alt.ready_user115_variant,
-                                                 db, item.id, user.id)
+                            _v115 = None  # 115 绑盘线已删；ready_user115_variant 一期已恒 None
                             if _v115 is None and not _keep_stream_q:
                                 for _s in sources:
                                     for _k in ("DirectPlayUrl", "DirectStreamUrl",
@@ -6189,11 +6425,11 @@ async def playback_info(
     # PlaybackInfo 入口已过播放门禁，签名按主源同口径恒签。
     if sources and not _pi_quota_error:
         try:
-            _up_line = await run_db(
-                _upstream_line_media_source, item, sources[0], base,
+            _up_lines = await run_db(
+                _upstream_line_media_sources, item, sources[0], base,
                 user.id, db, api_key, True)
-            if _up_line is not None:
-                sources.append(_up_line)
+            if _up_lines:
+                sources.extend(_up_lines)
         except Exception as exc:  # noqa: BLE001 — 线路组装失败不打挂主响应
             logger.warning("上游线路组装失败 item=%s: %s", item.id, exc)
     _playback_variants = None
@@ -6416,8 +6652,8 @@ async def video_stream(
     # 首播转存门禁（2026-10-26 用户亲定“先转存再播”）：绑定用户只走
     # 自己绑定盘里的副本，无副本先转存、转完再播，绝不静默回落共享
     # SA 中继。门禁在选路之后、阶段 6 换线之前：Drive 就绪副本已由
-    # 选路解析到（proceed 直接走副本）；115 就绪副本走用户 Cookie
-    # 现签 302（serve_115_copy）；准备中/失败报 409/503，不改走别的路。
+    # 选路解析到（proceed 直接走副本）；准备中/失败报 409/503，
+    # 不改走别的路。
     # 显式 byos 变体（用户已显式选自己盘）跳过门禁，不二次拦；
     # 已下发链接消费不追溯（与 #1341 绑定门禁同一口径）。
     # 绑定用户正在啃共享原件时，Quota 额度页不换下一个 SA。
@@ -6455,118 +6691,6 @@ async def video_stream(
             _transfer_gate = await _tv.wait_for_transfer_ready(
                 _transfer_gate, _re_gate)
             _gate_verdict = (_transfer_gate or {}).get("verdict")
-        if _gate_verdict == "serve_115_copy":
-            _variant115 = (_transfer_gate or {}).get("variant")
-            _pickcode115 = (getattr(_variant115, "pickcode", "")
-                            or "").strip()
-            if not _pickcode115:
-                raise HTTPException(
-                    status_code=409,
-                    detail="115 用户副本已就绪但无 pickcode，无法取下载地址")
-            from backend.emby_server import user_bindings as _ub115
-            _byos_t0 = time.perf_counter()
-            try:
-                _url115 = await run_db(
-                    _ub115.resolve_user115_copy_url, db,
-                    getattr(user, "id", None), _pickcode115,
-                    request.headers.get("user-agent") or "")
-            except _ub115.BindingError as exc:
-                _note_play_start_safe(
-                    item, user_id=getattr(user, "id", None),
-                    method="transfer115_copy",
-                    variant=play_variants.BYOS115_DIRECT,
-                    result="error", error_kind=exc.kind,
-                    resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-                _detail = exc.message if exc.kind in (
-                    "auth_error", "expired", "throttled", "size_limit") else \
-                    "播放变体当前不可用：transfer115_copy"
-                raise HTTPException(status_code=409, detail=_detail) from exc
-            _note_play_start_safe(
-                item, user_id=getattr(user, "id", None),
-                method="transfer115_copy",
-                variant=play_variants.BYOS115_DIRECT,
-                result="ok",
-                resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-            _alive115 = await run_db(
-                _ub115.check_115_download_alive, _url115,
-                request.headers.get("user-agent") or "")
-            if _alive115 == "dead":
-                # 死链不 302：播放器跟随 302 只会撞 404。记一 strike、
-                # 预算内重建一单，409 明示正在重新转存；预算耗尽时
-                # 明示上限，不谎称正在转存。
-                await run_db(_tv.mark_variant_stale_once, db,
-                             getattr(_variant115, "id", None))
-                _rebuilt115 = await run_db(
-                    _tv.rebuild_dead_user115_copy, db, item,
-                    getattr(user, "id", None))
-                _note_play_start_safe(
-                    item, user_id=getattr(user, "id", None),
-                    method="transfer115_copy",
-                    variant=play_variants.BYOS115_DIRECT,
-                    result="error", error_kind="115_copy_dead")
-                if (_rebuilt115 or {}).get("reason") == "throttled":
-                    raise HTTPException(
-                        status_code=409,
-                        detail="115 副本已失效，重新转存已达 24 小时上限，"
-                               "请稍后重试")
-                raise HTTPException(
-                    status_code=409,
-                    detail="115 副本已失效，正在重新转存")
-            return _observe_traffic(
-                RedirectResponse(_url115, status_code=302,
-                                 headers=_strategy.DIRECT_REDIRECT_HEADERS))
-        if _gate_verdict == "serve_quark_copy":
-            _variantq = (_transfer_gate or {}).get("variant")
-            _fidq = (getattr(_variantq, "variant_file_id", "")
-                     or "").strip()
-            if not _fidq:
-                raise HTTPException(
-                    status_code=409,
-                    detail="夸克用户副本已就绪但缺少文件标识，无法取流")
-            # 开关在出流端再复核一遍：门禁判 ready 之后管理员关掉
-            # 开关，本次也不许放行夸克副本（更不许回落共享）。
-            if not await run_db(_tv.quark_play_enabled, db):
-                raise HTTPException(
-                    status_code=503,
-                    detail="夸克点播已被管理员关闭，不走共享播放")
-            from backend.emby_server import user_bindings as _ubq
-            from backend.emby_server import quarkdrive as _qd
-            from backend.emby_server.streaming import \
-                serve_mount_relay_async as _relay_async
-            _byos_t0q = time.perf_counter()
-            try:
-                _urlq, _cookieq = await run_db(
-                    _ubq.resolve_user_quark_copy_url, db,
-                    getattr(user, "id", None), _fidq)
-            except _ubq.BindingError as exc:
-                _note_play_start_safe(
-                    item, user_id=getattr(user, "id", None),
-                    method="transfer_quark_relay",
-                    variant=play_variants.BYOS_QUARK_RELAY,
-                    result="error", error_kind=exc.kind,
-                    resolve_ms=int(
-                        (time.perf_counter() - _byos_t0q) * 1000))
-                _detail = exc.message if exc.kind in (
-                    "auth_error", "expired", "throttled") else \
-                    "播放变体当前不可用：transfer_quark_relay"
-                raise HTTPException(status_code=409,
-                                    detail=_detail) from exc
-            _note_play_start_safe(
-                item, user_id=getattr(user, "id", None),
-                method="transfer_quark_relay",
-                variant=play_variants.BYOS_QUARK_RELAY,
-                result="ok",
-                resolve_ms=int((time.perf_counter() - _byos_t0q) * 1000))
-            # 夸克 CDN 取流校验 Cookie/Referer/UA 三件套：直链
-            # 只许在服务端中继里用（头只在服务端组装、绝不下
-            # 发），绝不 302 裸发给播放器——与 115 副本的 302
-            # 形态区别正在于此。
-            return _observe_traffic(await _relay_async(
-                _urlq, request,
-                headers={"Cookie": _cookieq,
-                         "Referer": _qd.QUARK_REFERER,
-                         "User-Agent": _qd.QUARK_UA},
-                media_type=media_type, pt=_pt))
         _gate.raise_for_transfer_gate(_transfer_gate)
         _play_fid, _play_variant = _tv.prefer_user_variant(
             _play_fid, _play_variant, _transfer_gate)
@@ -6639,61 +6763,11 @@ async def video_stream(
                     media_type=media_type, pt=_pt)
                 if _quota_relay_resp is not None:
                     return _observe_traffic(_quota_relay_resp)
-                _v115q = await run_db(_tv.ready_user115_variant, db,
-                                      getattr(item, "id", None),
-                                      getattr(user, "id", None))
-                _pc115q = (getattr(_v115q, "pickcode", "") or "").strip() \
-                    if _v115q is not None else ""
-                if not _pc115q:
-                    _note_play_start_safe(
-                        item, user_id=getattr(user, "id", None),
-                        method="direct_302", variant=play_variants.DRIVE_DIRECT,
-                        result="error", error_kind=_block_kind)
-                    raise HTTPException(status_code=409,
-                                        detail=_block_detail)
-                from backend.emby_server import user_bindings as _ub115q
-                _byos_t0q = time.perf_counter()
-                try:
-                    _url115 = await run_db(
-                        _ub115q.resolve_user115_copy_url, db,
-                        getattr(user, "id", None), _pc115q,
-                        request.headers.get("user-agent") or "")
-                except _ub115q.BindingError as exc:
-                    _note_play_start_safe(
-                        item, user_id=getattr(user, "id", None),
-                        method="transfer115_copy",
-                        variant=play_variants.BYOS115_DIRECT,
-                        result="error", error_kind=exc.kind,
-                        resolve_ms=int((time.perf_counter() - _byos_t0q) * 1000))
-                    raise HTTPException(
-                        status_code=409,
-                        detail=_block_detail) from exc
                 _note_play_start_safe(
                     item, user_id=getattr(user, "id", None),
-                    method="transfer115_copy",
-                    variant=play_variants.BYOS115_DIRECT, result="ok",
-                    resolve_ms=int((time.perf_counter() - _byos_t0q) * 1000))
-                _alive115q = await run_db(
-                    _ub115q.check_115_download_alive, _url115,
-                    request.headers.get("user-agent") or "")
-                if _alive115q == "dead":
-                    # 115 回落链也是死链：不 302，记 strike 并预算内重建；
-                    # 仍报额度 409（主因是 Drive 副本额度满），重建后台跑。
-                    await run_db(_tv.mark_variant_stale_once, db,
-                                 getattr(_v115q, "id", None))
-                    await run_db(_tv.rebuild_dead_user115_copy, db, item,
-                                 getattr(user, "id", None))
-                    _note_play_start_safe(
-                        item, user_id=getattr(user, "id", None),
-                        method="transfer115_copy",
-                        variant=play_variants.BYOS115_DIRECT,
-                        result="error", error_kind="115_copy_dead")
-                    raise HTTPException(
-                        status_code=409,
-                        detail=_block_detail)
-                return _observe_traffic(
-                    RedirectResponse(_url115, status_code=302,
-                                     headers=_strategy.DIRECT_REDIRECT_HEADERS))
+                    method="direct_302", variant=play_variants.DRIVE_DIRECT,
+                    result="error", error_kind=_block_kind)
+                raise HTTPException(status_code=409, detail=_block_detail)
         elif _probe_detail.get("shape") == "get" and _probe_detail.get("page"):
             # Range 健康但 GET 腿探到插页（scan / html）：只打
             # 信号、仍发直链（page=quota 已在上面改道分支处理，
@@ -6943,6 +7017,16 @@ async def video_stream(
     if (_drive_switch_on and await run_db(_strategy.drive_relay_enabled, db)
             and (_requested_variant is None
                  or _requested_variant == play_variants.DRIVE_RELAY)):
+        # Drive 中继护栏（2026-11-02 夸克副本串线修复）：非 Drive
+        # 副本（quark:/pan115: 落盘）的 fid 绝不喂 Google 中继。
+        # 正常路径下这类副本已在门禁块按 provider 分流返回；走到
+        # 这里说明选路与门禁口径漂移（如变体吃过 strike 被分流
+        # 拒用）——响亮 409，不许把别家 fid 当 Drive 文件取流，
+        # 更不许静默改走共享原件。
+        if _is_non_drive_variant(_play_variant):
+            raise HTTPException(
+                status_code=409,
+                detail="播放副本不在谷歌盘，已拦截串线取流")
         _evt_t0 = time.perf_counter()
         # 转存变体：有副本时中继凭据走副本所在盘（v1 与原件同盘，凭据
         # 与原件盘一致）；无副本时仍按原件定位。显式 DRIVE_RELAY 且无
@@ -7167,6 +7251,18 @@ async def video_stream(
             return serve_file(
                 _ms_path, request, media_type,
                 cache_control=cdn.cache_control_for(str(request.url.path)))
+    # Drive 直链护栏（2026-11-02 夸克副本串线修复）：非 Drive
+    # 副本的 fid 绝不喂 Google 存在性校验 / usercontent 302——
+    # 本块（fast302）与尾部 _play_target 回落里的 drive 302 共用
+    # 此一道闸。正常路径下这类副本已在门禁块按 provider 分流
+    # 返回，走到这里即口径漂移，响亮 409，不许静默改走共享
+    # 原件。显式 byos115_direct 不消费 _play_fid（按条目现签），
+    # 不在此挡。
+    if (_is_non_drive_variant(_play_variant)
+            and _requested_variant != play_variants.BYOS115_DIRECT):
+        raise HTTPException(
+            status_code=409,
+            detail="播放副本不在谷歌盘，已拦截串线取流")
     _fast302 = False
     _evt_t0 = time.perf_counter()
     if _drive_switch_on:
@@ -7265,40 +7361,6 @@ async def video_stream(
         from backend.emby_server.drive_auth import drive_usercontent_download_url
         return _observe_traffic(
             RedirectResponse(drive_usercontent_download_url(_play_fid), status_code=302,
-                             headers=_strategy.DIRECT_REDIRECT_HEADERS))
-    if _requested_variant == play_variants.BYOS115_DIRECT:
-        # BYOS P1：绑定用户自己的 115 直链——按绑定凭据现签现发 302，
-        # 播放器自拉，字节不过服务器。签名验签 / 来路检查 / 限流闸门
-        # 已在上面走过；起播打点与 302 观测与直链分支同口径。
-        from backend.emby_server import user_bindings as _ub
-        _byos_t0 = time.perf_counter()
-        try:
-            _byos_url = await run_db(
-                _ub.resolve_user115_direct_url, db,
-                getattr(user, "id", None), item,
-                request.headers.get("user-agent") or "")
-        except _ub.BindingError as exc:
-            # 凭据失效三档：resolver 已落失败态，这里只报 409 + 文案，
-            # 不静默回落共享中继；一过性/无绑定按通用句报 409。
-            _note_play_start_safe(
-                item, user_id=getattr(user, "id", None),
-                method="byos115_direct",
-                variant=play_variants.BYOS115_DIRECT,
-                result="error", error_kind=exc.kind,
-                resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-            _detail = exc.message if exc.kind in (
-                "auth_error", "expired", "throttled", "size_limit") else \
-                "播放变体当前不可用：byos115_direct"
-            raise HTTPException(status_code=409, detail=_detail) from exc
-        _pt.mark("byos115_direct")
-        _pt.done()
-        _note_play_start_safe(
-            item, user_id=getattr(user, "id", None),
-            method="byos115_direct", variant=play_variants.BYOS115_DIRECT,
-            result="ok",
-            resolve_ms=int((time.perf_counter() - _byos_t0) * 1000))
-        return _observe_traffic(
-            RedirectResponse(_byos_url, status_code=302,
                              headers=_strategy.DIRECT_REDIRECT_HEADERS))
     if _requested_variant is not None:
         target = await run_db(_play_target, db, item,
@@ -7461,14 +7523,13 @@ async def upstream_stream(
     from backend.emby_server.async_db import run_db
     await run_db(ensure_playback_allowed, db, user)
     # 播放门禁（2026-10-26 用户亲定硬规矩）：上游 302 本次调用即新下发，
-    # 无条件过门禁（无已下发链接消费一说）。
+    # 无条件过门禁（无已下发链接消费一说）。2026-11-03 改定：本口按
+    # 源+上游条目寻址，经映射反查本地条目判定——全属无界（CMS）库
+    # 条目时免绑定（playback_gate.binding_required_for_upstream 单一
+    # 入口），其余原样。
     from backend.emby_server import playback_gate as _gate
-    # 上游兜底口没有本地条目 id：经映射表反查本地条目走同一判定
-    # （binding_required_for_upstream，与上游 #1797 同接口）；映射不到 → 照旧过门禁。
-    _binding_required = await run_db(
-        _gate.binding_required_for_upstream, db, source_id, upstream_item_id)
-    if _binding_required:
-        await run_db(_gate.ensure_binding_playback_allowed, db, user)
+    await run_db(_gate.ensure_binding_playback_allowed_for_upstream,
+                 db, user, source_id, upstream_item_id)
     _msid = (getattr(request, "query_params", None) or {}).get("mediaSourceId")
     _ep_raw = (getattr(request, "query_params", None) or {}).get("episode")
     try:
@@ -7506,27 +7567,56 @@ async def upstream_item_stream(
     结构化错误明示失败、不回落任何其它线路；通过后走既有上游解析
     （先探后 302）并记 provider=upstream 起播事件。鉴权与播放门禁
     与显式上游口 upstream_stream 逐项同款（get_play_user +
-    ensure_playback_allowed + 无条件绑定门禁）；条目可见性走
-    _require_visible_item 护栏。路由注册在 video_hls 通配之前，
-    不会被 {transcode_path} 吞掉。
+    ensure_playback_allowed + 绑定门禁，CMS 库条目免绑定）；条目
+    可见性走 _require_visible_item 护栏。路由注册在 video_hls
+    通配之前，不会被 {transcode_path} 吞掉。
     """
     from backend.emby_server import upstream_playback as _up
     from backend.emby_server.async_db import run_db
     await run_db(ensure_playback_allowed, db, user)
-    # 播放门禁（2026-10-26 用户亲定硬规矩）：本次调用即新下发，
-    # 无条件过门禁（与 upstream_stream 同口径）。
-    from backend.emby_server import playback_gate as _gate
     item = await run_db(_require_visible_item, db, user, item_id)
-    await run_db(_gate.ensure_binding_playback_allowed, db, user, None, item)
+    # 播放门禁（2026-10-26 用户亲定硬规矩）：本次调用即新下发，
+    # 无条件过门禁（与 upstream_stream 同口径）。2026-11-03 改定：
+    # 无界（CMS）库条目免绑定——按条目判定须先拿到条目，故可见性
+    # 护栏提到门禁之前（与 PlaybackInfo 同序；本地条目判定不变）。
+    from backend.emby_server import playback_gate as _gate
+    await run_db(_gate.ensure_binding_playback_allowed_for_item,
+                 db, user, item)
+    # 定向解析（多线形态）：MediaSourceId 带映射 id 时只解那一条，
+    # 形态对不上（别条目的 id / 非上游 id / id 段非数字）直接 404
+    # 硬报错——选错不偷偷换线。不带或只到 :upstream 的旧形态走
+    # 最佳映射（见 resolve_mapped_upstream_stream 的 mapping_id 口径）。
+    _mapping_id = None
+    _msid = (request.query_params.get("MediaSourceId") or "").strip()
+    if _msid:
+        _prefix = f"{item_id}:upstream"
+        if _msid == _prefix:
+            _mapping_id = None
+        elif _msid.startswith(_prefix + ":") and \
+                _msid[len(_prefix) + 1:].isdigit():
+            _mapping_id = int(_msid[len(_prefix) + 1:])
+        else:
+            _exc = _up.UpstreamPlaybackError(
+                404, "upstream_mapping_not_found", "所选线路已不可用")
+            return JSONResponse(status_code=_exc.status,
+                                content=_exc.to_body())
     _t0 = time.perf_counter()
     try:
         _url = await run_in_threadpool(
-            _up.resolve_mapped_upstream_stream, db, item.id)
+            _up.resolve_mapped_upstream_stream, db, item.id,
+            mapping_id=_mapping_id)
     except _up.UpstreamPlaybackError as exc:
         return JSONResponse(status_code=exc.status, content=exc.to_body())
+    # 清单代理去广告（C 件）：有过滤规则的源改走清单代理下发
+    # （只代理清单、分段直连原 CDN）；代理任何一步失败回落到
+    # 下面的 302 直发，宁可带广告也不许播不了。
+    _proxy_resp = await _maybe_cms_playlist_proxy(
+        db, item, _mapping_id, _url, request, user)
     _note_mapped_upstream_play_start_safe(
         getattr(user, "id", None), item.id,
         int((time.perf_counter() - _t0) * 1000))
+    if _proxy_resp is not None:
+        return _proxy_resp
     return RedirectResponse(_url, status_code=302)
 
 
@@ -7634,6 +7724,256 @@ async def mangled_playback_url_repair(
     if target is None:
         raise HTTPException(status_code=404, detail="Not Found")
     return RedirectResponse(target, status_code=302)
+
+
+async def _maybe_cms_playlist_proxy(db, item, mapping_id, url, request, user):
+    """取流口清单代理 engage 判定 + 一级清单组装；不 engage/失败回 None。"""
+    from backend.emby_server import cms_playlist_proxy as _proxy
+    from backend.emby_server import upstream_playback as _up
+    from backend.emby_server.async_db import run_db
+
+    if not _proxy.playlist_proxy_enabled():
+        return None
+    source_id = await run_db(
+        _proxy.source_id_for_mapping, db, item.id, mapping_id)
+    if source_id is None:
+        return None
+    # 片头印制广告剪除（cms_ad_skip 试点）：有高置信记录时即使
+    # 该源没有清单过滤标记也 engage 代理（剪除复用同一通道）；
+    # 无记录时顺手排一次后台检测——不阻塞本次播放，本次仍按原
+    # 行为播未剪版。
+    from backend.emby_server import cms_ad_skip as _adskip
+
+    _skip = None
+    if _adskip.source_enabled(source_id):
+        _skip, _skip_known = await run_db(
+            _adskip.lookup_trim, db, item.id, mapping_id, source_id)
+        if not _skip_known:
+            _adskip.schedule_detection(item.id, mapping_id, source_id)
+    # 借帧修复（cms_graft）：有 verified 修复时同样 engage（清单层
+    # 换头部分段）；与剪除互斥——本轮要摘段就不查修复（摘段移位
+    # 分段序号，代理层亦有同口径防护）。
+    _graft = None
+    if _skip is None:
+        from backend.emby_server import cms_graft as _graft_mod
+
+        _graft = await run_db(
+            _graft_mod.lookup_for_playback, db, item.id, mapping_id,
+            source_id)
+    if _skip is None and _graft is None and not _proxy.engages(
+            source_id, url):
+        return None
+    source = await run_db(_up.get_source_row, db, source_id)
+    headers = _up._source_headers(source) if source is not None else {}
+    base = _base_url(request)
+    q = request.query_params
+    uid_s, exp_s, sign_s = q.get("uid"), q.get("exp"), q.get("sign")
+    if not (uid_s and exp_s and sign_s):
+        # 无签名轨（Emby 令牌轨）时借唯一构造点现签一份，保证二级
+        # 端点始终走 play_sign 验签，不裸奔。
+        _b_url, exp_s, sign_s = _signed_local_stream_url(
+            item, base, user.id, db, None, with_sign=True)
+        uid_s = str(user.id)
+    msid = q.get("MediaSourceId") or ""
+    key_part = f"&api_key={q.get('api_key')}" if q.get("api_key") else ""
+
+    def _variant_url(absolute_variant: str) -> str:
+        locator = _proxy.make_locator(uid_s, item.guid, exp_s, absolute_variant)
+        return (
+            f"{base}/emby/Videos/{item.guid}/upstream/playlist"
+            f"?MediaSourceId={msid}{key_part}"
+            f"&uid={uid_s}&exp={exp_s}&sign={sign_s}"
+            f"&src={source_id}&u={locator}")
+
+    _graft_url = None
+    _graft_segments = None
+    if _graft is not None:
+        _graft_mid, _graft_segments = _graft
+
+        def _graft_url(idx: int) -> str:
+            locator = _proxy.make_locator(
+                uid_s, item.guid, exp_s, f"graft://{_graft_mid}/{idx}")
+            return (
+                f"{base}/emby/Videos/{item.guid}/upstream/graftseg"
+                f"?MediaSourceId={msid}{key_part}"
+                f"&uid={uid_s}&exp={exp_s}&sign={sign_s}"
+                f"&src={source_id}&u={locator}")
+
+    text = await run_in_threadpool(
+        _proxy.build_master_response_text, url, headers, _variant_url,
+        source_id=source_id, item_id=item.id,
+        skip_seconds=_skip or 0.0,
+        graft_segments=_graft_segments, make_graft_url=_graft_url)
+    if text is None:
+        return None
+    return Response(
+        content=text, media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-store"})
+
+
+@emby_router.get("/emby/Videos/{item_id}/upstream/playlist")
+@emby_router.get("/Videos/{item_id}/upstream/playlist")
+@release_db_before_response
+async def upstream_playlist_media(
+    item_id: str, request: Request,
+    user: models.WebUser = Depends(get_play_user),
+    db: Session = Depends(get_db),
+):
+    """CMS 清单代理二级端点：下发过滤后的 variant 媒体清单。
+
+    路由注册在 video_hls 通配之前；路径含 item_id，get_play_user
+    的 play_sign 验签分支照常触发。付费墙、绑定门禁、条目可见性
+    与取流口逐项同款复用。定位参数 u 经 HMAC 绑定 (uid, item,
+    exp, 目标地址)，对不上回 403；抓清单/处理失败回落 302 直发
+    目标原地址（带广告可播，不许播不了）。分段地址在清单里已
+    改写为原 CDN 绝对地址，播放器直连取段，本端点不碰分段字节。
+    """
+    from backend.emby_server import cms_playlist_proxy as _proxy
+    from backend.emby_server import upstream_playback as _up
+    from backend.emby_server.async_db import run_db
+
+    await run_db(ensure_playback_allowed, db, user)
+    item = await run_db(_require_visible_item, db, user, item_id)
+    # 绑定门禁与取流口同口径（2026-11-03 改定：无界库条目免绑定，
+    # 判定走 playback_gate 单一入口；先拿条目再判定）。
+    from backend.emby_server import playback_gate as _gate
+    await run_db(_gate.ensure_binding_playback_allowed_for_item,
+                 db, user, item)
+    q = request.query_params
+    target = _proxy.read_locator(
+        q.get("u") or "", user.id, item_id, q.get("exp") or "")
+    if not target or not _proxy.is_m3u8_url(target):
+        return JSONResponse(status_code=403, content={
+            "code": "cms_playlist_locator_invalid",
+            "message": "清单定位参数无效"})
+    src_raw = q.get("src") or ""
+    source_id = int(src_raw) if src_raw.isdigit() else None
+    source = None
+    if source_id is not None:
+        source = await run_db(_up.get_source_row, db, source_id)
+        if source is not None and not source.enabled:
+            return JSONResponse(status_code=409, content={
+                "code": "upstream_source_disabled",
+                "message": "所选线路已不可用"})
+    headers = _up._source_headers(source) if source is not None else {}
+    # MediaSourceId 形如 {guid}:upstream:{mapping_id}，无 id 后缀
+    # 时为最佳映射口径（剪除/借帧查账共用这一个解析结果）。
+    _msid = (q.get("MediaSourceId") or "").strip()
+    _prefix = f"{item_id}:upstream:"
+    _mid = None
+    if _msid.startswith(_prefix) and _msid[len(_prefix):].isdigit():
+        _mid = int(_msid[len(_prefix):])
+    # 片头印制广告剪除：与取流口同口径查高置信记录。
+    _skip = 0.0
+    if source_id is not None:
+        from backend.emby_server import cms_ad_skip as _adskip
+
+        if _adskip.source_enabled(source_id):
+            _found, _known = await run_db(
+                _adskip.lookup_trim, db, item.id, _mid, source_id)
+            if _found:
+                _skip = _found
+    # 借帧修复：与取流口同口径查 verified 修复（摘段时互斥不查）。
+    _graft_url = None
+    _graft_segments = None
+    if source_id is not None and not _skip:
+        from backend.emby_server import cms_graft as _graft_mod
+
+        _graft = await run_db(
+            _graft_mod.lookup_for_playback, db, item.id, _mid, source_id)
+        if _graft is not None:
+            _graft_mid, _graft_segments = _graft
+            _base = _base_url(request)
+
+            def _graft_url(idx: int) -> str:
+                locator = _proxy.make_locator(
+                    user.id, item_id, q.get("exp") or "",
+                    f"graft://{_graft_mid}/{idx}")
+                return (
+                    f"{_base}/emby/Videos/{item.guid}/upstream/graftseg"
+                    f"?MediaSourceId={_msid}"
+                    f"&uid={user.id}&exp={q.get('exp') or ''}"
+                    f"&sign={q.get('sign') or ''}"
+                    f"&src={source_id}&u={locator}")
+
+    text = await run_in_threadpool(
+        _proxy.build_media_response_text, target, headers,
+        source_id=source_id, item_id=item.id, skip_seconds=_skip,
+        graft_segments=_graft_segments, make_graft_url=_graft_url)
+    if text is None:
+        return RedirectResponse(target, status_code=302)
+    return Response(
+        content=text, media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-store"})
+
+
+@emby_router.get("/emby/Videos/{item_id}/upstream/graftseg")
+@emby_router.get("/Videos/{item_id}/upstream/graftseg")
+@release_db_before_response
+async def upstream_graft_segment(
+    item_id: str, request: Request,
+    user: models.WebUser = Depends(get_play_user),
+    db: Session = Depends(get_db),
+):
+    """借帧修复段端点：下发我方修复好的片头分段字节（数据卷文件）。
+
+    只有清单层换进来的段会走到这里：定位参数 u 经 HMAC 绑定
+    (uid, item, exp, graft://<mapping_id>/<idx>)，篡改即 403；
+    付费墙/绑定门禁/可见性与清单二级端点逐项同款。落库行必须
+    仍是 verified 且属于本条目，段文件缺失回 404（播放器可回落
+    其它线路，不许拿别段冒充）。其余分段仍由播放器直连源站，
+    本端点只递修复窗这几段。
+    """
+    from backend.emby_server import cms_graft as _graft_mod
+    from backend.emby_server import cms_playlist_proxy as _proxy
+    from backend.emby_server.async_db import run_db
+
+    await run_db(ensure_playback_allowed, db, user)
+    item = await run_db(_require_visible_item, db, user, item_id)
+    from backend.emby_server import playback_gate as _gate
+    await run_db(_gate.ensure_binding_playback_allowed_for_item,
+                 db, user, item)
+    q = request.query_params
+    target = _proxy.read_locator(
+        q.get("u") or "", user.id, item_id, q.get("exp") or "")
+    mid = idx = None
+    if target and target.startswith("graft://"):
+        parts = target[len("graft://"):].split("/")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            mid, idx = int(parts[0]), int(parts[1])
+    if mid is None:
+        return JSONResponse(status_code=403, content={
+            "code": "cms_graft_locator_invalid",
+            "message": "修复段定位参数无效"})
+    row = await run_db(_graft_mod.get_repair, db, mid)
+    seg = None
+    if row is not None and row.status == "verified" \
+            and int(row.local_item_id) == int(item.id):
+        for cand in _graft_mod.repair_segments(row):
+            if int(cand.get("idx", -1)) == idx:
+                seg = cand
+                break
+    if seg is None:
+        return JSONResponse(status_code=404, content={
+            "code": "cms_graft_segment_not_found",
+            "message": "修复段不可用"})
+    path = _graft_mod.segment_abspath(mid, seg.get("file") or "")
+
+    def _read():
+        try:
+            return path.read_bytes()
+        except OSError:
+            return None
+
+    data = await run_in_threadpool(_read)
+    if data is None:
+        return JSONResponse(status_code=404, content={
+            "code": "cms_graft_segment_not_found",
+            "message": "修复段不可用"})
+    return Response(
+        content=data, media_type="video/MP2T",
+        headers={"Cache-Control": "no-store"})
+
 
 @emby_router.get("/emby/videos/{item_id}/{transcode_path:path}")
 @emby_router.get("/videos/{item_id}/{transcode_path:path}")

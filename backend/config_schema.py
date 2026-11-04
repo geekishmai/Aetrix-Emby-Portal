@@ -223,6 +223,23 @@ WELFARE_CONFIG_SCHEMA: dict[str, tuple] = {
     "slots_pool_seed": ("int", 0, _BIG),
     "slots_daily_bet_cap": ("int", 0, _BIG),
     "slots_daily_win_cap": ("int", 0, _BIG),
+    # 骰子对决：总开关默认关（word 风格，读侧 economy._get_bool_config
+    # 只认 "true"）；单注上下限至少 1；抽成 0-100；每日赢取上限 0=不限。
+    "bot_duel_enabled": ("bool",),
+    "bot_duel_min": ("int", 1, _BIG),
+    "bot_duel_max": ("int", 1, _BIG),
+    "bot_duel_rake_pct": ("int", 0, 100),
+    "bot_duel_daily_win_cap": ("int", 0, _BIG),
+    # 红包雨：总开关默认关；总额至少 1；份数 1-100（与用户红包个数上限一致）；
+    # 间隔 0 表示一开始全部落下；每日上限 0=不限；定时是原文，读侧校验钟点。
+    "bot_rain_enabled": ("bool",),
+    "bot_rain_total": ("int", 1, _BIG),
+    "bot_rain_count": ("int", 1, 100),
+    "bot_rain_interval_sec": ("int", 0, 3600),
+    "bot_rain_daily_win_cap": ("int", 0, _BIG),
+    "bot_rain_schedule": ("str",),
+    # 每周游戏榜总开关，默认关。word 风格，读侧只认 "true"。
+    "bot_gamerank_enabled": ("bool",),
     # 2026-10-17 第 4 批 4-4：白名单里但此前无 spec 的群 id 列表键（端点现行按原文
     # 存字符串）。注册为 ("str",) 与今天逐字一致：原文直存，None/空串→删行
     # （读侧 _get_str_config 缺行/空行都回默认 ""，等价）。
@@ -231,6 +248,14 @@ WELFARE_CONFIG_SCHEMA: dict[str, tuple] = {
     "bot_rankpush_enabled": ("bool",),
     "bot_rankpush_reward_enabled": ("bool",),
     "bot_rankpush_reward_table": ("int_list", 0, _BIG),
+    # 更新入库播报（tg_bot.updatedigest 读侧宽容解析）：总开关 + 攒批间隔分钟
+    "bot_update_digest_enabled": ("bool",),
+    "bot_update_digest_interval_minutes": ("int", 5, 1440),
+    # 主动私聊提醒（tg_bot.proactive）：两个开关默认关，合并窗口秒数默认 60。
+    # word 风格 ("bool",) 存 true/false。关时不发、不写已推记录。
+    "tg_notify_store_arrival_enabled": ("bool",),
+    "tg_notify_transfer_done_enabled": ("bool",),
+    "tg_notify_merge_window_sec": ("int", 0, 3600),
 
     "lottery_group_ids": ("str",),
 }
@@ -319,32 +344,16 @@ ITEMS_CACHE_CONFIG_SCHEMA: dict[str, tuple] = {
 }
 
 # 转存调度（2026-10-30）：跨 provider 总开关 + 跨单在途上限 +
-# 跨单 aging 提权阈值 + 执行道并发 + 单用户在飞上限 + 115 秒传/
-# 分片上传开关 + 换绑豁免限频两键。读取唯一实现 transfer_variant
+# 跨单 aging 提权阈值 + 执行道并发 + 单用户在飞上限 +
+# 换绑豁免限频两键。读取唯一实现 transfer_variant
 # 的 cross_provider_enabled
 # / cross_lane_concurrency / cross_aging_sec / lane_concurrency /
 # per_owner_inflight /
-# pan115_rapid_upload_enabled / pan115_multipart_upload_enabled /
 # rebind_waiver_window_days / rebind_waiver_max_uses，
-# 范围与读取侧钳制同口径。探针道五键（2026-11-01）读取实现
-# 同在 transfer_variant（probe_enabled / probe_priority_enabled
-# / probe_lane_concurrency / probe_recheck_sec /
-# play_inline_probe_budget_sec）。
+# 范围与读取侧钳制同口径。
 TRANSFER_CONFIG_SCHEMA: dict[str, tuple] = {
     "cross_provider_transfer_enabled": ("bool",),
     "transfer_cross_lane_concurrency": ("int", 1, 8),
-    # 探针道（2026-11-01 转存等待压缩 期一＋期二）：探针道总
-    # 开关 + 期一优先排序开关默认开（读取默认兜底在
-    # transfer_variant.probe_enabled / probe_priority_enabled，
-    # 无行=True）；探针单轮认领上限默认 4、钳 [1, 16]（管理端
-    # 字段同名，见 Settings 转存卡片）；探针节流默认 300、钳
-    # [30, 3600]；点播当场探针预算默认 15、钳 [1, 60]。范围与
-    # 读取侧钳制同口径。纯 SystemConfig 键，不进 env.example。
-    "transfer_probe_enabled": ("bool",),
-    "transfer_probe_priority_enabled": ("bool",),
-    "transfer_probe_lane_concurrency": ("int", 1, 16),
-    "transfer_probe_recheck_sec": ("int", 30, 3600),
-    "play_inline_probe_budget_sec": ("int", 1, 60),
     # 剧集预热（2026-11-01 转存等待压缩 期四）：总开关默认开
     # （站里没用户口径；读取默认兜底在 transfer_variant.
     # series_preheat_enabled，无行=True）；搬字节预热独立日帽
@@ -357,18 +366,8 @@ TRANSFER_CONFIG_SCHEMA: dict[str, tuple] = {
     "transfer_cross_aging_sec": ("int", 60, 86400),
     "transfer_fast_lane_concurrency": ("int", 1, 32),
     "transfer_per_owner_inflight": ("int", 1, 16),
-    "pan115_rapid_upload_enabled": ("bool",),
-    "pan115_multipart_upload_enabled": ("bool",),
     "transfer_rebind_waiver_window_days": ("int", 1, 365),
     "transfer_rebind_waiver_max_uses": ("int", 1, 20),
-    # 形态 B 云下载（2026-10-30 立项，用户亲批默认关）：开关默认
-    # 关由 transfer_variant.cross_cloudpull_enabled 的读取默认
-    # 兜底（无行=False）；TTL 默认 43200 覆盖 115 排队调度＋
-    # GB 级慢拉＋其内置重试，钳 [1800, 86400]；轮询超时默认
-    # 3600，钳 [60, 21600]。纯 SystemConfig 键，不进 env.example。
-    "transfer_cross_cloudpull_enabled": ("bool",),
-    "transfer_cross_cloudpull_ttl_sec": ("int", 1800, 86400),
-    "transfer_cross_cloudpull_timeout_sec": ("int", 60, 21600),
     # 换代线地基记账开关（2026-11-01）：交付状态落盘＋块哈希
     # 清单记账，纯记账 fail-open；默认开由 transfer_variant
     # .manifest_accounting_enabled 的读取默认兜底（无行=True），
@@ -381,11 +380,6 @@ TRANSFER_CONFIG_SCHEMA: dict[str, tuple] = {
     # 本开关无数据可依、整步回落）。默认开由 transfer_variant
     # .manifest_takeover_enabled 的读取默认兜底。
     "transfer_manifest_takeover_enabled": ("bool",),
-    # 夸克二期（转存 + 点播中继）开关（2026-11-01）：默认开由
-    # transfer_variant.quark_play_enabled 的读取默认兜底（无行
-    # =True）；关 = 只绑夸克的用户点播在门禁 failed 明示、不
-    # 回落共享。纯 SystemConfig 键，不进 env.example。
-    "quark_play_enabled": ("bool",),
     # 类别级熔断（2026-11-01 预见层 v2 第一层）：JSON 规则数组
     # [{provider, error_kind}] 的 canonical 文本。结构校验在
     # transfer_variant.coerce_paused_categories（保存侧 strict、
@@ -446,6 +440,14 @@ UPSTREAM_AGGREGATE_CONFIG_SCHEMA: dict[str, tuple] = {
     # 关时列表不出现、取流口 404。无行＝开（读取方默认 True，
     # 见 upstream_playback.detail_line_enabled）。
     "upstream_aggregate_detail_line_enabled": ("bool",),
+    # CMS 线路档位降权（2026-11-03 印制广告摸底处置，用户亲点）：
+    # 名单内的源在详情/PlaybackInfo 线路排序里沉到同健康层最后、
+    # 只作兜底（线不删、仍可播）。无行＝代码默认名单（红牛/光速/
+    # IKUN/虎牙/鲸鱼/爱蛋/茅台/速博，见 upstream_playback
+    # .DEFAULT_DEMOTED_SOURCE_IDS），空串删行回默认；读取唯一实现
+    # upstream_playback.demoted_source_ids（store 热读）。纯
+    # SystemConfig 键，不进 env.example。
+    "upstream_aggregate_demoted_source_ids": ("int_list", 1, 1000000),
     # O-09 映射抽样巡检（第 1、2 层常驻 janitor）：默认开、默认
     # 每 7 天一轮、每 evidence 层默认抽 30 条；不一致率超默认
     # 5% 响亮报红。读取唯一实现在 upstream_mapping_patrol，范围
@@ -454,6 +456,26 @@ UPSTREAM_AGGREGATE_CONFIG_SCHEMA: dict[str, tuple] = {
     "upstream_aggregate_mapping_patrol_interval_days": ("int", 1, 30),
     "upstream_aggregate_mapping_patrol_sample_size": ("int", 1, 200),
     "upstream_aggregate_mapping_patrol_alert_pct": ("int", 0, 100),
+}
+
+# 借帧修复（cms_graft）家族：工人总开关/口子/并发/家宽路由全在这里，
+# 代码侧默认值在 emby_server/cms_graft（无行时用默认，照降权名单
+# 先例）。纯 SystemConfig 键，不进 env.example（#1527 先例）。
+CMS_GRAFT_CONFIG_SCHEMA: dict[str, tuple] = {
+    # 工人总开关（兼下发闸）：关 = 工人停跑、播放路径不查修复表。
+    "cms_graft_enabled": ("bool",),
+    # 片头口子（秒）：带长 ≤ 此值才入选（站主 2026-11-03 定 60）。
+    "cms_graft_mouth_sec": ("float", 5.0, 600.0),
+    # 工人总并发（直连路线）。
+    "cms_graft_concurrency": ("int", 1, 4),
+    # 家宽出口并发（单独限速，只抓片头分段）。
+    "cms_graft_home_concurrency": ("int", 1, 2),
+    # 家宽路由源名单（逗号分隔源 id）：拒服务器出口的源走家宽。
+    "cms_graft_home_source_ids": ("int_list", 1, 1000000),
+    # 单轮入选上限（第一批 500，不许自行扩全量）。
+    "cms_graft_batch_limit": ("int", 1, 5000),
+    # 热度口径：近 N 天起播量。
+    "cms_graft_heat_days": ("int", 1, 90),
 }
 
 

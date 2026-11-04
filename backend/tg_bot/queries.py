@@ -15,7 +15,7 @@ from datetime import datetime
 
 from backend.emby_server import models as em
 from backend.tg_bot import layout
-from backend.emby_server.transfer_variant import _item_provider
+from backend.emby_server.transfer_variant import _item_provider, _newest_ready
 from backend.emby_server.user_bindings import BINDING_ERROR_MESSAGES
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ JOB_ERROR_TEXT = {
     "item_gone": "原片已下架",
     "throttled": "触发限流，稍后再试",
     "retriable": "转存失败，可重试",
+    "provider_removed": "该网盘已下线",
 }
 RECENT_LIMIT = 5
 SEARCH_LIMIT = 6
@@ -87,22 +88,33 @@ def _user_jobs(db, user_id: int, trigger: str | None = None):
     )
     if trigger is not None:
         q = q.filter(em.TransferJob.trigger == trigger)
-    return q.order_by(em.TransferJob.id.desc()).limit(RECENT_LIMIT).all()
+    jobs = q.order_by(em.TransferJob.id.desc()).limit(RECENT_LIMIT).all()
+    # 已下线 provider 落点的单不再展示（2026-11-02 删除单）。
+    return [j for j in jobs
+            if not (j.dest_drive_id or "").startswith(("quark:", "pan115:"))]
 
 
 def render_bindings(db, user) -> str:
-    """该用户名下的网盘绑定（label、provider、status，不含任何凭据信息）。"""
-    rows = (
+    """该用户名下的网盘绑定（label、provider、status，不含任何凭据信息）。
+
+    夸克/115 绑定线已下线（2026-11-02 删除单）：存量行不再列出，
+    只在卡尾提醒一句改绑 Drive。
+    """
+    all_rows = (
         db.query(em.UserStorageBinding)
         .filter(em.UserStorageBinding.user_id == user.id)
         .order_by(em.UserStorageBinding.id)
         .all()
     )
+    rows = [r for r in all_rows if r.provider == "drive"]
+    removed_note = (
+        ["夸克 / 115 已下线，旧绑定不再可用，请改绑 Google Drive。"]
+        if len(rows) != len(all_rows) else [])
     if not rows:
         return layout.card(
             layout.title("我的网盘绑定"),
             [layout.row("🔗", "绑定状态", "你还没有绑定网盘")],
-            [BIND_GUIDE_SHORT],
+            [BIND_GUIDE_SHORT] + removed_note,
         )
     card_rows = []
     for row in rows:
@@ -118,7 +130,7 @@ def render_bindings(db, user) -> str:
                 card_rows.append(layout.row("⚠️", "失效原因", html.escape(msg)))
     return layout.card(
         layout.title("我的网盘绑定"), card_rows,
-        ["绑定失效时请在网页端「我的网盘」里重新绑定。"])
+        ["绑定失效时请在网页端「我的网盘」里重新绑定。"] + removed_note)
 
 
 def render_transfers(db, user) -> str:
@@ -181,17 +193,9 @@ def _latest_job(db, user_id: int, item_id: int):
 
 
 def _ready_variant(db, user_id: int, item_id: int):
-    return (
-        db.query(em.TransferVariant)
-        .filter(
-            em.TransferVariant.item_id == item_id,
-            em.TransferVariant.owner_scope == "user",
-            em.TransferVariant.owner_ref == str(user_id),
-            em.TransferVariant.status == "ready",
-        )
-        .order_by(em.TransferVariant.id.desc())
-        .first()
-    )
+    # 走 transfer_variant._newest_ready 单口：已下线 provider 的
+    # 存量副本行（夸克/115）在那里统一过滤、视为不存在。
+    return _newest_ready(db, item_id, "user", str(user_id))
 
 
 def _whyplay_card(name: str, rows: list[str], notes: list[str] | None = None) -> str:
@@ -244,10 +248,24 @@ def diagnose_whyplay(db, user, title: str) -> str:
         .order_by(em.UserStorageBinding.id)
         .all()
     )
+    if provider == "pan115":
+        # 115 用户绑定线已下线（2026-11-02 删除单）：存量 115
+        # 绑定行视为不存在，片源在 115 时只认 Drive 绑定（点播
+        # 走跨盘转存到谷歌盘，诊断口径与门禁一致）。
+        bindings = [b for b in bindings if b.provider == "drive"]
     matching = [b for b in bindings if b.provider == provider]
     active_matching = [b for b in matching if b.status == "active"]
-    if not active_matching:
-        if not bindings:
+    # 片源在 115 且有生效 Drive 绑定时不进本块：落到下面的副本/
+    # 任务诊断（跨盘转存到谷歌盘的口径，与门禁一致）。
+    _drive_active = any(b.provider == "drive" and b.status == "active"
+                        for b in bindings)
+    if not active_matching and not (provider == "pan115" and _drive_active):
+        if provider == "pan115":
+            return _whyplay_card(name, [
+                layout.row("🔗", "网盘绑定",
+                           "115 已下线，这部片需要先绑定 Google Drive 才能点播"),
+            ], [BIND_GUIDE_SHORT])
+        elif not bindings:
             return _whyplay_card(name, [
                 layout.row("🔗", "网盘绑定", "你还没有绑定网盘，点播需要先绑定自己的账号"),
             ], [BIND_GUIDE_SHORT])
@@ -259,15 +277,11 @@ def diagnose_whyplay(db, user, title: str) -> str:
             if msg:
                 rows.append(layout.row("⚠️", "失效原因", html.escape(msg)))
             return _whyplay_card(name, rows, [BIND_GUIDE_SHORT])
-        other = "pan115" if provider == "drive" else "drive"
-        other_text = PROVIDER_TEXT.get(other, html.escape(str(other)))
+        # Drive 片源 + 只剩已下线 provider 的存量绑定。
         return _whyplay_card(name, [
-            layout.row(
-                "🔀", "绑定来源",
-                f"你只绑了{other_text}，这部片是{provider_text}的片，"
-                "按“绑哪播哪”会转存到你绑的盘里再播"),
-            layout.row("▶️", "操作步骤", "去详情页点一次播放，系统会先转存，转完才可点"),
-        ])
+            layout.row("🔗", "网盘绑定",
+                       "你绑的网盘（夸克 / 115）已下线，请改绑 Google Drive 后再点播"),
+        ], [BIND_GUIDE_SHORT])
     variant = _ready_variant(db, user.id, item.id)
     if variant is not None:
         if getattr(variant, "share_revoked_at", None) is not None:

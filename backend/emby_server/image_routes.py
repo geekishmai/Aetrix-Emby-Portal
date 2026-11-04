@@ -25,6 +25,7 @@ from fastapi import Depends, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from backend import models
 from backend.database import get_db
 from backend.emby_server import media_routes
 
@@ -99,6 +100,7 @@ def item_image_cached(
     image_type: str,
     request: Request,
     db: Session = Depends(get_db),
+    user: models.WebUser = Depends(media_routes.optional_emby_user),
     maxWidth: str | None = None,
     maxHeight: str | None = None,
     w: str | None = None,
@@ -108,9 +110,13 @@ def item_image_cached(
 
     同步实现：图片是媒体库滚动时最高频的请求，读盘 / 代理远程图不能占着事件循环。
     maxWidth/maxHeight 透传给实现做缩略图（标准 Emby 参数，前端海报墙已在用）。
+    PA-036：鉴权依赖必须在本层声明——本函数是直接调用实现函数（不是走
+    FastAPI 注入），实现的 Depends 不会被执行，漏了这里就等于没鉴权。
+    无凭据兼容（2026-11-02）：依赖换 ``optional_emby_user``——无凭据
+    返回 None 交实现按公开库 Primary 口径判定，带凭据无效仍 401。
     """
     return with_conditional_get(
-        media_routes.item_image(item_id, image_type, request, db,
+        media_routes.item_image(item_id, image_type, request, db, user,
                                 maxWidth=maxWidth, maxHeight=maxHeight,
                                 w=w, h=h),
         request,
@@ -123,6 +129,7 @@ def item_image_index_cached(
     index: str,
     request: Request,
     db: Session = Depends(get_db),
+    user: models.WebUser = Depends(media_routes.optional_emby_user),
     maxWidth: str | None = None,
     maxHeight: str | None = None,
     w: str | None = None,
@@ -130,7 +137,7 @@ def item_image_index_cached(
 ):
     """带序号的图片地址（/Images/Backdrop/0 等）：同样交给 media_routes 的实现（同步）"""
     return with_conditional_get(
-        media_routes.item_image_index(item_id, image_type, index, request, db,
+        media_routes.item_image_index(item_id, image_type, index, request, db, user,
                                       maxWidth=maxWidth, maxHeight=maxHeight,
                                       w=w, h=h),
         request,

@@ -547,11 +547,6 @@ async def _release_upstream_when_stalled(source, resp, url: str, timeout: float)
         await source.aclose()
 
 
-#: 中继客户端按 event loop 共享（2026-10-30 起播/拖动提速）：旧口径
-#: 「按次创建、用完关闭」让每次拉流/拖动都重付一遍连接建立（VPS 到
-#: 谷歌实测单次 TCP+TLS 约 0.11–0.16s；生产 stream 首字节 1.6–2.2s
-#: 里中继段约 0.87s 有相当部分耗在新建连接上）。共享只动连接层：
-#: DNS pinning 仍在 transport 层（连接建立时校验）、跳转仍由
 #: _follow_redirects 逐跳校验、凭据头仍按请求传——出法与顺序零
 #: 变化。注意 httpx 0.28 关 client 会连 transport 一起关，共享
 #: client 绝不许在请求路径上 aclose，只关响应把连接归还池中。
@@ -983,8 +978,10 @@ def serve_image(path: Optional[str]) -> FileResponse:
     """图片响应：带 ETag / Last-Modified 与 24h 客户端强制缓存
 
     浏览媒体库时同一张海报会被反复请求（滚动、返回、切页），旧实现每次整文件重发。
-    现在响应带 ``ETag`` / ``Last-Modified`` 与 ``Cache-Control: public, max-age=86400``，
+    现在响应带 ``ETag`` / ``Last-Modified`` 与 ``Cache-Control: private, max-age=86400``，
     浏览器与客户端在有效期内直接命中本地缓存，不再为同一张图重复付出磁盘 I/O 与带宽。
+    PA-036 起图片端点已鉴权：private 是为了不让共享缓存（反代 / CDN）把
+    受限库的图复用给其他人，客户端本地缓存不受影响。
     """
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Image not found")
@@ -1000,7 +997,7 @@ def serve_image(path: Optional[str]) -> FileResponse:
     headers = {
         "ETag": etag,
         "Last-Modified": last_modified,
-        "Cache-Control": "public, max-age=86400",
+        "Cache-Control": "private, max-age=86400",
         "Accept-Ranges": "bytes",
     }
     return FileResponse(path, media_type=media_type, headers=headers)

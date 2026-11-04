@@ -16,7 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend import models
-from backend.tg_bot import callbacks, handlers, layout, sender
+from backend.tg_bot import callbacks, ephemeral, handlers, layout, sender
 
 TG = 910001
 
@@ -44,7 +44,10 @@ GROUPS = {
             {"text": "🎬 求片", "callback_data": "menu:request"},
             {"text": "📋 我的求片", "callback_data": "menu:myrequests"},
         ],
-        [{"text": "⭐ 我的想看", "callback_data": "menu:wants"}],
+        [
+            {"text": "⭐ 我的想看", "callback_data": "menu:wants"},
+            {"text": "🔥 求片榜", "callback_data": "menu:requestboard"},
+        ],
     ]),
     "drive": ("📦 网盘转存", [
         [
@@ -61,13 +64,17 @@ GROUPS = {
             {"text": "🎟️ 续期", "callback_data": "menu:login"},
             {"text": "🔗 绑定账号", "callback_data": "menu:bind"},
         ],
+        [{"text": "🏅 成就", "callback_data": "menu:achievements"}],
     ]),
     "welfare": ("🎁 福利活动", [
         [
             {"text": "🎲 抽奖", "callback_data": "menu:lottery"},
-            {"text": "🧧 发红包", "callback_data": "menu:redpacket"},
+            {"text": "🏆 我的抽奖", "callback_data": "menu:mylottery"},
         ],
-        [{"text": "🎰 老虎机", "callback_data": "menu:slots"}],
+        [
+            {"text": "🧧 发红包", "callback_data": "menu:redpacket"},
+            {"text": "🎰 老虎机", "callback_data": "menu:slots"},
+        ],
     ]),
     "help": ("❓ 帮助中心", [
         [
@@ -97,6 +104,32 @@ def db():
     finally:
         session.close()
         engine.dispose()
+
+
+class _FakeTimer:
+    """假 Timer：只登记、永不真挂线程（堵群面板自毁真 Timer 泄漏，
+    同 test_tg_bot_account_display 的修法：群回调编辑成功会重挂真实
+    30 秒 Timer，到期删除会落进后续测试的 sender 打补丁窗口）。"""
+
+    def __init__(self, interval, function, args=None, kwargs=None):
+        self.interval = interval
+        self.function = function
+        self.args = args or ()
+        self.kwargs = kwargs or {}
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+
+@pytest.fixture(autouse=True)
+def _no_real_timers(monkeypatch):
+    monkeypatch.setattr(ephemeral, "Timer", _FakeTimer)
 
 
 def _user(db, tg=TG, name="alice"):

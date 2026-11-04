@@ -2,8 +2,11 @@
 
 锁住的口径（用户 2026-10-31 亲点形态：详情页来源列表多一条上游线路）：
 - 本地条目有上游映射（源存在且启用）时，详情 DTO 与 PlaybackInfo 的
-  MediaSources 末尾多一条上游线路：Id=``<guid>:upstream``、
-  Name=``<片名> · 上游 · <源名>``，取流地址走我方签名口径
+  MediaSources 末尾多一条上游线路：Id=``<guid>:upstream:<映射 id>``
+  （2026-11-02 呈现改造起每条映射一条线、Id 带映射后缀以便定向取流；
+  旧形态 ``<guid>:upstream`` 取流口仍兼容＝最佳映射口径）；Name＝纯
+  画质标（与本地主源同口径，判不出回落条目名，不带源名），取流地址
+  走我方签名口径
   （/emby/Videos/<guid>/upstream/stream），不把 (source_id,
   upstream_item_id) 裸交给前端；
 - 无映射 / 源停用 → 线路不出现；
@@ -141,9 +144,11 @@ def seed():
         probe_status="failed", probe_attempts=99)
     db.add_all([movie, movie_off, ep])
     db.flush()
-    db.add(em.UpstreamItemMapping(
+    map_on = em.UpstreamItemMapping(
         local_item_id=movie.id, source_id=src_on.id,
-        upstream_item_id=UP_MOVIE_ID, confidence=0.95, evidence="tmdb"))
+        upstream_item_id=UP_MOVIE_ID, confidence=0.95, evidence="tmdb")
+    db.add(map_on)
+    db.flush()
     db.add(em.UpstreamItemMapping(
         local_item_id=movie_off.id, source_id=src_off.id,
         upstream_item_id="up-movie-off", confidence=0.95, evidence="tmdb"))
@@ -151,7 +156,7 @@ def seed():
     data = {"bound_id": users[BOUND], "free_id": users[FREE],
             "src_on": src_on.id, "src_off": src_off.id,
             "movie": movie.guid, "movie_off": movie_off.guid,
-            "ep": ep.guid}
+            "ep": ep.guid, "map_id": map_on.id}
     db.close()
     yield data
     db = SessionLocal()
@@ -208,7 +213,7 @@ def _qs(url):
 
 def _upstream_line(body):
     return [s for s in body.get("MediaSources") or []
-            if str(s.get("Id", "")).endswith(":upstream")]
+            if ":upstream" in str(s.get("Id", ""))]
 
 
 def _set_switch(value):
@@ -242,14 +247,16 @@ def test_detail_with_mapping_has_upstream_line(client, bound_token, seed):
     assert len(lines) == 1, body.get("MediaSources")
     assert body["MediaSourceCount"] == 2
     line = lines[0]
-    # 排在本地主源之后，标签带源名，与既有变体行同为「名 · 标签」形态
+    # 排在本地主源之后；Name＝纯画质标口径——本片无探测无文件名标记，
+    # 判不出画质回落条目名，且绝不带源名凑数（2026-11-02 站主口径）
     assert body["MediaSources"][-1] is line or body["MediaSources"][-1] == line
-    assert line["Name"] == "上游测试片 · 上游 · 乐观服"
+    assert line["Name"] == "上游测试片"
+    assert "乐观服" not in line["Name"]
     url = line["DirectPlayUrl"]
     assert line["DirectStreamUrl"] == url
     assert urlsplit(url).path == f"/emby/Videos/{seed['movie']}/upstream/stream"
     q = _qs(url)
-    assert q.get("MediaSourceId") == f"{seed['movie']}:upstream"
+    assert q.get("MediaSourceId") == f"{seed['movie']}:upstream:{seed['map_id']}"
     assert q.get("api_key"), "Emby token 轨应在场（与主源同形）"
     uid, exp, sign = int(q["uid"]), int(q["exp"]), q["sign"]
     assert uid == seed["bound_id"]
@@ -298,7 +305,8 @@ def test_playbackinfo_has_upstream_line(client, bound_token, seed):
     lines = _upstream_line(r.json())
     assert len(lines) == 1
     line = lines[0]
-    assert line["Name"] == "上游测试片 · 上游 · 乐观服"
+    assert line["Name"] == "上游测试片"
+    assert "乐观服" not in line["Name"]
     q = _qs(line["DirectStreamUrl"])
     assert play_sign.verify_play_sign(
         int(q["uid"]), seed["movie"], int(q["exp"]), q["sign"])

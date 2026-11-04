@@ -170,6 +170,24 @@ def _schedule_cmd_autodelete(db, chat_id, message_id):
     ephemeral.schedule_delete(chat_id, message_id, delay)
 
 
+def _reply_private_only(db, chat_id, msg, *, schedule_cmd: bool = True):
+    """私聊命令在群里被调用的统一回复：提示卡＋去私聊跳转按钮。
+
+    所有私聊命令（private_only 集、P1 个人查询、群内 /redeem）共用
+    这一种形态：handlers.private_only_card 文案＋private_only_markup
+    深链按钮；回复按群面自毁口径发送，命令消息本体挂 3 秒自毁。
+    /redeem 的原消息已即时删除（护码），不再重复挂定时
+    （schedule_cmd=False）。
+    """
+    from backend.tg_bot import handlers
+
+    _send_reply(db, chat_id, handlers.private_only_card(),
+                reply_markup=handlers.private_only_markup(db),
+                autodelete=True)
+    if schedule_cmd:
+        _schedule_cmd_autodelete(db, chat_id, msg.get("message_id"))
+
+
 # P1 自助查询命令：个人数据，群聊里不执行（handler 层另有私聊 guard 双保险）
 _P1_COMMANDS = ("/bindings", "/transfers", "/whyplay", "/wants")
 
@@ -193,7 +211,7 @@ _IDENTITY_COMMANDS = {
     "/start", "/bind", "/checkin", "/points", "/chatpoints",
     "/account", "/me", "/request", "/myrequests", "/login", "/renew",
     "/govlog", "/level", "/report", "/propose", "/launch",
-    "/redeem", "/lottery", "/redpacket",
+    "/redeem", "/lottery", "/redpacket", "/duel", "/rain",
     "/bindings", "/transfers", "/whyplay", "/wants", "/reconcile",
     "/rankpush",
     "/whois",
@@ -469,7 +487,7 @@ def dispatch(db, update: dict) -> None:
             "/myrequests": handlers.handle_my_requests,
             "/rank": handlers.handle_rank,
             "/govlog": handlers.handle_govlog,
-            "/level": handlers.handle_level,
+            "/level": handlers.handle_account,
             "/report": handlers.handle_report,
             "/propose": handlers.handle_propose,
             "/launch": handlers.handle_direct_launch,
@@ -481,6 +499,8 @@ def dispatch(db, update: dict) -> None:
             "/lottery": handlers.handle_lottery,
             "/redpacket": handlers.handle_redpacket,
             "/slots": handlers.handle_slots_command,
+            "/duel": handlers.handle_duel,
+            "/rain": handlers.handle_rain,
             "/bindings": handlers.handle_bindings,
             "/transfers": handlers.handle_transfers,
             "/whyplay": handlers.handle_whyplay,
@@ -507,38 +527,33 @@ def dispatch(db, update: dict) -> None:
             _send_reply(db, chat_id, ANON_ADMIN_TEXT, autodelete=True)
             return
 
-        # 账号、求片和免密登录都可能泄露隐私/凭据，强制私聊。
-        # 账号展示（/account、/me）已放行群聊：只展示能量/活力/馆灵/成就等
-        # 个人面板信息，不含任何凭据；登录与求片仍私聊限定。
+        # 求片和免密登录都可能泄露隐私/凭据，强制私聊。
+        # 账号展示一家（/me、/account 与指向账号卡的 /level）不在本
+        # 集合：群里放行（2026-10-28 用户亲定、2026-11-02 重申）——
+        # 账号卡是固定 11 行汇总、不带登录链接等凭据，群里与私聊同
+        # 形态渲染；登录与求片仍私聊限定，不许借此放宽任何一条。
         # /whois 是刻意例外（2026-11-01）：不在本集合——群里走 handler
         # 的管理员精简卡模式（is_staff 门禁 + 字段白名单，无审计痕迹），
         # 私聊仍出审计全卡；见 handlers.handle_whois 的 in_group 路径。
         private_only = {"/request", "/myrequests", "/login", "/renew", "/govlog",
                         "/report", "/propose", "/launch", "/reconcile", "/rankpush"}
         if cmd in private_only and in_group:
-            _send_reply(db, chat_id, "🔒 这个功能请私聊机器人使用",
-                        autodelete=True)
-            _schedule_cmd_autodelete(db, chat_id, msg.get("message_id"))
+            _reply_private_only(db, chat_id, msg)
             return
 
-        # P1 个人查询在群里不执行（结果会公开给全群看）
+        # P1 个人查询在群里不执行（结果会公开给全群看），同统一形态
         if cmd in _P1_COMMANDS and in_group:
-            from backend.tg_bot import queries
-
-            _send_reply(db, chat_id, queries.PRIVATE_ONLY_TEXT,
-                        autodelete=True)
-            _schedule_cmd_autodelete(db, chat_id, msg.get("message_id"))
+            _reply_private_only(db, chat_id, msg)
             return
 
-        # /redeem 在群里发 = 把兑换码公开给全群：拒绝执行，尽量删掉原消息（没权限就算了），提示私聊
+        # /redeem 在群里发 = 把兑换码公开给全群：拒绝执行，尽量删掉原消息（没权限就算了），再回统一私聊提示
         if cmd == "/redeem" and in_group:
             try:
                 sender.delete_message(db, chat_id, msg.get("message_id"))
             except Exception as exc:  # noqa: BLE001
                 logger.debug("删除群内 /redeem 消息失败（忽略）: %s", exc)
             if _group_allow(chat_id, group_limit):
-                _send_reply(db, chat_id, "🔒 为保护兑换码，请私聊我发送 /redeem 兑换码，群里不执行兑换",
-                            autodelete=True)
+                _reply_private_only(db, chat_id, msg, schedule_cmd=False)
             return
 
         # 群级限流：超限静默丢弃，避免刷屏
@@ -581,6 +596,14 @@ def dispatch(db, update: dict) -> None:
             # 开关口径与 menu:slots 面板入口一致），单独分发
             reply = handlers.handle_slots_command(
                 db, tg_user, chat_id, args, in_group=in_group)
+        elif cmd == "/duel":
+            reply = handlers.handle_duel(
+                db, tg_user, chat_id, args,
+                update_id=update.get("update_id"), in_group=in_group)
+        elif cmd == "/rain":
+            reply = handlers.handle_rain(
+                db, tg_user, chat_id, args,
+                update_id=update.get("update_id"), in_group=in_group)
         elif cmd == "/whois":
             # /whois 需要群聊上下文（私聊全卡 vs 群内管理员精简卡）
             # 与被回复消息的发送者（群内回复定位），通用签名拿不到，
@@ -592,7 +615,33 @@ def dispatch(db, update: dict) -> None:
                 in_group=in_group, reply_from=reply_from)
         else:
             reply = fn(db, tg_user, chat_id, args)
-        # handler 可返回 str 或 (text, reply_markup) 元组（一键登录按钮）
+        # handler 可返回 str 或 (text, reply_markup) 元组（一键登录按钮）。
+        # 对决面板由这里发出并记下消息编号，进行中不自毁；静默标记表示
+        # 重放已经发过，不再刷第二条。
+        if isinstance(reply, tuple) and reply and reply[0] == "__silent__":
+            return
+        if isinstance(reply, tuple) and reply and reply[0] == "__duel_panel__":
+            from backend import duel as duel_svc
+
+            _marker, text, markup, duel_id = reply
+            ok, err, mid = sender.send_message_ex(db, chat_id, text, markup)
+            if ok and mid:
+                duel_svc.attach_panel(db, duel_id, mid)
+            else:
+                logger.warning("duel panel send failed chat=%s err=%s", chat_id, err)
+                duel_svc.fail_unannounced(db, duel_id)
+            return
+        if isinstance(reply, tuple) and reply and reply[0] == "__rain_panel__":
+            from backend import rain as rain_svc
+
+            _marker, text, markup, rain_id = reply
+            ok, err, mid = sender.send_message_ex(db, chat_id, text, markup)
+            if ok and mid:
+                rain_svc.attach_panel(db, rain_id, mid)
+            else:
+                logger.warning("rain panel send failed chat=%s err=%s", chat_id, err)
+                rain_svc.fail_unannounced(db, rain_id)
+            return
         if isinstance(reply, tuple):
             text, markup = reply
         else:

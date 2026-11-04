@@ -13,7 +13,7 @@ O-03 整合注记（2026-10-31）：执行面统一到 worker 后，提交发生
 清扫、failed 可续跑）在认领侧继续钉死，本文件的断言位置随之移
 到认领调用；A-118 两条（活线程守卫、窗级心跳）位置不变。
 
-HTTP 全部注入替身；DB 用内存 SQLite。
+HTTP 全部注入替身；DB 用临时文件 SQLite。
 """
 
 import os
@@ -29,7 +29,6 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from backend import models as base_models
 from backend.emby_server import models as em
@@ -39,12 +38,22 @@ from backend.integrations import store as config_store
 
 
 @pytest.fixture()
-def db_factory():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
-                           poolclass=StaticPool)
+def db_factory(tmp_path):
+    # 临时文件库，不用 :memory:+StaticPool：StaticPool 让全部线程共用
+    # 同一条 DBAPI 连接，任一会话的回滚会顺带撤销其他会话刚提交的
+    # 写入——worker 的认领 UPDATE 被撤销后任务行可久停 queued
+    # （2026-11-02 CI：test_a118_live_thread_not_marked_stale_on_
+    # second_enqueue 等满 15 秒仍 queued；同根因在 test_transfer_
+    # claim_wake 以 ObjectDeletedError 形态本地复现 2/30、文件库
+    # 口径 0/30）。文件库每会话独立连接，与生产连接语义一致。
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/aggregate_task.db",
+        connect_args={"check_same_thread": False, "timeout": 30})
     base_models.Base.metadata.create_all(engine)
     em.Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)
+    factory = sessionmaker(bind=engine)
+    yield factory
+    engine.dispose()
 
 
 @pytest.fixture()
@@ -213,12 +222,19 @@ def test_a118_live_thread_not_marked_stale_on_second_enqueue(
     try:
         # 认领轮询：正常毫秒级；15 秒是给高负载下线程调度抖动的
         # 宽限（曾有一次 13 秒慢轮合跑失败），不断言时序、只断言终态。
+        # 等的不只是行 running：execute_task 先提交认领、之后才
+        # _register_live 登记活线程，只等行 running 就往下走时，
+        # 高负载下登记还没落定，心跳一冻、二次入队便把活任务误判
+        # interrupted（CI 假红两轮实证）。退出条件带上登记落定，
+        # 等不到仍在下面断言处照常红，断言口径不变（#1732 同款）。
         deadline = time.time() + 15
         while time.time() < deadline:
-            if _task_row(db_factory, task_id).status == "running":
+            if (_task_row(db_factory, task_id).status == "running"
+                    and task_id in jobs._live_task_ids()):
                 break
             time.sleep(0.05)
         assert _task_row(db_factory, task_id).status == "running"
+        assert task_id in jobs._live_task_ids()
         # 模拟长库：执行线程在窗内不刷心跳，心跳冻在认领时刻。
         session = db_factory()
         try:

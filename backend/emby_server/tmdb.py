@@ -93,6 +93,13 @@ TMDB_TEXT_FILL_ONLY_CONFIG_KEY = "enrich_tmdb_text_fill_only"
 _TEXT_FILL_CACHE = {"at": 0.0, "value": True}
 _TEXT_FILL_TTL_SEC = 30.0
 
+# 苹果 CMS 源站填充的暂定出处标记（值与 applecms_library_sync 的
+# CMS_METADATA_SOURCE 相同，两处以注释锚定、防漂移测试兜底）：
+# 带此标记的行，文字/评分/类型/国家只是 CMS 源站自带资料，
+# TMDB 命中时**视为未填**——「只填空」保护对它不生效，落库后
+# 标记转正为 "tmdb"，保证 TMDB 优先于源站填充。
+PROVISIONAL_METADATA_SOURCE = "applecms"
+
 # ---------------------------------------------------------------------------
 # 请求级限流 / 超时 / 429 退避（v2.42.9）
 
@@ -129,12 +136,16 @@ def language_fallback_chain(db=None) -> list[str]:
 # 所以**不要**把速率拉满；429 时下面的自适应会自己降下来。
 #
 # 环境变量（沿用旧名字，但语义已从「条目/秒」改为「请求/秒」）：
-#   ENRICH_TMDB_PER_SEC      请求上限（默认 2）
+#   ENRICH_TMDB_PER_SEC      请求上限（默认 4，按 key 独立成桶）
 #   ENRICH_TMDB_MIN_PER_SEC  429 自适应下降的下限（默认 1）
 #   TMDB_TIMEOUT             单次请求超时秒数（默认 10；带 append_to_response 的详情请求
 #                            在跨境链路上 8 秒偏紧）
 #   TMDB_NET_RETRIES         读超时/连接错误的重试次数（默认 2）
-TMDB_PER_SEC = env_float("ENRICH_TMDB_PER_SEC", 2.0, 1.0)
+# 默认 4 req/s/key：TMDB 2019-12 起没有 40/10s 硬限，非正式上限约 50 req/s/IP。
+# 按 key 独立成桶后，4 把 key × 4 = 16 req/s，就是下面 _KeyedLimiter 写明的
+# 安全区（再往上才接近 50/IP）。旧默认 2 在「未命中要 6~9 次搜索」时把
+# 吞吐卡在每分钟几十条。429 仍会把该 key 的桶乘性降到 MIN_PER_SEC。
+TMDB_PER_SEC = env_float("ENRICH_TMDB_PER_SEC", 4.0, 1.0)
 TMDB_MIN_PER_SEC = env_float("ENRICH_TMDB_MIN_PER_SEC", 1.0, 1.0)
 TMDB_TIMEOUT = env_float("TMDB_TIMEOUT", 10.0, 5.0)
 TMDB_NET_RETRIES = env_int("TMDB_NET_RETRIES", 2, 0, 4)
@@ -224,9 +235,10 @@ class _KeyedLimiter(_RequestLimiter):
 
     背景：4 把 key 共用 1 个 4 req/s 桶时，加 key 只分摊配额、不提速
     （生产实证：245 次调用四 key 均匀 61/61/61/62，吞吐 6→5 条/分未涨）。
-    每把 key 一个独立桶后，有效上限 = key 数 × TMDB_PER_SEC
-    （4 把 ≈ 16 req/s，远低于 TMDB 非正式上限 ~50 req/s/IP，安全区内，
-    不要再往上加）。
+    每把 key 一个独立桶后，有效上限 = key 数 × TMDB_PER_SEC。
+    默认每 key 4 req/s 时，4 把 key ≈ 16 req/s，低于非正式上限 ~50 req/s/IP。
+    不要再把默认值往上抬（key 数一多就会顶到 IP 限额）；要更快用环境变量
+    单独调，429 自适应会把被限的那把 key 降下来。
 
     429 语义：哪把 key 被 429，就只压低那把 key 的桶（note_throttled 走
     limiter_for(key)），不连累其他 key——配额本来就是按 key 算的。
@@ -2048,56 +2060,6 @@ class TmdbClient:
             self._cache_put(key, data)
             return data
 
-    # 302 Next A1 数据集同步用的榜单路径白名单：只许这 6 条，调用方
-    # 传别的 list_name/media_type 直接 ValueError，绝不拼任意路径打 TMDB。
-    _DATASET_LIST_PATHS = {
-        ("trending", "movie"): "/trending/movie/week",
-        ("trending", "tv"): "/trending/tv/week",
-        ("popular", "movie"): "/movie/popular",
-        ("popular", "tv"): "/tv/popular",
-        ("top_rated", "movie"): "/movie/top_rated",
-        ("top_rated", "tv"): "/tv/top_rated",
-    }
-
-    def list_page(self, list_name: str, media_type: str,
-                  page: int = 1) -> list:
-        """榜单页（供 A1 数据集同步，不走请求路径）。
-
-        返回该页的 results 列表（每项是 TMDB 原始 dict）；未配置 key、
-        404/401 按 _get 口径返回空列表（阴性，不烧重试预算）；瞬态
-        失败上抛 ``TmdbTransientError``，调用方记 last_error 后继续
-        下一页/下一榜，不中断整轮同步。
-        """
-        path = self._DATASET_LIST_PATHS.get((list_name, media_type))
-        if path is None:
-            raise ValueError(f"不支持的榜单：{list_name}/{media_type}")
-        data = self._get(path, {"page": max(1, int(page or 1))})
-        if not isinstance(data, dict):
-            return []
-        results = data.get("results")
-        return list(results) if isinstance(results, list) else []
-
-    def genre_names(self, media_type: str) -> dict:
-        """类型 id → 类型名（供 A1 数据集同步把 genre_ids 换成名）。
-
-        榜单页只回 genre_ids（数字），直接存数字前端没法展示；这里
-        拉一次类型表换成名。拿不到（未配置/瞬态失败）返回空 dict，
-        调用方把类型名空着，不挡同步。
-        """
-        if media_type not in ("movie", "tv"):
-            raise ValueError(f"不支持的类型：{media_type}")
-        try:
-            data = self._get(f"/genre/{media_type}/list", {})
-        except Exception:  # noqa: BLE001 — 类型表失败不挡同步
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        out = {}
-        for g in data.get("genres") or []:
-            if isinstance(g, dict) and g.get("id") is not None:
-                out[g["id"]] = g.get("name") or ""
-        return out
-
     def season_poster(self, tmdb_id: str, season_number: int) -> Optional[str]:
         """TMDB 季海报（``GET /tv/{id}/season/{n}`` 的 ``poster_path``）
 
@@ -2448,7 +2410,10 @@ class TmdbClient:
             return
         # 详情只补缺项（简介/评分/别名/类型/年份/首播日期），不覆盖 NFO 提供的文字。
         # 用 getattr 兜底：调用方（含测试里的轻量替身）未必带这个字段。
-        if not getattr(item, "metadata_source", None):
+        # 例外：源站暂定填充（PROVISIONAL）视为未填，TMDB 盖过后转正。
+        provisional = getattr(item, "metadata_source", None) == \
+            PROVISIONAL_METADATA_SOURCE
+        if not getattr(item, "metadata_source", None) or provisional:
             item.metadata_source = "tmdb"
         # 片长（元数据口径）：探测前客户端「媒体信息」不至于显示 0 秒
         apply_runtime(item, data)
@@ -2456,7 +2421,7 @@ class TmdbClient:
         # 这是「有 tmdb_id 却无类型」的主因：以前 apply_details 完全忽略它，
         # 凡走 tmdb_id → 详情分支的（NFO 自带 tmdb_id、别名匹配、已有 id 补缺）
         # 都永远拿不到类型，只有搜索命中走 apply() 的才有。
-        if not (getattr(item, "genres", None) or "").strip():
+        if provisional or not (getattr(item, "genres", None) or "").strip():
             gnames = _genres_from_details(data)
             if gnames:
                 item.genres = ",".join(gnames)
@@ -2470,7 +2435,8 @@ class TmdbClient:
         # 简介与评分也从详情补：搜索结果的 overview/vote_average 经常是空或 0，
         # 只靠 apply() 会让「有 tmdb_id 却缺简介/评分」的一大批永远补不上。
         # 批2：只填空、不覆盖——已有简介/评分时 TMDB 详情不再覆盖。
-        fill_only = tmdb_text_fill_only()
+        # 源站暂定填充豁免：那些值只是 CMS 自带资料，按未填处理。
+        fill_only = tmdb_text_fill_only() and not provisional
         overview = data.get("overview")
         if overview and (not fill_only or not (getattr(item, "overview", None) or "").strip()):
             item.overview = overview
@@ -2507,7 +2473,7 @@ class TmdbClient:
         # 只补缺项、不覆盖已有（与简介/评分同口径）；getattr 兜底轻量替身。
         countries = [str(c).strip() for c in (data.get("origin_country") or [])
                      if str(c).strip()]
-        if countries and not getattr(item, "countries", None):
+        if countries and (provisional or not getattr(item, "countries", None)):
             item.countries = ",".join(countries)[:500]
         spoken = data.get("spoken_languages") or []
         lang_names = [str(l.get("english_name") or l.get("name") or "").strip()
@@ -2560,6 +2526,9 @@ class TmdbClient:
         return bool(specs)
 
     def apply(self, item: emby_models.MediaItem, hit: dict, kind: str) -> None:
+        # 源站暂定填充在标记被改写前先记下：它不享受「只填空」保护。
+        provisional = getattr(item, "metadata_source", None) == \
+            PROVISIONAL_METADATA_SOURCE
         item.tmdb_id = str(hit.get("id"))
         item.last_scraped_at = datetime.now()
         # 文字与图片都来自 TMDB 搜索结果
@@ -2569,7 +2538,8 @@ class TmdbClient:
         # TMDB 对没有评分的条目返回 0.0，那是**合法数据**，判假值会让这类条目
         # 永远没有评分（生产实测 21天重养自己 就是 0.0）。已有评分时 TMDB 的
         # 0.0 不再覆盖（为将来 NFO/人工编辑让路）。
-        fill_only = tmdb_text_fill_only()
+        # 源站暂定填充豁免：那些值只是 CMS 自带资料，按未填处理。
+        fill_only = tmdb_text_fill_only() and not provisional
         if not fill_only or not (getattr(item, "overview", None) or "").strip():
             item.overview = hit.get("overview") or item.overview
         rating = hit.get("vote_average")

@@ -198,13 +198,17 @@ class TestWiring:
         # playback_info 双轨发放签名参数
         assert "issue_play_sign" in content
         assert "&uid=" in content and "&exp=" in content and "&sign=" in content
-        # 六个播放路由走签名优先的鉴权依赖
+        # 七个播放路由走签名优先的鉴权依赖
         # （video_stream / video_stream_ext / video_stream_bare / video_hls
         # + #1248 上游兜底口，上游口与 video_stream 同口径走 get_play_user，
         # 故计入；video_stream_bare 为 #1358 新增的无后缀 /stream 重定向口；
         # upstream_item_stream 为 U-02 详情页上游线路取流口，与上游兜底口
-        # 逐项同门禁，故同样计入）
-        assert content.count("Depends(get_play_user)") == 6
+        # 逐项同门禁，故同样计入；
+        # + #1764 清单代理二级端点 upstream_playlist_media，
+        # 同款 get_play_user 验签，故同样计入；
+        # + #1818 借帧修复段端点 upstream_graft_segment，
+        # 同款 get_play_user 验签 + 付费墙 + 绑定门禁，故同样计入）
+        assert content.count("Depends(get_play_user)") == 8
         # 防盗链检查挂在 video_stream（video_hls 转交 video_stream，
         # 同一检查点覆盖两个入口）
         assert content.count("play_sign.check_referer") == 1
@@ -214,7 +218,10 @@ class TestWiring:
             content = f.read()
         assert "def get_play_user" in content
         assert "expires_at=play_sign.token_expiry_default()" in content
-        assert content.count("play_sign.token_is_usable(row)") == 2
+        # token_is_usable 三个调用点：resolve_token / get_emby_user 的
+        # 令牌可用性校验 + PA-054 新增的 rotate_web_portal_token 图片
+        # key 复用校验（复用前同样过 token_is_usable，不另起第二套判据）
+        assert content.count("play_sign.token_is_usable(row)") == 3
 
     def test_model_has_expires_at(self):
         with open("backend/emby_server/models.py", encoding="utf-8") as f:

@@ -44,16 +44,20 @@ quark_vip_required，开关 quark_bind_vip_check_enabled
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
+import threading
+import time
+import uuid
 
 import logging
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.emby_server import models as em
-from backend.emby_server import quarkdrive
-from backend.emby_server import transfer115
 from backend.emby_server.env_util import env_int
 from backend.emby_server.upstream_sources import (
     SealedSecretError,
@@ -86,7 +90,7 @@ _SIZE_LIMIT_MESSAGE = (
 #: 失效三档 → 用户端文案（照抄定稿 BYOS-4 暂定三句，非 FMBY 原文）。
 BINDING_ERROR_MESSAGES = {
     "auth_error": "账号凭据不对，请重新绑定。",
-    "expired": "115 登录已过期，请重新绑定。",
+    "expired": "登录已过期，请重新绑定。",
     "throttled": "账号被限制，请稍后再试或更换账号绑定。",
     "pan115_vip_required": "该 115 账号不是 VIP，115 绑定需要 VIP 账号，请开通后重新绑定。",
     "quark_vip_required": "该夸克账号不是会员，夸克绑定需要会员账号（免费账号下载限速、容量有限，无法正常使用），请开通会员后重新绑定。",
@@ -97,14 +101,29 @@ PROVIDER_PAN115 = "pan115"
 PROVIDER_DRIVE = "drive"
 PROVIDER_QUARK = "quark"
 
+#: 已下线的用户绑定 provider（2026-11-02 站主亲定：夸克与 115 的
+#: 用户绑定线整体删除）。建绑/重验/取流一律拒绝，名单不再返回，
+#: 存量绑定行代码层视为不存在；存量数据本身一期不删（二期清理）。
+REMOVED_PROVIDERS = (PROVIDER_PAN115, PROVIDER_QUARK)
+REMOVED_PROVIDER_MESSAGE = "该网盘已下线，请改绑 Google Drive。"
+
+#: 存量收敛落盘档位（2026-11-03 收敛单）：已下线 provider 的存量
+#: active 行统一落 invalid + last_error_kind="provider_removed"
+#: （档位名与转存域 PROVIDER_REMOVED_KIND 同名同义、终态不可用），
+#: 用户端文案就是 REMOVED_PROVIDER_MESSAGE 本句，不另编新文案；
+#: 凭据行由收敛脚本按 _mark_failed 同口径同步落同一档位。
+ERROR_KIND_TO_STATUS["provider_removed"] = "invalid"
+BINDING_ERROR_MESSAGES["provider_removed"] = REMOVED_PROVIDER_MESSAGE
+
 
 class BindingError(RuntimeError):
     """绑定操作失败（带可分类的 kind，供调用方定状态码与文案）。
 
     kind 取值：auth_error / expired / throttled（落状态三档）、
     pan115_vip_required / quark_vip_required（非会员账号，落 invalid）、
-    validation（入参/上限/重名，400）、unsupported（P1 不支持的
-    provider，如 drive，400）、not_found（非本人或不存在，404）、
+    validation（入参/上限，400）、conflict（同名绑定且凭据不同，
+    409）、unsupported（P1 不支持的 provider，如 drive，400）、
+    not_found（非本人或不存在，404）、
     transient（一过性失败，不落状态，调用方按 502 处理）。
     """
 
@@ -119,79 +138,17 @@ def binding_limit_per_user() -> int:
     return env_int(BINDING_LIMIT_ENV, BINDING_LIMIT_DEFAULT, lo=1)
 
 
-#: 115 绑定 VIP 校验开关（SystemConfig 键，非 env；仅此一处定义，
-#: 管理端/运维改 system_configs 行即生效）。
-KEY_PAN115_BIND_VIP_CHECK = "pan115_bind_vip_check_enabled"
-
-
-def pan115_bind_vip_check_enabled(db: Session) -> bool:
-    """115 绑定 VIP 校验开关（默认开）。
-
-    读法与 playback_strategy 的同类键同款（store 热读 + fail-safe）：
-    读失败回默认开并记日志——校验是防呆不是门禁本体，读不到配置
-    不该悄悄关掉。关的口径与同类键一致：0/false/no/off 视为关。
-    """
-    try:
-        raw = (store.get_value(
-            db, KEY_PAN115_BIND_VIP_CHECK, "true") or "").strip().lower()
-    except Exception:  # noqa: BLE001 - 测试桩/异常 DB 场景下保默认
-        logger.warning(
-            "pan115_bind_vip_check_enabled 读取失败，回默认开", exc_info=True)
-        return True
-    return raw not in ("0", "false", "no", "off")
-
-
-#: 夸克绑定开关（SystemConfig 键，非 env；仅此一处定义，
-#: 管理端/运维改 system_configs 行即生效）。
-KEY_QUARK_BIND_ENABLED = "quark_bind_enabled"
-
-
-def quark_bind_enabled(db: Session) -> bool:
-    """夸克绑定入口开关（默认开）。
-
-    读法与 pan115_bind_vip_check_enabled 同款（store 热读 +
-    fail-safe）：读失败回默认开并记日志——开关是入口控制不是
-    安全门禁，读不到配置不该悄悄关掉已上线的绑定入口。
-    """
-    try:
-        raw = (store.get_value(
-            db, KEY_QUARK_BIND_ENABLED, "true") or "").strip().lower()
-    except Exception:  # noqa: BLE001 - 测试桩/异常 DB 场景下保默认
-        logger.warning(
-            "quark_bind_enabled 读取失败，回默认开", exc_info=True)
-        return True
-    return raw not in ("0", "false", "no", "off")
-
-
-#: 夸克绑定会员校验开关（SystemConfig 键，非 env；仅此一处定义，
-#: 管理端/运维改 system_configs 行即生效）。照 115 的
-#: pan115_bind_vip_check_enabled 同款，仅键名与日志文案不同。
-KEY_QUARK_BIND_VIP_CHECK = "quark_bind_vip_check_enabled"
-
-
-def quark_bind_vip_check_enabled(db: Session) -> bool:
-    """夸克绑定会员校验开关（默认开）。
-
-    读法与 pan115_bind_vip_check_enabled 同款（store 热读 +
-    fail-safe）：读失败回默认开并记日志——校验是防呆不是门禁
-    本体，读不到配置不该悄悄关掉。关的口径一致：0/false/no/off
-    视为关。
-    """
-    try:
-        raw = (store.get_value(
-            db, KEY_QUARK_BIND_VIP_CHECK, "true") or "").strip().lower()
-    except Exception:  # noqa: BLE001 - 测试桩/异常 DB 场景下保默认
-        logger.warning(
-            "quark_bind_vip_check_enabled 读取失败，回默认开", exc_info=True)
-        return True
-    return raw not in ("0", "false", "no", "off")
-
-
 #: provider 专属文案覆盖（只覆盖与 provider 强相关的句子，如
 #: expired 里点名了 115 的那句；其余档位各 provider 共用
 #: BINDING_ERROR_MESSAGES，不另编新档位）。
 _PROVIDER_ERROR_MESSAGE_OVERRIDES = {
-    "quark": {"expired": "夸克登录已过期，请重新绑定。"},
+    "quark": {
+        "expired": "夸克登录已过期，请重新绑定。",
+        # 风控/限频不是过期：明说临时拦截，免得用户对着好好的
+        # Cookie 反复重绑（2026-11-02 误判修复配套文案）。
+        "throttled": "夸克临时拦截了这次验证（风控或操作频繁），"
+                     "账号没有过期，请稍后再试。",
+    },
 }
 
 
@@ -248,9 +205,10 @@ def list_binding_providers(db: Session) -> list[str]:
         if mapped:
             found.add(mapped)
     found |= _extra_binding_providers()
-    if not quark_bind_enabled(db):
-        # 夸克绑定开关关：名单里也不出（与 create_binding 拒绝同口径）
-        found.discard(PROVIDER_QUARK)
+    # 已下线 provider 永不出现在名单里（挂载映射与 env 额外名单
+    # 两侧都过滤，前端据此整块不渲染这两家）。
+    for removed in REMOVED_PROVIDERS:
+        found.discard(removed)
     # 固定顺序输出；前端只做 includes 判断，不依赖顺序
     return [p for p in ("drive", "pan115", "quark") if p in found]
 
@@ -301,7 +259,10 @@ def get_active_binding(db: Session, user_id: int,
     多个 active 绑定时取最早建的一个（P1 口径，写进文档；P3 按绑定
     扫描入库后，条目与绑定的归属由扫描线定，不再靠“最早”）。
     只返回本用户自己的行，绝不跨用户。
+    已下线 provider（REMOVED_PROVIDERS）恒回 None：存量行视为不存在。
     """
+    if provider in REMOVED_PROVIDERS:
+        return None
     return (
         db.query(em.UserStorageBinding)
         .filter(em.UserStorageBinding.user_id == user_id,
@@ -312,104 +273,64 @@ def get_active_binding(db: Session, user_id: int,
     )
 
 
-def binding_115_cookie(db: Session, user_id: int,
-                       binding_id: int) -> str:
-    """指定绑定行的 115 Cookie（BYOS P3 按绑定扫描列举用，唯一口）。
+#: per-binding 凭据锁的 Redis 键前缀（规格：binding:<id>）。
+_BINDING_LOCK_PREFIX = "binding:"
+#: 锁 TTL（毫秒）：临界区可能含整段上传（分钟级），靠续租线程
+#: 保活，TTL 只防持锁进程猝死后死锁；续租间隔 = TTL/3。
+_BINDING_LOCK_TTL_MS = 120_000
+_LOCK_RELEASE_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('del', KEYS[1]) end return 0")
+_LOCK_RENEW_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('pexpire', KEYS[1], ARGV[2]) end return 0")
 
-    - 只认本人行、只认 pan115 行：他人行 / 非 115 行按 not_found 处理
-      （不泄露他人绑定存在性，与 delete_binding 同口径）；
-    - 凭据行归属不对（scope 非 user、owner 非本人）→ transient 响亮报错，
-      不回落共享 Cookie——回落会把别人的盘当成该用户的盘；
-    - 解密封失败 → 绑定落 auth_error 后抛 auth_error（P1 直链同款口径，
-      密钥轮换后旧密文解不开，须重绑）；
-    - 返回的明文只给调用方当次列举用：调用方（byos_scan）不得记日志、
-      不得进返回值、不得跨绑定复用。
+
+#: 夸克 Cookie 的轮换字段（上游每次响应都可能轮换，只有这两个）。
+_ROTATION_COOKIE_KEYS = ("__puus", "__pus")
+
+
+def _cookie_field(cookie: str, name: str) -> str:
+    """从 Cookie 串里取一个字段值，取不到回空串。"""
+    for chunk in (cookie or "").split(";"):
+        chunk = chunk.strip()
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        if key.strip() == name:
+            return value.strip()
+    return ""
+
+
+def _same_credential(submitted: str, stored: str) -> bool:
+    """两份 Cookie 是否同一凭据：轮换字段不计。
+
+    夸克验活会轮换 __puus/__pus 并回写库内凭据，因此“同一表单
+    重提”时提交值与库内值常只差轮换字段——必须忽略它们比较，
+    否则重试会被误判成不同账号。115 凭据无轮换字段，等价于
+    明文相等比较。无 '=' 的裸片段两边一致忽略。
     """
-    binding = (
-        db.query(em.UserStorageBinding)
-        .filter(em.UserStorageBinding.id == binding_id,
-                em.UserStorageBinding.user_id == user_id)
-        .first()
-    )
-    if binding is None or binding.provider != PROVIDER_PAN115:
-        raise BindingError("not_found", "绑定不存在或不属于当前用户。")
-    cred = _credential_of(db, binding)
-    try:
-        cookie = unseal_secret(cred.sealed_credential or "")
-    except SealedSecretError as exc:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError(
-            "auth_error", BINDING_ERROR_MESSAGES["auth_error"]) from exc
-    if not cookie:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError("auth_error", BINDING_ERROR_MESSAGES["auth_error"])
-    return cookie
 
+    def parts(cookie: str) -> tuple:
+        pairs = {}
+        bare = []
+        for chunk in (cookie or "").split(";"):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if "=" in chunk:
+                key, value = chunk.split("=", 1)
+                key = key.strip()
+                if key in _ROTATION_COOKIE_KEYS:
+                    continue
+                pairs[key] = value.strip()
+            else:
+                # 无 '=' 的裸片段（如桩里的 COOKIE-XYZ）也参与比较：
+                # 忽略它们会把不同裸凭据误判成同一凭据。
+                bare.append(chunk)
+        return pairs, sorted(bare)
 
-def binding_quark_cookie(db: Session, user_id: int,
-                         binding_id: int) -> str:
-    """指定绑定行的夸克 Cookie（二期转存/点播取凭据唯一口）。
-
-    与 binding_115_cookie 逐项同口径，只换 provider：
-    - 只认本人行、只认 quark 行：他人行 / 非夸克行按 not_found
-      处理（不泄露他人绑定存在性）；
-    - 凭据行归属不对 → transient 响亮报错，不回落任何共享凭据；
-    - 解密封失败 / 空凭据 → 绑定落 auth_error 后抛 auth_error；
-    - 返回的明文只给调用方当次使用：不得记日志、不得进返回值
-      对外、不得跨绑定复用。
-    """
-    binding = (
-        db.query(em.UserStorageBinding)
-        .filter(em.UserStorageBinding.id == binding_id,
-                em.UserStorageBinding.user_id == user_id)
-        .first()
-    )
-    if binding is None or binding.provider != PROVIDER_QUARK:
-        raise BindingError("not_found", "绑定不存在或不属于当前用户。")
-    cred = _credential_of(db, binding)
-    try:
-        cookie = unseal_secret(cred.sealed_credential or "")
-    except SealedSecretError as exc:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError(
-            "auth_error", BINDING_ERROR_MESSAGES["auth_error"]) from exc
-    if not cookie:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError("auth_error", BINDING_ERROR_MESSAGES["auth_error"])
-    return cookie
-
-
-def absorb_quark_cookie_rotation(db: Session,
-                                 binding: em.UserStorageBinding,
-                                 original_cookie: str,
-                                 current_cookie: str) -> bool:
-    """夸克 Cookie 轮换回写（二期共用口：转存执行器与点播取链共用）。
-
-    夸克每次响应都可能轮换 __puus/__pus：QuarkClient 用后
-    client.cookie 已同步为最新值，与取凭据时的原值不同就必须
-    重新密封落库，否则绑定慢性失效（与一期验活后回写同一纪律，
-    收口到一处实现）。回写失败只记日志返 False——保活优化不许
-    打挂转存/点播主流程；无变化返 False。
-    """
-    if not current_cookie or current_cookie == original_cookie:
-        return False
-    try:
-        cred = _credential_of(db, binding)
-        cred.sealed_credential = seal_secret(current_cookie)
-        db.commit()
-        return True
-    except Exception:  # noqa: BLE001 — 回写失败不拖垮主流程
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-        logger.warning("夸克 Cookie 轮换回写失败 binding=%s",
-                       getattr(binding, "id", None), exc_info=True)
-        return False
+    return parts(submitted) == parts(stored)
 
 
 def _credential_of(db: Session,
@@ -427,25 +348,6 @@ def _credential_of(db: Session,
     return cred
 
 
-def _classify_pan115_error(exc: Exception) -> tuple[str, str] | None:
-    """115 失败 → (error_kind, 文案)，一过性失败返回 None（不落状态）。
-
-    - Pan115AuthError（含 HTTP 401/403、auth errno、登录态失效）→
-      expired（照抄定稿 BYOS-4：401/403 定性为 cookie_expired）；
-    - 含限流信号的 Pan115Error → throttled；
-    - 其余 Pan115Error / 网络异常 → None（一过性，不落状态）。
-    """
-    if isinstance(exc, transfer115.Pan115AuthError):
-        return "expired", BINDING_ERROR_MESSAGES["expired"]
-    if isinstance(exc, transfer115.Pan115Error):
-        text = str(exc)
-        if ("429" in text or "频繁" in text or "限流" in text
-                or "too many" in text.lower()):
-            return "throttled", BINDING_ERROR_MESSAGES["throttled"]
-        return None
-    return None
-
-
 def _mark_failed(db: Session, binding: em.UserStorageBinding,
                  kind: str) -> None:
     """绑定行 + 凭据行同步落失败状态（单事务内由调用方提交）"""
@@ -459,110 +361,6 @@ def _mark_failed(db: Session, binding: em.UserStorageBinding,
                    binding.id, binding.user_id, binding.provider, kind)
 
 
-def _verify_pan115_cookie(cookie: str) -> None:
-    """115 验活：check + 列根目录（设计稿 §3.3：轻量验证）。
-
-    两步都通才算活；check 只证明会话有效，列根目录证明该会话
-    真能读目录（直链播放的前提）。异常按 _classify_pan115_error
-    分类后由调用方定状态。
-    """
-    client = transfer115.Pan115Client(cookie)
-    client.check()
-    client.list_dir("0")
-
-
-def _classify_quark_error(exc: Exception) -> tuple[str, str] | None:
-    """夸克失败 → (error_kind, 文案)，一过性失败返回 None（不落状态）。
-
-    - QuarkAuthError（HTTP 401/403、信封鉴权类错误）→ expired
-      （登录态过期，与 115 的 401/403 定性同口径）；
-    - 含限流信号的 QuarkError → throttled；
-    - 其余 QuarkError / 网络异常 → None（一过性，不落状态）。
-    """
-    if isinstance(exc, quarkdrive.QuarkAuthError):
-        return "expired", error_message("expired", PROVIDER_QUARK)
-    if isinstance(exc, quarkdrive.QuarkError):
-        text = str(exc)
-        if ("429" in text or "频繁" in text or "限流" in text
-                or "too many" in text.lower()):
-            return "throttled", error_message("throttled", PROVIDER_QUARK)
-        return None
-    return None
-
-
-def _verify_quark_cookie(cookie: str) -> str:
-    """夸克验活：check + 列根目录（与 115 两步验活同款口径）。
-
-    返回验活后的 Cookie：上游会轮换 __puus，client.cookie 已同步
-    为最新值，调用方须把与入参不同的返回值重新密封落库，否则
-    绑定慢性失效。异常按 _classify_quark_error 分类后由调用方定状态。
-    """
-    client = quarkdrive.QuarkClient(cookie)
-    client.check()
-    client.list_root()
-    return client.cookie
-
-
-def _pan115_vip_status(cookie: str) -> str:
-    """115 账号 VIP 三态（vip / not_vip / unknown）；永不抛。
-
-    任何异常（网络、上游失败、客户端构造失败）都收敛成 unknown：
-    查不清不拦绑定，只记日志，不误杀。
-    """
-    try:
-        return transfer115.Pan115Client(cookie).vip_status()
-    except Exception:  # noqa: BLE001 — 查不清不拦，见上
-        logger.warning("115 VIP 校验未得出结论，按查不清放行", exc_info=True)
-        return "unknown"
-
-
-def _pan115_vip_blocked(db: Session, cookie: str) -> bool:
-    """绑定/重验的 VIP 门：开关开且确凿非 VIP 才拦。
-
-    unknown（查不清）只记一行日志、按现行流程放行；是 VIP 或开关
-    关时同样放行。调用点在 Cookie 验活通过之后——Cookie 本身死活
-    仍由 _verify_pan115_cookie + _classify_pan115_error 那套定性，
-    两件事不许混（非 VIP 不许说成 Cookie 失效，反之亦然）。
-    """
-    if not pan115_bind_vip_check_enabled(db):
-        return False
-    status = _pan115_vip_status(cookie)
-    if status == "unknown":
-        logger.info("115 VIP 校验查不清（unknown），绑定按现行流程放行")
-        return False
-    return status == "not_vip"
-
-
-def _quark_vip_status(cookie: str) -> str:
-    """夸克账号会员三态（vip / not_vip / unknown）；永不抛。
-
-    任何异常（网络、上游失败、客户端构造失败）都收敛成 unknown：
-    查不清不拦绑定，只记日志，不误杀（与 _pan115_vip_status 同款）。
-    """
-    try:
-        return quarkdrive.QuarkClient(cookie).vip_status()
-    except Exception:  # noqa: BLE001 — 查不清不拦，见上
-        logger.warning("夸克会员校验未得出结论，按查不清放行", exc_info=True)
-        return "unknown"
-
-
-def _quark_vip_blocked(db: Session, cookie: str) -> bool:
-    """绑定/重验的会员门：开关开且确凿非会员才拦（照 115 同款）。
-
-    unknown（查不清）只记一行日志、按现行流程放行；是会员或开关
-    关时同样放行。调用点在 Cookie 验活通过之后——会员资格与凭据
-    死活是两件事，不许混（非会员不许说成 Cookie 失效）。
-    入参应传验活后的 Cookie（__puus 已轮换回写的那份）。
-    """
-    if not quark_bind_vip_check_enabled(db):
-        return False
-    status = _quark_vip_status(cookie)
-    if status == "unknown":
-        logger.info("夸克会员校验查不清（unknown），绑定按现行流程放行")
-        return False
-    return status == "not_vip"
-
-
 def create_binding(db: Session, user_id: int, provider: str,
                    account_label: str, credential: str,
                    ) -> em.UserStorageBinding:
@@ -570,7 +368,9 @@ def create_binding(db: Session, user_id: int, provider: str,
 
     - provider 必须在 USER_STORAGE_PROVIDERS 内；drive 在 P1 拒绝
       （验证随 P2 OAuth 上线，不存验不活的行），错误明说 P2；
-    - label 去空白后 1–100 字；同用户同 provider 下重名拒绝；
+    - label 去空白后 1–100 字；同用户同 provider 下已有同名绑定时，
+      同凭据（轮换字段不计）幂等返回已有行、不同凭据 409 人话提示，
+      并发撞唯一约束的竞态分支走同一口径，永不 500；
     - 上限：该用户全部绑定行（含失败态）计入上限，超了拒绝
       （删掉死行即可腾位，不静默挤掉旧行）；
     - 验活通过：绑定 + 凭据行双双 active + last_verified_at；
@@ -582,106 +382,19 @@ def create_binding(db: Session, user_id: int, provider: str,
     provider = (provider or "").strip()
     if provider not in em.USER_STORAGE_PROVIDERS:
         raise BindingError("validation", f"不支持的 provider：{provider}")
+    if provider in REMOVED_PROVIDERS:
+        # 已下线（2026-11-02 删除单）：在任何凭据处理之前拒绝，
+        # 不落行、不验活。
+        raise BindingError("unsupported", REMOVED_PROVIDER_MESSAGE)
     if provider == PROVIDER_DRIVE:
         # Drive 不收明文凭据：唯一建绑口是 OAuth start/callback
         # （见 drive_oauth），存一个验不活的 Drive 凭据行会违反
         # “绑完先验活”，故明确拒绝、不落行。
         raise BindingError(
             "unsupported",
-            "Drive 绑定请走 OAuth 授权：POST /storage-bindings/drive/oauth/start，"
-            "本口只接受 115 / 夸克绑定。")
-    if provider == PROVIDER_QUARK and not quark_bind_enabled(db):
-        raise BindingError("unsupported", "夸克绑定暂未开启。")
-    label = (account_label or "").strip()
-    if not label or len(label) > 100:
-        raise BindingError("validation", "account_label 需为 1–100 字。")
-    cookie = transfer115.normalize_cookie(credential or "")
-    if not cookie:
-        raise BindingError("validation", "凭据不能为空。")
-    existing = (
-        db.query(em.UserStorageBinding)
-        .filter(em.UserStorageBinding.user_id == user_id,
-                em.UserStorageBinding.provider == provider,
-                em.UserStorageBinding.account_label == label)
-        .first()
-    )
-    if existing is not None:
-        raise BindingError(
-            "validation", f"同 provider 下已存在同名绑定「{label}」。")
-    count = (
-        db.query(em.UserStorageBinding)
-        .filter(em.UserStorageBinding.user_id == user_id)
-        .count()
-    )
-    if count >= binding_limit_per_user():
-        raise BindingError(
-            "validation",
-            f"绑定已达上限（{binding_limit_per_user()} 个），请先解绑不用的账号。")
-
-    cred = em.MountCredential(
-        # mount_id=NULL：绑定凭据不附属任何挂载（见 MountCredential
-        # docstring；NULL 行不受（mount_id, scope, owner）唯一约束限，
-        # 一用户多绑定才建得出来）。
-        mount_id=None, scope="user", owner_user_id=user_id,
-        sealed_credential=seal_secret(cookie), key_id="fernet-v1",
-        status="invalid")
-    db.add(cred)
-    db.flush()  # 取 cred.id，供绑定行引用
-    binding = em.UserStorageBinding(
-        user_id=user_id, provider=provider, account_label=label,
-        credential_id=cred.id, status="invalid")
-    db.add(binding)
-    db.flush()
-
-    verified_cookie = cookie
-    try:
-        if provider == PROVIDER_QUARK:
-            verified_cookie = _verify_quark_cookie(cookie)
-        else:
-            _verify_pan115_cookie(cookie)
-    except Exception as exc:  # noqa: BLE001 — 分类后决定落态或回滚
-        classified = (
-            _classify_quark_error(exc) if provider == PROVIDER_QUARK
-            else _classify_pan115_error(exc))
-        if classified is None:
-            db.rollback()
-            raise BindingError(
-                "transient", f"验证时上游失败（未落行，可重试）：{exc}") from exc
-        kind, _message = classified
-        _mark_failed(db, binding, kind)
-        db.commit()
-        return binding
-
-    if provider == PROVIDER_PAN115 and _pan115_vip_blocked(db, cookie):
-        _mark_failed(db, binding, "pan115_vip_required")
-        db.commit()
-        return binding
-
-    if (provider == PROVIDER_QUARK
-            and _quark_vip_blocked(db, verified_cookie)):
-        _mark_failed(db, binding, "quark_vip_required")
-        db.commit()
-        return binding
-
-    if verified_cookie != cookie:
-        # 夸克验活时上游轮换了 __puus：回写新值再密封，只存
-        # 初始值绑定会慢性失效（见 _verify_quark_cookie）。
-        cred.sealed_credential = seal_secret(verified_cookie)
-    now = datetime.now()
-    binding.status = "active"
-    binding.last_verified_at = now
-    binding.last_error_kind = None
-    cred.status = "active"
-    cred.last_verified_at = now
-    cred.last_error_kind = None
-    # 绑定成功连带复活转存死单（PA-004 补全，2026-11-02 用户
-    # 亲点）：与 Drive 重绑共用同一份实现，该用户 failed/
-    # no_binding 等三类行打回 pending、工人按新凭据重跑；只在
-    # 验活成功点调，失败落态/一过性回滚路径不调（同事务提交）。
-    from backend.emby_server import transfer_variant as _tv
-    _tv.revive_binding_failed_jobs(db, user_id)
-    db.commit()
-    return binding
+            "Drive 绑定请走 OAuth 授权：POST /storage-bindings/drive/oauth/start。")
+    raise BindingError("unsupported",
+                       "该 provider 不支持建绑。")
 
 
 def verify_binding(db: Session, user_id: int,
@@ -702,73 +415,17 @@ def verify_binding(db: Session, user_id: int,
     )
     if binding is None:
         raise BindingError("not_found", "绑定不存在或不属于当前用户。")
+    if binding.provider in REMOVED_PROVIDERS:
+        # 已下线 provider 的存量行不许重验复活（2026-11-02 删除单）。
+        raise BindingError("unsupported", REMOVED_PROVIDER_MESSAGE)
     if binding.provider == PROVIDER_DRIVE:
         # P2：Drive 重验 = 强制刷新 + 验活（drive_oauth，局部导入
         # 防循环：drive_oauth 顶层导入本模块）。
         from backend.emby_server import drive_oauth
 
         return drive_oauth.refresh_drive_binding(db, user_id, binding_id)
-    if binding.provider not in (PROVIDER_PAN115, PROVIDER_QUARK):
-        raise BindingError("unsupported", "该 provider 不支持重验。")
-    if binding.provider == PROVIDER_QUARK and not quark_bind_enabled(db):
-        raise BindingError("unsupported", "夸克绑定暂未开启。")
-    cred = _credential_of(db, binding)
-    try:
-        cookie = unseal_secret(cred.sealed_credential or "")
-    except SealedSecretError as exc:
-        raise BindingError(
-            "auth_error", "凭据已失效（密钥轮换后旧密文解不开），请重新绑定。") from exc
-    if not cookie:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        return binding
-    verified_cookie = cookie
-    try:
-        if binding.provider == PROVIDER_QUARK:
-            verified_cookie = _verify_quark_cookie(cookie)
-        else:
-            _verify_pan115_cookie(cookie)
-    except Exception as exc:  # noqa: BLE001 — 分类后决定落态或不改
-        classified = (
-            _classify_quark_error(exc)
-            if binding.provider == PROVIDER_QUARK
-            else _classify_pan115_error(exc))
-        if classified is None:
-            raise BindingError(
-                "transient", f"重验时上游失败（状态未改，可重试）：{exc}") from exc
-        kind, _message = classified
-        _mark_failed(db, binding, kind)
-        db.commit()
-        return binding
-    if (binding.provider == PROVIDER_PAN115
-            and _pan115_vip_blocked(db, cookie)):
-        _mark_failed(db, binding, "pan115_vip_required")
-        db.commit()
-        return binding
-
-    if (binding.provider == PROVIDER_QUARK
-            and _quark_vip_blocked(db, verified_cookie)):
-        _mark_failed(db, binding, "quark_vip_required")
-        db.commit()
-        return binding
-    if verified_cookie != cookie:
-        # 夸克验活时上游轮换了 __puus：回写新值再密封（同
-        # create_binding 口径，见 _verify_quark_cookie）。
-        cred.sealed_credential = seal_secret(verified_cookie)
-    now = datetime.now()
-    binding.status = "active"
-    binding.last_verified_at = now
-    binding.last_error_kind = None
-    cred.status = "active"
-    cred.last_verified_at = now
-    cred.last_error_kind = None
-    # 重验通过连带复活转存死单（PA-004 补全，口径同
-    # create_binding 成功点）：与 Drive 重绑共用同一份实现，
-    # 只在验活通过点调，失败落态/一过性不改状态路径不调。
-    from backend.emby_server import transfer_variant as _tv
-    _tv.revive_binding_failed_jobs(db, user_id)
-    db.commit()
-    return binding
+    raise BindingError("unsupported",
+                       "该 provider 不支持重验。")
 
 
 def delete_binding(db: Session, user_id: int, binding_id: int,
@@ -849,240 +506,19 @@ def list_bindings(db: Session, user_id: int) -> list[dict]:
     return [serialize_binding(r) for r in rows]
 
 
-def resolve_user115_direct_url(db: Session, user_id: int,
-                               item: em.MediaItem, ua: str = "") -> str:
-    """绑定用户播 115 型条目：按该绑定自己的凭据现签直链（P1 播放口）。
+class AliveProbeResult(str):
+    """存活探测结论（str 子类）：本体是 "alive" / "dead" / "unknown"，
+    另带探测最终 HTTP 状态码 ``status``（探测异常/空地址时 None）。
 
-    - 条目须为 mount:// 路径且挂载类型为 115，否则 BindingError
-     （not_found：本变体不适用，调用方按 409 处理）；
-    - 凭据只取该用户自己的 active 绑定（最早建的一个），绝不跨用户；
-    - 直链现签现取，**不走共享 pickcode 缓存**：缓存键只有 pickcode，
-      跨用户复用会把 A 的签名地址发给 B；
-    - 凭据失效（115 401/403 → cookie_expired）→ 绑定落失败态后
-      抛 BindingError（kind=expired/throttled/auth_error，调用方按
-      409 + 三档文案告知用户，不静默回落共享中继）；
-    - 一过性失败 → 不改状态，抛 transient（调用方按 409 通用句处理）。
-    返回 115 下载地址（调用方 302 给播放器自拉，字节不过服务器）。
+    出流逐跳留痕要状态码（只知道 dead 不知道是 404 还是 410，
+    下次取证还是瞎），用 str 子类透传：全部既有 == 比较与分支
+    判断行为不变；桩返回裸 str 时 getattr 取不到 status，留痕
+    侧自然降级。
     """
-    from backend.emby_server import mounts as mount_lib
 
-    parsed = mount_lib.parse_mount_path(getattr(item, "file_path", "") or "")
-    if parsed is None:
-        raise BindingError("not_found", "条目不是挂载路径，无绑定直链。")
-    mount_id, rel = parsed
-    mount = (
-        db.query(em.StorageMount)
-        .filter(em.StorageMount.id == mount_id)
-        .first()
-    )
-    if mount is None or mount.mount_type != mount_lib.MOUNT_PAN115:
-        raise BindingError("not_found", "条目挂载不是 115，无绑定直链。")
-    binding = get_active_binding(db, user_id, PROVIDER_PAN115)
-    if binding is None:
-        raise BindingError("not_found", "当前用户没有可用的 115 绑定。")
-    cred = _credential_of(db, binding)
-    try:
-        cookie = unseal_secret(cred.sealed_credential or "")
-    except SealedSecretError as exc:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError(
-            "auth_error", BINDING_ERROR_MESSAGES["auth_error"]) from exc
-    if not cookie:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError("auth_error", BINDING_ERROR_MESSAGES["auth_error"])
-    provider = mount_lib.Pan115Mount(mount, db=db, cookie_override=cookie)
-    try:
-        entry = provider._locate(rel)
-        pickcode = entry.get("pickcode") or ""
-        if not pickcode:
-            raise mount_lib.MountError(f"115 未返回该文件的 pickcode: {rel}")
-        # 现签现取：不用 _get_cached_115_url（键只有 pickcode，跨用户
-        # 复用即把 A 的签名地址发给 B；且直链本身有时效，现取最稳）。
-        # 带播放器 UA 时用该 UA 签名并走 app 通道优先（签名地址绑
-        # UA、网页端对大文件有大小限制，2026-10-31 生产探针实证）。
-        client115 = (transfer115.Pan115Client(cookie, ua=ua) if ua
-                     else transfer115.Pan115Client(cookie))
-        url = client115.download_url(pickcode, app_first=bool(ua))
-    except mount_lib.MountAuthError as exc:
-        _mark_failed(db, binding, "expired")
-        db.commit()
-        raise BindingError(
-            "expired", BINDING_ERROR_MESSAGES["expired"]) from exc
-    except transfer115.Pan115ChannelLimitError as exc:
-        # 通道大小限制：文件与凭据都没问题，不落绑定失败态。
-        raise BindingError("size_limit", _SIZE_LIMIT_MESSAGE) from exc
-    except Exception as exc:  # noqa: BLE001 — 分类后决定落态或不改
-        classified = _classify_pan115_error(exc)
-        if classified is not None:
-            kind, message = classified
-            _mark_failed(db, binding, kind)
-            db.commit()
-            raise BindingError(kind, message) from exc
-        if isinstance(exc, mount_lib.MountError):
-            raise BindingError("not_found", f"115 上找不到文件：{rel}") from exc
-        raise BindingError("transient", f"115 直链解析失败：{exc}") from exc
-    return url
+    def __new__(cls, verdict: str, status=None):
+        obj = super().__new__(cls, verdict)
+        obj.status = status
+        return obj
 
-
-def resolve_user115_copy_url(db: Session, user_id: int,
-                             pickcode: str, ua: str = "") -> str:
-    """用户盘 115 副本直链：按该用户自己的 Cookie 现签（转存播放口）。
-
-    与 resolve_user115_direct_url 同一套凭据口径（最早 active 绑定、
-    现签现取、**不走共享 pickcode 缓存**），区别只在 pickcode 来源：
-    这里直接用转存副本行的 pickcode，不从条目路径定位（副本在用户
-    自己的盘里，不在共享挂载路径上，定位不到）。
-    凭据失效 → BindingError（expired/auth_error），调用方按 409 处理，
-    不静默回落共享中继；一过性失败 → transient。
-    ``ua`` 为播放器 UA 时用该 UA 签名并走 app 通道优先：115 签名
-    地址绑签名 UA，且网页端对大文件有大小限制（50028）——副本播
-    不出的根因（2026-10-31 生产实证）；两通道都撞限制时抛
-    kind=size_limit，不落绑定失败态（文件与凭据都没问题）。
-    """
-    binding = get_active_binding(db, user_id, PROVIDER_PAN115)
-    if binding is None:
-        raise BindingError("not_found", "当前用户没有可用的 115 绑定。")
-    cred = _credential_of(db, binding)
-    try:
-        cookie = unseal_secret(cred.sealed_credential or "")
-    except SealedSecretError as exc:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError(
-            "auth_error", BINDING_ERROR_MESSAGES["auth_error"]) from exc
-    if not cookie:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError(
-            "auth_error", BINDING_ERROR_MESSAGES["auth_error"])
-    try:
-        client115 = (transfer115.Pan115Client(cookie, ua=ua) if ua
-                     else transfer115.Pan115Client(cookie))
-        url = client115.download_url(pickcode, app_first=bool(ua))
-    except transfer115.Pan115AuthError as exc:
-        _mark_failed(db, binding, "expired")
-        db.commit()
-        raise BindingError(
-            "expired", BINDING_ERROR_MESSAGES["expired"]) from exc
-    except transfer115.Pan115ChannelLimitError as exc:
-        # 通道大小限制：文件与凭据都没问题，不落绑定失败态。
-        raise BindingError("size_limit", _SIZE_LIMIT_MESSAGE) from exc
-    except Exception as exc:  # noqa: BLE001 — 分类后决定落态或不改
-        classified = _classify_pan115_error(exc)
-        if classified is not None:
-            kind, message = classified
-            _mark_failed(db, binding, kind)
-            db.commit()
-            raise BindingError(kind, message) from exc
-        raise BindingError("transient", f"115 直链解析失败：{exc}") from exc
-    return url
-
-
-def resolve_user_quark_copy_url(db: Session, user_id: int,
-                                fid: str) -> tuple[str, str]:
-    """用户盘夸克副本取流目标：按该用户自己的 Cookie 现取下载直链。
-
-    与 resolve_user115_copy_url 同一套凭据口径（最早 active
-    绑定、现取现用、不走任何共享缓存），两点不同：
-    - 夸克 CDN 取流校验 Cookie + Referer + UA 三件套，直链绝不
-      能下发客户端 302，只能服务端中继——故返回 (url, cookie)：
-      cookie 是本次用后（已吸收上游轮换）的最新值，调用方拿它
-      组中继请求头，绝不下发、绝不记日志；
-    - fid 直接用转存副本行的 variant_file_id（副本在用户自己
-      盘里，不从条目路径定位）。
-    凭据失效 → BindingError（expired/auth_error），调用方按 409
-    处理，不静默回落共享中继；一过性失败 → transient。
-    """
-    binding = get_active_binding(db, user_id, PROVIDER_QUARK)
-    if binding is None:
-        raise BindingError("not_found", "当前用户没有可用的夸克绑定。")
-    cred = _credential_of(db, binding)
-    try:
-        cookie = unseal_secret(cred.sealed_credential or "")
-    except SealedSecretError as exc:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError(
-            "auth_error", BINDING_ERROR_MESSAGES["auth_error"]) from exc
-    if not cookie:
-        _mark_failed(db, binding, "auth_error")
-        db.commit()
-        raise BindingError(
-            "auth_error", BINDING_ERROR_MESSAGES["auth_error"])
-    client = quarkdrive.QuarkClient(cookie)
-    try:
-        url = client.download_url(fid)
-    except quarkdrive.QuarkAuthError as exc:
-        _mark_failed(db, binding, "expired")
-        db.commit()
-        raise BindingError(
-            "expired",
-            error_message("expired", PROVIDER_QUARK)) from exc
-    except Exception as exc:  # noqa: BLE001 — 分类后决定落态或不改
-        classified = _classify_quark_error(exc)
-        if classified is not None:
-            kind, message = classified
-            _mark_failed(db, binding, kind)
-            db.commit()
-            raise BindingError(kind, message) from exc
-        raise BindingError("transient", f"夸克直链解析失败：{exc}") from exc
-    absorb_quark_cookie_rotation(db, binding, cookie, client.cookie)
-    return url, client.cookie
-
-
-def _pan115_probe_http(url, ua: str = ""):
-    """115 现签地址的探测 HTTP 入口（测试打桩用）。
-
-    与 transfer_variant._usercopy_probe_http 同款姿势：GET Range
-    bytes=0-、跟随跳转、只读少量字节后关连接，不下整段。只返回
-    最终状态码；调用方按状态码定性。
-
-    ``ua`` 为签名时的播放器 UA 时必须带上：115 现签地址绑签名
-    UA，用别的 UA 探测恒 403（2026-11-02 生产实证：app 通道
-    地址被探测的默认 UA 连打 3 次全 403），alive/dead 信号全
-    失真——死链测不出、活链也确认不了。不给 ua 时保持旧形态
-    （不显式设置 User-Agent）。
-    """
-    import httpx
-
-    headers = {"Range": "bytes=0-"}
-    if (ua or "").strip():
-        headers["User-Agent"] = ua.strip()
-    with httpx.stream("GET", url, headers=headers,
-                      timeout=3.0, follow_redirects=True) as resp:
-        for _chunk in resp.iter_bytes():
-            break
-        return resp.status_code
-
-
-def check_115_download_alive(url: str, ua: str = "") -> str:
-    """115 现签下载地址的轻量存在性校验（serve_115_copy 302 前用）。
-
-    返回 "alive" / "dead" / "unknown"：
-    - 200/206 → alive（可播）；
-    - 404/410 → dead（文件已死，302 过去播放器也只会撞 404）；
-    - 其余（403/5xx/超时/异常）→ unknown：定性不清时不拦播放，
-      调用方沿用旧行为 302，绝不因探测抖动多造一次播放失败。
-    永不抛异常。
-
-    ``ua`` 必须传签名地址时用的播放器 UA（理由见 _pan115_probe_http）；
-    不传则探测恒 403 → 恒 unknown，本校验形同虚设。
-    """
-    if not (url or "").strip():
-        return "unknown"
-    try:
-        status = _pan115_probe_http(url, ua)
-    except Exception:  # noqa: BLE001 — 探测失败不阻断播放
-        logger.info("115 现签地址探测异常，按 unknown 放行：ua=%s",
-                    (ua or "")[:60])
-        return "unknown"
-    if status in (200, 206):
-        return "alive"
-    if status in (404, 410):
-        return "dead"
-    logger.info("115 现签地址探测定性不清：status=%s ua=%s",
-                status, (ua or "")[:60])
-    return "unknown"
 

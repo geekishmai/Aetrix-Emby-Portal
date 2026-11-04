@@ -299,6 +299,13 @@ WELFARE_CONFIG_KEYS = {
     "bot_rankpush_enabled": "true",
     "bot_rankpush_reward_enabled": "false",
     "bot_rankpush_reward_table": "10,8,6,5,4,3,2,1,1,1",
+    # 更新入库播报：总开关默认开 / 攒批间隔默认 30 分钟
+    "bot_update_digest_enabled": "true",
+    "bot_update_digest_interval_minutes": "30",
+    # 主动私聊提醒：求片到货 / 转存终态，默认关；同一人合并窗口默认 60 秒
+    "tg_notify_store_arrival_enabled": "false",
+    "tg_notify_transfer_done_enabled": "false",
+    "tg_notify_merge_window_sec": "60",
     # 频道马甲治理＋退群处置（2026-10-30 借鉴 embyboss 第 1 项；读侧
     # tg_bot.policy，缺省与 policy.DEFAULTS 逐字对齐）
     "bot_channel_guard_enabled": "true",
@@ -341,6 +348,24 @@ WELFARE_CONFIG_KEYS = {
     "slots_pool_seed": "100",
     "slots_daily_bet_cap": "200",
     "slots_daily_win_cap": "1000",
+    # 骰子对决（默认关）：单注上下限、奖池抽成、每日赢取上限。
+    # 超时固定 30 秒，不在这里配。读侧 backend.duel。
+    "bot_duel_enabled": "false",
+    "bot_duel_min": "10",
+    "bot_duel_max": "200",
+    "bot_duel_rake_pct": "5",
+    "bot_duel_daily_win_cap": "500",
+    # 红包雨（默认关）：系统出资，不扣管理员。定时为空表示不定时，
+    # 只能由管理员在群里发 /rain。钟点按上海时间，如 21:05。
+    "bot_rain_enabled": "false",
+    "bot_rain_total": "100",
+    "bot_rain_count": "10",
+    "bot_rain_interval_sec": "3",
+    "bot_rain_daily_win_cap": "200",
+    "bot_rain_schedule": "",
+    # 每周游戏榜（默认关）：周日 21:00 和观影周榜同时发主群海报。
+    # 只统计净赢，不发能量、不加称号。
+    "bot_gamerank_enabled": "false",
     # 注册后 TG 绑定引导页总开关
     # 求片 v2：总开关 / 附议 / 附议者入库通知（默认全开）
     # C2 积分转账：总开关默认开启，手续费/限额可配（0=不收/不限）

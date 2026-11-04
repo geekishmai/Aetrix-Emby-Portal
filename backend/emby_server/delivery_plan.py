@@ -35,6 +35,7 @@ legs=...``，热路径命中打 ``outcome=hit``、复核不过打
 """
 import json
 import logging
+import threading
 from datetime import datetime, timedelta
 
 from backend.emby_server import models as em
@@ -124,14 +125,21 @@ def write_config(db, *, enabled: bool, ttl_sec: int) -> dict:
 def _probe_user_copy_ready(db, user_id, item):
     """本人 ready 副本腿：与 transfer_variant._newest_ready 的
     user 分支同口径（item + owner_scope=user + owner_ref 本人
-    + status=ready，id 倒序取 1）。绝不把别人的副本写进计划。"""
-    row = (db.query(em.TransferVariant)
-           .filter(em.TransferVariant.item_id == item.id,
-                   em.TransferVariant.owner_scope == "user",
-                   em.TransferVariant.owner_ref == str(user_id),
-                   em.TransferVariant.status == "ready")
-           .order_by(em.TransferVariant.id.desc())
-           .first())
+    + status=ready，id 倒序取 1）。绝不把别人的副本写进计划。
+    已下线 provider 的副本行（quark:/pan115: 前缀，2026-11-02
+    删除单）不算腿：取最近若干行逐行过滤，与 _newest_ready 同口径。"""
+    row = None
+    for cand in (db.query(em.TransferVariant)
+                 .filter(em.TransferVariant.item_id == item.id,
+                         em.TransferVariant.owner_scope == "user",
+                         em.TransferVariant.owner_ref == str(user_id),
+                         em.TransferVariant.status == "ready")
+                 .order_by(em.TransferVariant.id.desc())
+                 .limit(20).all()):
+        if (cand.variant_drive_id or "").startswith(("quark:", "pan115:")):
+            continue
+        row = cand
+        break
     if row is None:
         return None
     return {"leg": "user_copy_ready", "state": "ready",
@@ -317,6 +325,74 @@ def refresh_plan_for_job(db, job):
 
 
 # ---------------------------------------------------------------------------
+# PlaybackInfo 触发口的后台化（起播优化件二，2026-11-02）
+#
+# 动机（起播分析实测）：PlaybackInfo 内同步跑 ensure_plan 时，
+# 计划缺失/过期会现算 build_plan（探针串行，3.1–5.7 秒），而本次
+# PlaybackInfo 根本不消费其返回值——纯粹是搭在关键路径上的预热
+# 写操作。改成后台线程后，本次请求不再等 build；计划仍会被算
+# （video_stream 热路径只读计划、转存完成事件另有
+# refresh_plan_for_job 主动刷新），消费方口径逐字不变。
+# ---------------------------------------------------------------------------
+
+_PLAN_INFLIGHT: set = set()
+_PLAN_INFLIGHT_LOCK = threading.Lock()
+
+
+def _plan_thread_body(user_id, item_id):
+    session = None
+    try:
+        from backend import models as _base_models
+        from backend.database import SessionLocal as _SL
+        session = _SL()
+        user = (session.query(_base_models.WebUser)
+                .filter_by(id=user_id).one_or_none())
+        item = (session.query(em.MediaItem).filter_by(id=item_id)
+                .one_or_none())
+        if user is not None and item is not None:
+            ensure_plan(session, user, item)
+    except Exception:  # noqa: BLE001 — 后台建计划永不影响请求路径
+        logger.warning("delivery_plan background ensure failed user=%s "
+                       "item=%s", user_id, item_id, exc_info=True)
+    finally:
+        with _PLAN_INFLIGHT_LOCK:
+            _PLAN_INFLIGHT.discard((user_id, item_id))
+        try:
+            if session is not None:
+                session.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def spawn_ensure_plan(user_id, item_id) -> bool:
+    """PlaybackInfo 触发的后台建计划（不阻塞、不抛）。
+
+    - 同 (用户, 条目) 已在途时直接返回（幂等）：分析报告里同一
+      (用户, 条目) 5 秒内重复 build 两次的浪费就此打住。
+    - 线程内自开 DB 会话，不碰请求会话；任何异常只记日志。
+    - 开关关时 ensure_plan 本身回 None，线程仍会起、立即返回：
+      一次线程开销换关键路径不再等 build，划算；且开关状态
+      可能在两次请求间变化，不在触发口重复判开关。
+    """
+    if user_id is None or item_id is None:
+        return False
+    key = (user_id, item_id)
+    with _PLAN_INFLIGHT_LOCK:
+        if key in _PLAN_INFLIGHT:
+            return True
+        _PLAN_INFLIGHT.add(key)
+    try:
+        threading.Thread(
+            target=_plan_thread_body, args=key, daemon=True,
+            name="delivery-plan-ensure").start()
+        return True
+    except Exception:  # noqa: BLE001 — 起线程失败不影响本次播放
+        with _PLAN_INFLIGHT_LOCK:
+            _PLAN_INFLIGHT.discard(key)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # 热路径消费（只读计划；采用前复核，绝不信任计划本身）
 # ---------------------------------------------------------------------------
 
@@ -366,6 +442,8 @@ def plan_ready_leg(db, item, user):
           and row.owner_scope == "user"
           and row.owner_ref == str(user_id)
           and int(row.item_id) == int(item.id)
+          and not (row.variant_drive_id or "").startswith(
+              ("quark:", "pan115:"))
           and bool((row.variant_file_id or "").strip()))
     if not ok:
         logger.info("delivery_plan outcome=fallback user=%s item=%s "

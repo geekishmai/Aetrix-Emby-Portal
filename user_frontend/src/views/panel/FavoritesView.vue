@@ -52,9 +52,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { Clapperboard, Star } from 'lucide-vue-next'
 import { embyApi, type PortalMediaItem } from '@/api'
+import { imageAuthUrl } from '@/api/emby'
+import { embyApiKeyRef } from '@/api/imageKey'
 import { useToast } from '@/composables/useToast'
 
 const toast = useToast()
@@ -75,12 +77,20 @@ function errText(err: unknown): string {
 function posterSrc(m: PortalMediaItem): string {
   if (brokenPosters.value.has(m.id)) return ''
   const url = m.poster_url
-  return typeof url === 'string' && url.trim() !== '' ? url : ''
+  // PA-036：后端给的 poster_url 不带凭据，渲染前补 api_key（图片端点已鉴权）
+  return typeof url === 'string' && url.trim() !== '' ? imageAuthUrl(url) : ''
 }
 
 function onPosterError(id: string) {
   brokenPosters.value = new Set(brokenPosters.value).add(id)
 }
+
+// PA-054：图片 key 一变（别页轮换后经 storage 同步过来、或本页读卡拿到
+// 新 key），裂图标记立刻清掉——posterSrc 重新拼上新 key 的地址自动重试，
+// 不用整页重载才恢复。key 本身没变时不触发，不会把正常裂图反复重刷。
+watch(embyApiKeyRef, () => {
+  if (brokenPosters.value.size > 0) brokenPosters.value = new Set()
+})
 
 function metaLine(m: PortalMediaItem): string {
   const parts: string[] = []

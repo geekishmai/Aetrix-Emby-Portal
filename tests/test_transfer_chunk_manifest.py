@@ -359,148 +359,18 @@ def _cross_job(db, item_id, user_id=7):
     return row
 
 
-class _FakeSA:
-    def __init__(self, payload=_PAYLOAD):
-        self.payload = payload
-        self.download_calls = 0
-
-    def get_file(self, drive_id, fid):
-        return {"id": fid, "size": len(self.payload)}
-
-    def download_range(self, drive_id, fid, start, end):
-        self.download_calls += 1
-        return self.payload[start:end + 1]
 
 
-class _FakeUser115:
-    """首尝分片失败（带 init/part 事件）、再尝成功的 115 桩。"""
-
-    def __init__(self):
-        self.dirs = {
-            "0": [{"name": "aetrix-transfer", "is_dir": True, "cid": "900"}],
-            "900": [],
-        }
-        self.multipart_calls = []
-
-    def list_dir(self, cid="0", limit=200):
-        return list(self.dirs.get(str(cid), []))
-
-    def mkdir(self, parent_cid, name):
-        return {}
-
-    def rapid_upload(self, filename, filesize, file_sha1, pid,
-                     range_reader=None):
-        return {"outcome": "miss", "fid": "", "pickcode": "", "raw": {}}
-
-    def simple_upload(self, fileobj, filename, pid):  # pragma: no cover
-        raise AssertionError("本组用例只许走分片路")
-
-    def multipart_upload(self, fileobj, filename, filesize, file_sha1, pid,
-                         range_reader=None, resume_session=None,
-                         on_progress=None):
-        self.multipart_calls.append(resume_session)
-        if len(self.multipart_calls) == 1:
-            if on_progress is not None:
-                on_progress({"event": "init",
-                             "session": {"bucket": "bkt",
-                                         "object_key": "obj",
-                                         "upload_id": "UP-1",
-                                         "callback": {"callback": "Yg==",
-                                                      "callback_var": "dmI="},
-                                         "parts": []}})
-                on_progress({"event": "part", "number": 1, "etag": "E1"})
-            raise transfer115.Pan115Error("模拟分片上传中途失败")
-        self.dirs["900"] = [{"name": filename, "is_dir": False,
-                             "fid": "mpfid", "pickcode": "pcmp",
-                             "size": filesize, "sha1": file_sha1}]
-        return {"outcome": "uploaded", "fid": "mpfid", "pickcode": "pcmp",
-                "sha1": file_sha1, "raw": {}}
 
 
-@pytest.fixture()
-def stage_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRANSFER_STAGE_DIR", str(tmp_path / "stage"))
-    monkeypatch.setattr(tv, "_CROSS_SEGMENT", 512)
-    monkeypatch.setattr(tv, "_115_SIMPLE_UPLOAD_LIMIT", 1024)
-    return tmp_path / "stage"
 
 
-def _patch_cross(monkeypatch, fake115):
-    monkeypatch.setattr(tv, "_make_pan115_client", lambda ck: fake115)
-    monkeypatch.setattr(ub, "binding_115_cookie",
-                        lambda db_arg, user_id, binding_id: "COOKIE")
 
 
-def _run_fail_then_done(db, monkeypatch, stage_env):
-    item = _item(db)  # 无 content_hash：首尝先哈希遍再走分片
-    _binding(db, 7)
-    fake115 = _FakeUser115()
-    _patch_cross(monkeypatch, fake115)
-    sa = _FakeSA()
-    job = _cross_job(db, item.id)
-    res1 = tv.run_transfer_job_once(db, job, sa)
-    assert res1["outcome"] == "retried"
-    return item, job, fake115, sa
 
 
-def test_executor_persists_delivery_and_manifest(db, monkeypatch, stage_env):
-    item, job, fake115, sa = _run_fail_then_done(db, monkeypatch, stage_env)
-    # 首尝失败后：交付行已落盘（active、会话与 part↔块映射齐）。
-    drow = db.query(em.TransferDelivery).filter_by(job_id=job.id).one()
-    assert drow.state == "active" and drow.dest_provider == "pan115"
-    assert drow.dest_ref == "900"
-    saved = json.loads(drow.session)
-    assert saved["upload_id"] == "UP-1"
-    assert saved["parts"] == [{"PartNumber": 1, "ETag": "E1",
-                               "chunk_from": 0, "chunk_to": 0}]
-    # 哈希遍已把清单长全：complete + 双锚 + 块哈希直算一致。
-    mrow = db.query(em.TransferContentManifest).one()
-    assert mrow.manifest_state == "complete"
-    assert mrow.whole_sha1 == _PAYLOAD_SHA1
-    assert mrow.whole_md5 == hashlib.md5(_PAYLOAD).hexdigest()
-    got = tm.unpack_chunk_hashes(mrow.chunk_hashes, mrow.chunk_bitmap,
-                                 mrow.chunk_count)
-    assert got == {0: hashlib.sha256(_PAYLOAD).hexdigest()}
-    # 再尝走 sidecar 续传 done：交付行转 completed、sidecar 清掉。
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    assert fake115.multipart_calls[1].get("upload_id") == "UP-1"
-    db.refresh(drow)
-    assert drow.state == "completed"
-    assert list(stage_env.glob("mp-*.json")) == []
 
 
-def test_executor_restores_session_from_db_when_sidecar_lost(
-        db, monkeypatch, stage_env):
-    item, job, fake115, sa = _run_fail_then_done(db, monkeypatch, stage_env)
-    for sidecar in stage_env.glob("mp-*.json"):
-        sidecar.unlink()  # 模拟容器重建把 stage/sidecar 清掉
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    resumed = fake115.multipart_calls[1]
-    assert resumed is not None and resumed.get("upload_id") == "UP-1"
-    # 恢复出的会话 parts 已归一（块映射字段不漏进执行面）。
-    assert resumed.get("parts") == [{"PartNumber": 1, "ETag": "E1"}]
 
 
-def test_executor_accounting_disabled_legacy_behavior(
-        db, monkeypatch, stage_env):
-    tv.write_transfer_config(db, transfer_manifest_accounting_enabled=False)
-    item, job, fake115, sa = _run_fail_then_done(db, monkeypatch, stage_env)
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"
-    assert fake115.multipart_calls[1].get("upload_id") == "UP-1"  # sidecar 续传照旧
-    assert db.query(em.TransferDelivery).count() == 0
-    assert db.query(em.TransferContentManifest).count() == 0
 
-
-def test_executor_accounting_tables_missing_fail_open(
-        db, monkeypatch, stage_env):
-    bind = db.get_bind()
-    em.TransferDelivery.__table__.drop(bind)
-    em.TransferContentManifest.__table__.drop(bind)
-    item, job, fake115, sa = _run_fail_then_done(db, monkeypatch, stage_env)
-    res2 = tv.run_transfer_job_once(db, job, sa)
-    assert res2["outcome"] == "done"  # 记账全灭，转存语义不受影响
-    db.refresh(job)
-    assert job.status == "done"

@@ -295,11 +295,14 @@ def test_reset_revives_no_binding_same_and_cross_provider(db):
         db, 23, dest_drive_id="quark:user-7",
         error_detail="目标盘（夸克）无生效绑定")
 
-    assert do.reset_mkdir_failed_jobs(db, 7) == 3
+    # 2026-11-02 夸克/115 用户落点下线：这两家的存量死单不许再
+    # 被重绑复活（复活了也只会立刻再判死），只复活 Drive 落点单。
+    assert do.reset_mkdir_failed_jobs(db, 7) == 1
     db.commit()
 
-    for job in (same_job, cross_115_job, cross_quark_job):
-        _assert_revived(db, job)
+    _assert_revived(db, same_job)
+    _assert_still_failed(db, cross_115_job)
+    _assert_still_failed(db, cross_quark_job)
 
 
 def test_reset_revives_prefix_and_no_binding_together(db):

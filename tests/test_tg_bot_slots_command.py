@@ -211,7 +211,11 @@ def test_slots_registered_in_all_three_places():
     group_names = {n for n, _ in command_scopes.group_commands(poller.BOT_COMMANDS)}
     assert "slots" in group_names
     default_names = {n for n, _ in command_scopes.default_commands(poller.BOT_COMMANDS)}
-    assert "slots" in default_names  # 普通用户命令，进 default 菜单
+    # 二期面板优先：default 菜单只留 start/help/me，slots 靠面板按钮与
+    # 群菜单点达，不再进普通用户私聊菜单（手输仍可用）
+    assert "slots" not in default_names
+    admin_names = {n for n, _ in command_scopes.admin_commands(poller.BOT_COMMANDS)}
+    assert "slots" in admin_names
     assert "slots" not in command_scopes.ADMIN_ONLY_COMMANDS
 
 
@@ -219,7 +223,8 @@ def test_slots_registered_in_all_three_places():
 
 # router 现行群内拦截事实（dispatch 亲读）：以下命令在群里不执行。
 _PRIVATE_ONLY_FACT = {
-    # private_only 集合
+    # private_only 集合（me/account/level 是账号展示一家、群里放行，
+    # 2026-10-28 定、2026-11-02 重申，不在本集）
     "request", "myrequests", "login", "renew", "govlog",
     "report", "propose", "launch", "reconcile", "rankpush",
     # P1 个人查询：群里不执行
@@ -231,7 +236,7 @@ _PRIVATE_ONLY_FACT = {
 # 群内可执行但仅管理员、且刻意不进群菜单 scope 的命令（2026-11-01）：
 # /whois 群里出管理员精简卡——GROUP_COMMANDS 是给全群看的菜单，
 # 管理员命令不进；标签仍按「群里能用」的事实记 [群/私聊]。
-_GROUP_ADMIN_FACT = {"whois"}
+_GROUP_ADMIN_FACT = {"whois", "rain"}
 
 
 def test_scene_tags_match_scope_facts():

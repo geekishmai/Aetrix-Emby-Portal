@@ -51,6 +51,8 @@ SCHEMAS: dict[str, dict[str, tuple]] = {
     # 上游聚合拉取/任务参数（2026-10-31 优化首批）：页大小、分页
     # 重试、心跳过期、认领轮询、进度日志、任务保留天数。
     "upstream_aggregate": config_schema.UPSTREAM_AGGREGATE_CONFIG_SCHEMA,
+    # 借帧修复（2026-11-03）：开关/口子/并发/家宽路由（cms_graft）
+    "cms_graft": config_schema.CMS_GRAFT_CONFIG_SCHEMA,
     # 播放器登录黑名单（2026-10-30）：规则数组 JSON 校验
     "player_blacklist": config_schema.PLAYER_BLACKLIST_CONFIG_SCHEMA,
     "welfare": config_schema.WELFARE_CONFIG_SCHEMA,

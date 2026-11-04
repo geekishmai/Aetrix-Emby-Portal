@@ -1829,6 +1829,10 @@ class RedPacket(Base):
     created_at = Column(DateTime, default=datetime.now)
     # 幂等键（如 tg:<update_id>）；非 TG 渠道调用时可为空
     idempotency_key = Column(String(64), nullable=True)
+    # user=用户出资（默认，老包升级后也是这个）；system=红包雨系统出资
+    funding = Column(String(16), nullable=False, default='user', server_default='user')
+    # 红包雨场次；普通红包为空。不设外键，避免和红包雨表互相引用。
+    rain_id = Column(Integer, nullable=True)
 
     sender = relationship("WebUser")
 
@@ -1895,6 +1899,101 @@ class SlotsSpin(Base):
     status = Column(String(16), nullable=False, default='pending')  # pending/settled/failed
     created_at = Column(DateTime, default=datetime.now)
     settled_at = Column(DateTime, nullable=True)
+
+
+class RedPacketRain(Base):
+    """一场红包雨。系统出钱，不扣管理员。
+
+    底下挂一个普通红包（packet_id），份数按间隔放开，抢包仍走
+    welfare_redpacket.claim_packet。一个群同时只一场，靠
+    red_packet_rain_live 的主键挡住并发。
+    """
+    __tablename__ = 'red_packet_rains'
+
+    __table_args__ = (
+        UniqueConstraint('idempotency_key', name='uq_rain_idempotency'),
+        Index('idx_rain_chat_status', 'chat_id', 'status'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, nullable=False)
+    message_id = Column(BigInteger, nullable=True)
+    packet_id = Column(Integer, ForeignKey('red_packets.id'), nullable=False)
+    total_amount = Column(Integer, nullable=False)
+    packet_count = Column(Integer, nullable=False)
+    interval_sec = Column(Integer, nullable=False, default=3)
+    status = Column(String(16), nullable=False, default='running')
+    idempotency_key = Column(String(64), nullable=True)
+    created_by = Column(Integer, ForeignKey('web_users.id'), nullable=True)
+    panel_finalized = Column(Boolean, nullable=False, default=False, server_default='0')
+    shown_released = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.now)
+    started_at = Column(DateTime, default=datetime.now)
+    last_panel_edit_at = Column(DateTime, nullable=True)
+
+
+class RedPacketRainLive(Base):
+    """一个群同时只一场进行中的红包雨。"""
+    __tablename__ = 'red_packet_rain_live'
+
+    chat_id = Column(BigInteger, primary_key=True)
+    rain_id = Column(Integer, ForeignKey('red_packet_rains.id'), nullable=False)
+
+
+class Duel(Base):
+    """群内骰子对决（一行一局）。
+
+    发起时冻结发起人押注；第一个应战的人押同额。结果只认 Telegram
+    sendDice 🎲 的 dice.value（1-6）。idempotency_key（tg:<update_id>）
+    与 accept_key（tgcq:<callback id>）各自唯一，poller 重放不双花。
+    终态：settled 分出胜负 / tie 平局各退 / refunded 超时或上限退回 /
+    failed 掷骰失败退回。
+    """
+    __tablename__ = 'duels'
+
+    __table_args__ = (
+        UniqueConstraint('idempotency_key', name='uq_duel_idempotency'),
+        UniqueConstraint('accept_key', name='uq_duel_accept_key'),
+        Index('idx_duel_chat_status', 'chat_id', 'status'),
+        Index('idx_duel_status_expires', 'status', 'expires_at'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, nullable=False)
+    message_id = Column(BigInteger, nullable=True)
+    initiator_id = Column(Integer, ForeignKey('web_users.id'), nullable=False)
+    challenger_id = Column(Integer, ForeignKey('web_users.id'), nullable=True)
+    stake = Column(Integer, nullable=False)
+    rake_pct = Column(Integer, nullable=False, default=5)
+    status = Column(String(16), nullable=False, default='open')
+    initiator_dice = Column(Integer, nullable=True)
+    challenger_dice = Column(Integer, nullable=True)
+    winner_id = Column(Integer, ForeignKey('web_users.id'), nullable=True)
+    rake = Column(Integer, nullable=False, default=0)
+    prize = Column(Integer, nullable=False, default=0)
+    idempotency_key = Column(String(64), nullable=True)
+    accept_key = Column(String(64), nullable=True)
+    panel_finalized = Column(Boolean, nullable=False, default=False, server_default='0')
+    created_at = Column(DateTime, default=datetime.now)
+    expires_at = Column(DateTime, nullable=False)
+    accepted_at = Column(DateTime, nullable=True)
+    settled_at = Column(DateTime, nullable=True)
+    last_panel_edit_at = Column(DateTime, nullable=True)
+
+    initiator = relationship('WebUser', foreign_keys=[initiator_id])
+    challenger = relationship('WebUser', foreign_keys=[challenger_id])
+
+
+class DuelLive(Base):
+    """一个群同时只留一局进行中的对决（chat_id 主键）。
+
+    开局插入、终态删除。不依赖部分唯一索引，SQLite / PostgreSQL / MySQL
+    都能靠主键冲突挡住并发第二局。
+    """
+    __tablename__ = 'duel_live'
+
+    chat_id = Column(BigInteger, primary_key=True)
+    duel_id = Column(Integer, ForeignKey('duels.id'), nullable=False)
 
 
 class Review(Base):
@@ -2041,6 +2140,66 @@ class TgBindCode(Base):
     created_at = Column(DateTime, default=datetime.now)
     # 本码生效期间全站累计的「猜错绑定码」次数；达到上限即作废（防多 TG 账号分布式枚举）
     fail_count = Column(Integer, default=0)
+
+
+class TgUpdateDigestSent(Base):
+    """TG「更新入库」播报已播记录（防重复播报，tg_bot.updatedigest 专用）。
+
+    item_id = emby_items 行 id：电影记顶层行 id，新集记集行 id。
+    kind：movie / episode = 已实际播报；baseline = 上线首跑的基线种子
+    （功能上线前已在货架上的条目不翻旧账，只播上线后新入库的）。
+    """
+    __tablename__ = 'tg_update_digest_sent'
+
+    __table_args__ = (
+        UniqueConstraint('item_id', name='uq_tg_digest_sent_item'),
+        Index('idx_tg_digest_sent_kind', 'kind'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    item_id = Column(Integer, nullable=False, index=True)
+    kind = Column(String(16), nullable=False, default='movie')
+    sent_at = Column(DateTime, default=datetime.now)
+
+
+class TgProactiveNotice(Base):
+    """Telegram 主动私聊提醒的已处理记录（求片到货 / 转存终态）。
+
+    一行 = 一个（事件, 用户）。唯一约束挡住重复扫描、重复回调、
+    多进程和重启后再插一行。状态：
+    - pending：已入队，等合并窗口到点再发；
+    - inflight：某个进程已领走、正在发；
+    - sent：已发出；
+    - blocked：对方屏蔽了机器人或聊不了，不再重试；
+    - gave_up：可重试的失败用完次数，不再重试。
+    开关关着时不写本表。新表由 init_db 的 create_all 建出，
+    不走补列（老库升级同样靠 create_all 补新表）。
+    """
+
+    __tablename__ = "tg_proactive_notices"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "kind", "subject_id", "user_id",
+            name="uq_tg_proactive_notice",
+        ),
+        Index("ix_tg_proactive_user_status", "user_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # store_arrival / transfer_ok / transfer_fail
+    kind = Column(String(32), nullable=False)
+    # 求片行 id 或转存任务 id
+    subject_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False)
+    title = Column(String(255), nullable=False, default="")
+    # 只存已经说成人话的失败原因；成功/到货为空。不存异常、路径、凭据。
+    detail = Column(String(200), nullable=False, default="")
+    status = Column(String(20), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
 
 class ChatPointsLog(Base):

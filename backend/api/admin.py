@@ -457,16 +457,14 @@ def update_user(
 
     changed = {}
     if request.is_active is not None:
-        # PA-002（完美审计 R1·B1）：True→False 停用时，同一事务内批量吊销该用户
-        # 全部 Emby 客户端令牌并 token_version+1（复用 share_guard._disable_user 写法）。
-        # False→True 恢复启用不自动恢复任何旧会话；上方超级管理员保护计数已校验，不受影响。
-        if not request.is_active and user.is_active:
-            from backend.emby_server import models as emby_models
-            db.query(emby_models.EmbyApiToken).filter(
-                emby_models.EmbyApiToken.user_id == user.id
-            ).update({emby_models.EmbyApiToken.is_revoked: True}, synchronize_session=False)
-            user.token_version = int(user.token_version or 0) + 1
-        user.is_active = request.is_active
+        # PA-002（完美审计 R1·B1）：停用/启用走全站唯一实现
+        # backend.user_lifecycle.set_user_active（TG 机器人 /whois 管理员
+        # 面板同源）：停用时同一事务内批量吊销该用户全部 Emby 客户端
+        # 令牌并 token_version+1；恢复启用不自动恢复任何旧会话。
+        # 上方超级管理员保护计数已校验，不受影响。
+        from backend.user_lifecycle import set_user_active
+
+        set_user_active(db, user, bool(request.is_active))
         changed["is_active"] = request.is_active
     if staff_change:
         if request.is_staff:
@@ -1742,11 +1740,31 @@ def get_stats_overview(
         em.PlaybackSession.ended_at.is_(None)
     ).count()
 
+    # 今日新增入库（2026-11-03 仪表盘补口径，#1805 占位替换的真口径）：
+    # MediaItem.date_added 落在上海自然日今天内（起点经 _today_start_utc_naive
+    # 换算到 UTC 入库帧，与 get_playback_stats 的今日播放同手法）；可见性
+    # 与 trend 的按日 new_items 同定义——软删/合并副本显式排除（聚合
+    # COUNT 上全局软删钩子下不到子查询）。三处口径由对账测试钉住：
+    # overview 今日值 == trend 末日 new_items == 当日小时桶求和。
+    from backend.api.panel import _today_start_utc_naive
+
+    items_day_start = _today_start_utc_naive()
+    today_new_items = db.query(func.count(em.MediaItem.id)).filter(
+        em.MediaItem.date_added >= items_day_start,
+        em.MediaItem.date_added < items_day_start + timedelta(days=1),
+        em.MediaItem.deleted_at.is_(None),
+        em.MediaItem.merged_into_id.is_(None),
+    ).scalar() or 0
+
     return {
         "users": {"total": total_users, "active": active_users},
         "tickets": {"open": open_tickets},
         "media_seeks": {"pending": pending_requests},
-        "emby": {"total_items": total_items, "active_sessions": active_sessions},
+        "emby": {
+            "total_items": total_items,
+            "active_sessions": active_sessions,
+            "today_new_items": int(today_new_items),
+        },
     }
 
 

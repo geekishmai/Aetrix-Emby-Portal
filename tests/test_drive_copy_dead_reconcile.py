@@ -384,8 +384,6 @@ def _stream_setup(monkeypatch, db, *, ensure_mode, reconcile_action,
                         lambda u, f: "ok")
     monkeypatch.setattr(tv, "usercopy_quota_probe_cached",
                         lambda u, f: False)
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
 
     async def fake_ensure(db_, it, fid, **kwargs):
         calls["ensure"] += 1

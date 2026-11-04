@@ -8,7 +8,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeftRight, Bot, Coins, Dices, Gift, KeyRound, RefreshCw, Save, Send, Settings2, Wallet } from 'lucide-vue-next'
+import { ArrowLeftRight, Bot, CloudRain, Coins, Dices, Gift, KeyRound, RefreshCw, Save, Send, Settings2, Swords, Trophy, Wallet } from 'lucide-vue-next'
 import { EmptyState, PageHeader, SectionCard } from '@/components/ui'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 import { fetchWelfareConfig, saveWelfareConfig } from '@/api/welfare'
@@ -66,6 +66,37 @@ const slotsGroupEnabled = computed({
   set: (v: boolean) => { form.value['slots_group_enabled'] = v ? 'true' : 'false' },
 })
 
+// 骰子对决总开关：word 风格 true/false，默认关
+const duelEnabled = computed({
+  get: () => (form.value['bot_duel_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['bot_duel_enabled'] = v ? 'true' : 'false' },
+})
+
+const duelFields = [
+  { key: 'bot_duel_min', label: '单注下限', hint: '发起时最少押多少能量，默认 10', suffix: '能量' },
+  { key: 'bot_duel_max', label: '单注上限', hint: '发起时最多押多少能量，默认 200', suffix: '能量' },
+  { key: 'bot_duel_rake_pct', label: '系统抽成', hint: '从双方奖池里抽走的比例，默认 5，填 0 不抽。零头留给胜者', suffix: '%' },
+  { key: 'bot_duel_daily_win_cap', label: '每日赢取上限', hint: '每人每天从对决拿到的奖金上限，默认 500，填 0 不限', suffix: '能量/天' },
+]
+
+const rainEnabled = computed({
+  get: () => (form.value['bot_rain_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['bot_rain_enabled'] = v ? 'true' : 'false' },
+})
+
+const rainFields = [
+  { key: 'bot_rain_total', label: '总额', hint: '一场红包雨一共多少能量，默认 100。由系统出，不扣管理员', suffix: '能量' },
+  { key: 'bot_rain_count', label: '份数', hint: '拆成几份，默认 10，最多 100。总额不能小于份数', suffix: '份' },
+  { key: 'bot_rain_interval_sec', label: '落下间隔', hint: '开场先落 1 份，之后每隔这么多秒再落 1 份。默认 3，填 0 表示一开始全部落下', suffix: '秒' },
+  { key: 'bot_rain_daily_win_cap', label: '每日赢取上限', hint: '每人每天从红包雨拿到的能量上限，默认 200，填 0 不限', suffix: '能量/天' },
+  { key: 'bot_rain_schedule', label: '每天开场', hint: '上海时间，如 21:05。留空则不定时，只能由管理员在群里发 /rain', suffix: '' },
+]
+
+const gameRankEnabled = computed({
+  get: () => (form.value['bot_gamerank_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['bot_gamerank_enabled'] = v ? 'true' : 'false' },
+})
+
 const slotsFields = [
   { key: 'slots_bet_tiers', label: '注额档位', hint: '逗号分隔的能量数，默认 5,10,20', suffix: '能量' },
   { key: 'slots_pay_777', label: '777 倍数', hint: '777 三连赔付倍数，默认 20（另加抱走头奖池）', suffix: '倍' },
@@ -94,7 +125,18 @@ const botFields = [
   { key: 'bot_rate_limit_seconds', label: '命令限流', hint: '每用户每命令最小间隔，默认 3', suffix: '秒' },
   { key: 'bot_group_rate_limit', label: '群限流', hint: '每群每分钟最多处理消息数，超限静默丢弃，默认 20', suffix: '条/分' },
   { key: 'bot_channel_whitelist', label: '频道白名单', hint: '逗号分隔的频道 id，名单内频道可在群里以频道身份发言，空=都不放行', suffix: '' },
+  { key: 'tg_notify_merge_window_sec', label: '提醒合并窗口', hint: '同一人这段时间内的到货/转存提醒合并成一条，默认 60，填 0 则到点就发', suffix: '秒' },
 ]
+
+// 主动私聊提醒：word 风格 true/false，默认关
+const storeArrivalNotify = computed({
+  get: () => (form.value['tg_notify_store_arrival_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['tg_notify_store_arrival_enabled'] = v ? 'true' : 'false' },
+})
+const transferDoneNotify = computed({
+  get: () => (form.value['tg_notify_transfer_done_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['tg_notify_transfer_done_enabled'] = v ? 'true' : 'false' },
+})
 
 // 频道马甲治理总开关：word 风格 true/false（读侧 tg_bot.policy 只认 'true'）
 const channelGuardEnabled = computed({
@@ -348,6 +390,55 @@ onMounted(load)
       </SectionCard>
 
       <SectionCard
+        title="骰子对决"
+        :icon="Swords"
+        description="群里 /duel 押能量掷骰子。默认关。30 秒无人应战会退回，一个群同时只开一局"
+      >
+        <el-form :label-position="labelPosition" label-width="120px" class="config-form">
+          <el-form-item label="总开关">
+            <el-switch v-model="duelEnabled" />
+            <span class="field-hint">关闭后群里不能新开对决；已经押上的一局仍会结算或退回。默认关</span>
+          </el-form-item>
+          <el-form-item v-for="f in duelFields" :key="f.key" :label="f.label">
+            <el-input v-model="form[f.key]" class="field-input" />
+            <span class="field-suffix">{{ f.suffix }}</span>
+            <span class="field-hint">{{ f.hint }}</span>
+          </el-form-item>
+        </el-form>
+      </SectionCard>
+
+      <SectionCard
+        title="红包雨"
+        :icon="CloudRain"
+        description="管理员在群里下一场系统出钱的红包。默认关。一个群同时只一场"
+      >
+        <el-form :label-position="labelPosition" label-width="120px" class="config-form">
+          <el-form-item label="总开关">
+            <el-switch v-model="rainEnabled" />
+            <span class="field-hint">关闭后不能新开红包雨。已经落下的那场仍可以抢完。默认关</span>
+          </el-form-item>
+          <el-form-item v-for="f in rainFields" :key="f.key" :label="f.label">
+            <el-input v-model="form[f.key]" class="field-input" />
+            <span class="field-suffix">{{ f.suffix }}</span>
+            <span class="field-hint">{{ f.hint }}</span>
+          </el-form-item>
+        </el-form>
+      </SectionCard>
+
+      <SectionCard
+        title="每周游戏榜"
+        :icon="Trophy"
+        description="周日晚上和观影周榜同一时间，把本周游戏净赢前十发到主群"
+      >
+        <el-form :label-position="labelPosition" label-width="120px" class="config-form">
+          <el-form-item label="总开关">
+            <el-switch v-model="gameRankEnabled" />
+            <span class="field-hint">统计红包、老虎机、骰子对决、红包雨的净赢能量。只发海报，不发能量，也不加称号（现有称号不能设一周有效期）。默认关。主群用「启用群 ID」里的第一个群</span>
+          </el-form-item>
+        </el-form>
+      </SectionCard>
+
+      <SectionCard
         title="积分转账"
         :icon="ArrowLeftRight"
         description="用户间积分转账的手续费与限额"
@@ -392,6 +483,14 @@ onMounted(load)
           <el-form-item label="退群取消资格">
             <el-switch v-model="leaveCancelEnabled" />
             <span class="field-hint">开启后已绑定用户退群／被踢自动只取消公益资格（账号、能量、查看凭证不动）；关闭则退群不做处理，默认开</span>
+          </el-form-item>
+          <el-form-item label="求片到货提醒">
+            <el-switch v-model="storeArrivalNotify" />
+            <span class="field-hint">开启后，你求的片入库时私聊求片人和附议人一句「到了」，不带播放按钮。默认关</span>
+          </el-form-item>
+          <el-form-item label="转存完成提醒">
+            <el-switch v-model="transferDoneNotify" />
+            <span class="field-hint">开启后，你自己发起的转存完成或最终失败时私聊你。成功只发文字；失败说明原因，并给「为什么播不了」。默认关</span>
           </el-form-item>
         </el-form>
       </SectionCard>

@@ -1009,6 +1009,12 @@ def _auto_migrate():
         ("red_packets", [
             ("idempotency_key", "VARCHAR(64)", "NULL"),
         ]),
+        # 红包雨：系统出资的包不走用户扣款。老包补列后 funding=user，
+        # 行为和升级前一致；rain_id 为空表示不是红包雨。
+        ("red_packets", [
+            ("funding", "VARCHAR(16)", "'user'"),
+            ("rain_id", "INTEGER", "NULL"),
+        ]),
         # 系统告警（事件型规则）：AlertRule 表扩展事件类型/接收人/冷却列。
         # 老库补列后 event_type/recipients 为 NULL（= legacy 指标型规则，行为不变），
         # cooldown_sec 默认 3600（与模型 default 一致）。
@@ -1156,6 +1162,26 @@ def _auto_migrate():
             ("chat_day_cents", "INTEGER", "0"),
             ("chat_day", "VARCHAR(10)", "NULL"),
         ]),
+        # 苹果 CMS 媒体库类型（2026-11-02）：库类型判别 + CMS 来源 +
+        # 分类映射。老库补列后 kind='local'、来源为空、映射为 NULL，
+        # 与升级前行为逐字一致（见 emby_server.applecms_library）。
+        ("emby_libraries", [
+            ("kind", "VARCHAR(20)", "'local'"),
+            ("upstream_source_ids", "TEXT", "''"),
+            ("cms_type_map", "TEXT", "NULL"),
+        ]),
+        # 苹果 CMS 地区分流桶（2026-11-02 抓详情分流）：老库补列
+        # 后为 NULL（= 不分地区），与升级前行为逐字一致（见
+        # emby_server.applecms_library.area_bucket）。
+        ("emby_libraries", [
+            ("cms_area_bucket", "VARCHAR(20)", "NULL"),
+        ]),
+        # 自帧修复线（2026-11-04）：修复方法列。老库补列后为
+        # 'graft'（存量行全是借帧修复），与升级前行为一致（见
+        # emby_server.cms_self_frame）。
+        ("cms_graft_repairs", [
+            ("method", "VARCHAR(20)", "'graft'"),
+        ]),
     ]
 
     _newly_added_columns: list[tuple[str, str]] = []
@@ -1228,6 +1254,63 @@ def _auto_migrate():
     _resurrect_soft_deleted(existing_tables)
     _ensure_default_realm()
     _hash_plain_emby_tokens(existing_tables)
+    _drop_retired_tmdb_dataset_tables()
+
+
+# PR #1414（b328185e）只新增了这两张本地 TMDB 数据集表，之后没有再改列。
+# 想看商店 / 求片复用 movie_requests，不在此列。
+_RETIRED_TMDB_DATASET_TABLES = (
+    "tmdb_dataset_items",
+    "tmdb_dataset_meta",
+)
+# 模型上显式声明的索引。DROP TABLE 会带走表上的索引；
+# 这里再按名 IF EXISTS 清一次，防止半截清理后留下同名索引。
+_RETIRED_TMDB_DATASET_INDEXES = (
+    "uq_tmdb_dataset_tmdb_type",
+    "idx_tmdb_dataset_title",
+    "idx_tmdb_dataset_type_year",
+    "ix_tmdb_dataset_items_tmdb_id",
+)
+# PostgreSQL 上整型主键的属主序列。DROP TABLE 会带走 OWNED BY 的序列；
+# 再按名 IF EXISTS 清一次，覆盖序列已脱离表的情况。SQLite 没有该语句。
+_RETIRED_TMDB_DATASET_SEQUENCES = (
+    "tmdb_dataset_items_id_seq",
+    "tmdb_dataset_meta_id_seq",
+)
+
+
+def _drop_retired_tmdb_dataset_tables(bind=None) -> None:
+    """删除 PR #1414 的本地 TMDB 数据集表（幂等，SQLite / PostgreSQL / MySQL）。
+
+    模型已从 ``emby_server.models`` 移除，``create_all`` 不会再建。
+    老库在启动迁移里删掉 ``tmdb_dataset_items`` 与 ``tmdb_dataset_meta``。
+    只删这两张，不碰 ``movie_requests`` 及其他表。
+
+    ``DROP TABLE IF EXISTS`` 连带去掉表上的索引和属主序列。SQLite 与
+    PostgreSQL 再 ``DROP INDEX IF EXISTS``；PostgreSQL 再
+    ``DROP SEQUENCE IF EXISTS``。MySQL 的索引随表删除，不另写
+    ``DROP INDEX``（该方言要求带表名）。表本来就不存在时同样执行，
+    重复跑不报错。
+    """
+    from sqlalchemy import inspect, text
+
+    target = engine if bind is None else bind
+    dialect = target.dialect.name
+    present = [name for name in _RETIRED_TMDB_DATASET_TABLES
+               if name in set(inspect(target).get_table_names())]
+    with target.begin() as conn:
+        for name in _RETIRED_TMDB_DATASET_TABLES:
+            conn.execute(text(f"DROP TABLE IF EXISTS {name}"))
+        # MySQL 的 DROP INDEX 必须带表名，且表删掉后索引已经没了。
+        # SQLite / PostgreSQL 用 IF EXISTS 再清一次可能残留的同名索引。
+        if dialect in ("sqlite", "postgresql"):
+            for name in _RETIRED_TMDB_DATASET_INDEXES:
+                conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
+        if dialect == "postgresql":
+            for name in _RETIRED_TMDB_DATASET_SEQUENCES:
+                conn.execute(text(f"DROP SEQUENCE IF EXISTS {name}"))
+    if present:
+        logger.info("  🔧 已删除退役表: %s", ", ".join(present))
 
 
 def _migrate_upstream_source_checks(existing_tables: set) -> None:
@@ -1515,6 +1598,13 @@ _LEGACY_INDEXES: tuple[tuple[str, ...], ...] = (
      "  已迁移: emby_items.idx_item_enrich_claim_cover（抢单去重聚合部分覆盖索引）",
      "deleted_at IS NULL AND merged_into_id IS NULL", None,
      "series_id, date_added, library_id"),
+    # 单集认领：父级未终态反连接的内表。只含未终态 series/season 的主键，
+    # 约两万行量级，供 EXISTS 哈希探测。老库 create_all 不回填已建表，
+    # 这里补上。回滚：DROP INDEX idx_item_enrich_open_parent。只加索引，不改行。
+    ("emby_items", "idx_item_enrich_open_parent", "id", None,
+     "  已迁移: emby_items.idx_item_enrich_open_parent（未终态父级部分索引）",
+     "item_type IN ('series', 'season') AND enrich_status IN ('pending', 'enriching') "
+     "AND deleted_at IS NULL"),
     # A-115：详情页预取上限 COUNT 按 (owner_scope, owner_ref, trigger,
     # created_at) 过滤，TransferJob 旧 3 索引首列均为 item_id/status 均
     # 不可用，无界增长表上全表扫；models.py 已声明同名索引（新库
@@ -1639,15 +1729,17 @@ def _ensure_index(existing_tables: set, table: str, name: str, columns: str,
                     include_clause = f" INCLUDE ({include})"
                 else:
                     ddl_columns = f"{columns}, {include}"
-            ddl = f"CREATE INDEX {name} ON {table} ({ddl_columns}){include_clause}"
+            ddl = f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({ddl_columns}){include_clause}"
             if where is not None:
                 ddl += f" WHERE {where}"
             conn.execute(text(ddl))
         else:
             if where is None:
-                conn.execute(text(f"CREATE INDEX {name} ON {table} USING {using} ({columns})"))
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} USING {using} ({columns})"))
             else:
-                conn.execute(text(f"CREATE INDEX {name} ON {table} USING {using} ({columns}) WHERE {where}"))
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} USING {using} ({columns}) WHERE {where}"))
         logger.info(message)
 
 
@@ -2345,8 +2437,9 @@ def _sqlite_lock_path() -> str:
 def _acquire_migrate_lock():
     """跨进程互斥地跑 schema 初始化/迁移。
 
-    为什么必须有：init_db() 会被 api、worker、EA 三个进程**同时**调用，而建表/加列/
-    建索引在 PG 与 SQLite 上都没有 IF NOT EXISTS。三个进程同时判定"表不存在"→ 全部
+    为什么必须有：init_db() 会被 api、worker、EA 三个进程**同时**调用，而建表/加列
+    在 PG 与 SQLite 上都没有 IF NOT EXISTS（``_ensure_index`` 的 CREATE INDEX
+    已带 IF NOT EXISTS，挡不住建表竞态）。三个进程同时判定"表不存在"→ 全部
     执行 → 后到的抛 DuplicateTable / duplicate column name。而 main.py 与 worker.py
     都是 fail-closed 的 raise / return 1，restart: unless-stopped 下变成崩溃重启循环。
 

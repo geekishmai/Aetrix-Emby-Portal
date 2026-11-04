@@ -229,11 +229,12 @@ def confirm_source(
     if provider is None:
         return _failed(local_item_id, source_id, upstream_item_id,
                        UNKNOWN_PROVIDER_MESSAGE)
-    has_binding = (
-        tv.has_active_drive_binding(db, user.id)
-        if provider == "drive"
-        else tv.has_active_pan115_binding(db, user.id)
-    )
+    if provider == "pan115":
+        # 115 用户绑定线已下线（2026-11-02 删除单）：明示不支持，
+        # 不许用「先绑定」文案把用户引进死循环（115 已绑不了）。
+        return _failed(local_item_id, source_id, upstream_item_id,
+                       "该片源所在网盘（115）已下线，找源转存暂不支持。")
+    has_binding = tv.has_active_drive_binding(db, user.id)
     if not has_binding:
         return _failed(local_item_id, source_id, upstream_item_id,
                        NO_BINDING_MESSAGE)
@@ -252,7 +253,12 @@ def confirm_source(
             )
             if retry is not None:
                 return retry
-            existing = tv._latest_job(db, item.id, "user", str(user.id))
+            # PA-039：回落分支的 already_queued 只认有效状态，死单
+            # 绝不能再被指着（本分支仅在分流 helper 返回 None 时走到，
+            # 即最新单为 done 等非失败终态；failed-only 的重建已由
+            # 分流 helper 走 force 口径处理，不会落到这里）。
+            existing = tv._latest_job(db, item.id, "user", str(user.id),
+                                      statuses=("pending", "running", "done"))
             if existing is not None:
                 return ConfirmOut(
                     state="already_queued",

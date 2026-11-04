@@ -8,6 +8,7 @@
 """
 import os
 import tempfile
+from datetime import datetime
 from types import SimpleNamespace
 
 os.environ.setdefault("DATABASE_TYPE", "sqlite")
@@ -86,17 +87,51 @@ def test_warns_on_high_probe_failure_rate(db, monkeypatch):
 
 
 def test_down_on_enqueue_backlog(db, monkeypatch):
-    """补全队列堆积到处理不过来 = 核心不可用"""
+    """积压且近窗口没有任何完成 = down。有进展不再因为条数本身 down。"""
+    from backend.emby_server import scan_progress as progress
     counts = {"done": 100, "failed": 0, "pending": 900, "enriching": 100}
     monkeypatch.setattr(health_report, "_count", lambda db, t, s: 20 if s == "done" else 0)
     monkeypatch.setattr(health_report, "_enrich_count", lambda db, s: counts.get(s, 0))
     monkeypatch.setattr(health_report, "library_scan_summary", lambda db: {"failed": 0})
     monkeypatch.setattr("backend.emby_server.maintenance.resource_report",
                         lambda: {"disk_free_percent": 80.0})
-    res = health_report.collect(db)
+    progress.reset()
+    try:
+        res = health_report.collect(db)
+    finally:
+        progress.reset()
     assert res["level"] == "down", res
     assert res["status"] == "unhealthy"
-    assert any(i["key"] == "enrich_backlog" for i in res["issues"]), res
+    assert any(i["key"] == "enrich_backlog" and i["level"] == "down"
+               for i in res["issues"]), res
+
+
+def test_backlog_with_recent_completion_is_degraded_not_down(db, monkeypatch):
+    """积压很大但近窗口有完成：degraded（warn），不报 down。
+
+    本进程计数器保持为空，只靠库里的 last_scraped_at——分离部署时
+    API 进程计数器恒为 0，不能据此把正在消化的队列判死。
+    """
+    from backend.emby_server import scan_progress as progress
+    _big_backlog(monkeypatch)
+    lib = em.Library(guid="R" * 32, name="库", collection_type="movies", paths="")
+    db.add(lib)
+    db.flush()
+    db.add(em.MediaItem(
+        guid="r" * 32, library_id=lib.id, item_type="movie", name="刚补完",
+        enrich_status="done", last_scraped_at=datetime.now()))
+    db.commit()
+    progress.reset()
+    try:
+        res = health_report.collect(db)
+    finally:
+        progress.reset()
+    assert res["metrics"]["enrich_recent_done"] >= 1, res["metrics"]
+    assert not any(i["level"] == "down" for i in res["issues"]), res
+    assert any(i["key"] == "enrich_backlog" and i["level"] == "warn"
+               for i in res["issues"]), res
+    assert res["level"] == "warn", res
+    assert res["status"] == "degraded"
 
 
 def test_warns_on_library_scan_failure(db, monkeypatch):

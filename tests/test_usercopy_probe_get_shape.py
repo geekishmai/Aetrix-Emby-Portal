@@ -376,8 +376,6 @@ def test_stream_get_interstitial_issues_direct_not_relay(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota",
                         lambda u, f: "interstitial")
     _stub_detail(monkeypatch, "get", "scan")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _token_ok(monkeypatch)
     record = {}
 
@@ -400,32 +398,13 @@ def test_stream_get_interstitial_no_115_still_direct(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota",
                         lambda u, f: "interstitial")
     _stub_detail(monkeypatch, "get", "scan")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     _token_missing(monkeypatch)
     resp = _stream(monkeypatch, db)
     assert resp.status_code == 302
     assert resp.headers["location"] == f"https://usercontent.test/{COPY_FID}"
 
 
-def test_stream_get_interstitial_with_115_still_direct(db, monkeypatch):
-    """GET 腿 interstitial 信号 + 有本人 115 副本：直链优先，不许跳 115。"""
-    monkeypatch.setattr(tv, "probe_user_copy_quota",
-                        lambda u, f: "interstitial")
-    _stub_detail(monkeypatch, "get", "scan")
-    v115 = SimpleNamespace(id=10, owner_scope="user", owner_ref="7",
-                           variant_drive_id="pan115:user-7",
-                           variant_file_id="115fid", status="ready",
-                           pickcode="pc115")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: v115)
-    monkeypatch.setattr(user_bindings, "resolve_user115_copy_url",
-                        lambda db_, uid, pc: f"https://cdn.115.test/{pc}")
-    _token_missing(monkeypatch)
-    resp = _stream(monkeypatch, db)
-    assert resp.status_code == 302
-    assert resp.headers["location"] == f"https://usercontent.test/{COPY_FID}"
-    assert SHARED_FID not in resp.headers["location"]
+
 
 
 def _pi_request():
@@ -474,8 +453,6 @@ def test_pi_get_interstitial_keeps_direct_manifest(db, monkeypatch):
     monkeypatch.setattr(tv, "probe_user_copy_quota",
                         lambda u, f: "interstitial")
     _stub_detail(monkeypatch, "get", "scan")
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     resp = _pi(monkeypatch, db)
     assert not resp.get("ErrorMessage")
     urls = [(src.get("DirectPlayUrl") or "")
@@ -565,8 +542,6 @@ def test_rule_known_quota_pi_get_quota_no_direct_manifest(
     _stub_legs(monkeypatch,
                (206, "video/mp4", VIDEO_HEAD),
                (200, "text/html; charset=utf-8", QUOTA_HTML))
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     events = _record_byos(monkeypatch)
     resp = _pi(monkeypatch, db)
     assert resp.get("ErrorMessage") == tv.USERCOPY_QUOTA_DETAIL
@@ -749,8 +724,6 @@ def test_rule_known_quota_pi_cached_quota_no_direct_manifest(
     calls = _stub_legs(monkeypatch,
                        AssertionError("已知 quota 不许再探 Range 腿"),
                        AssertionError("已知 quota 不许再探 GET 腿"))
-    monkeypatch.setattr(tv, "ready_user115_variant",
-                        lambda db_, iid, uid: None)
     events = _record_byos(monkeypatch)
     resp = _pi(monkeypatch, db)
     assert resp.get("ErrorMessage") == tv.USERCOPY_QUOTA_DETAIL

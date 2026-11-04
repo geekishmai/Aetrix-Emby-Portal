@@ -207,9 +207,6 @@ class _FakeUser115:
 
 
 def _patch_user115(monkeypatch, fake):
-    monkeypatch.setattr(
-        ub, "binding_115_cookie",
-        lambda db_arg, user_id, binding_id: "CK-1")
     monkeypatch.setattr(tv, "_make_pan115_client", lambda cookie: fake)
 
 
@@ -275,73 +272,17 @@ def test_series_preheat_adds_no_env_key():
     assert "transfer_series_preheat" not in text
 
 
-# ---------- 播完触发：探针命中落 ready ----------
-
-def test_finished_anchor_probes_next_episodes_hit_ready(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    ep2 = _episode(db, series.id, 2)
-    ep3 = _episode(db, series.id, 3)
-    ep4 = _episode(db, series.id, 4)
-    fake = _FakeUser115(rapid="hit")
-    result = _preheat(db, monkeypatch, anchor, fake)
-    assert result["triggered"] is True
-    assert len(fake.rapid_calls) == 3  # 默认 K=3：后续 3 集各探一次
-    jobs = _jobs(db)
-    assert all(j.status == "done" for j in jobs)
-    assert {j.item_id for j in jobs} == {ep2.id, ep3.id, ep4.id}
-    variants = (db.query(em.TransferVariant)
-                .filter(em.TransferVariant.owner_ref == "7",
-                        em.TransferVariant.status == "ready").all())
-    assert {v.item_id for v in variants} == {ep2.id, ep3.id, ep4.id}
-    assert fake.simple_calls == []  # 探针绝不搬字节
 
 
-def test_next_count_default_three(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    eps = [_episode(db, series.id, n) for n in (2, 3, 4, 5)]
-    fake = _FakeUser115(rapid="hit")
-    result = _preheat(db, monkeypatch, anchor, fake)
-    assert result["triggered"] is True
-    jobs = _jobs(db)
-    # 默认 K=3：只取后续 3 集（ep2/3/4），ep5 不动
-    assert {j.item_id for j in jobs} == {e.id for e in eps[:3]}
 
 
-# ---------- 探针未命中：删单、无墓碑、可重建 ----------
-
-def test_probe_miss_deletes_probe_job_no_residue(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    ep2 = _episode(db, series.id, 2)
-    fake = _FakeUser115(rapid="miss")
-    result = _preheat(db, monkeypatch, anchor, fake)
-    assert result["triggered"] is True
-    assert _jobs(db) == []  # 未命中不留 pending/failed 墓碑行
-    assert fake.simple_calls == []
-    # 无墓碑的证明：随后对同一集建正式单不被 24h 节流挡住
-    job = tv.create_cross_provider_job(db, ep2, 7, "drive",
-                                       trigger="playback",
-                                       dest_provider="pan115")
-    assert job.id is not None
 
 
-def test_probe_error_deletes_probe_job_no_residue(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    _episode(db, series.id, 2)
-    fake = _FakeUser115(rapid="error")
-    _preheat(db, monkeypatch, anchor, fake)
-    assert _jobs(db) == []
+
+
+
+
+
 
 
 # ---------- 强信号才升搬字节：日帽 2 ----------
@@ -354,79 +295,12 @@ def _strong_setup(db, anchor, series):
     return other
 
 
-def test_strong_signal_creates_byte_jobs_capped_at_two(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    _strong_setup(db, anchor, series)
-    eps = [_episode(db, series.id, n) for n in (2, 3, 4)]
-    fake = _FakeUser115(rapid="miss")
-    result = _preheat(db, monkeypatch, anchor, fake)
-    jobs = _jobs(db)
-    byte_jobs = [j for j in jobs
-                 if j.trigger == "series_preheat_byte"]
-    assert len(byte_jobs) == 2  # 日帽 2 拦住第 3 单
-    assert {j.item_id for j in byte_jobs} == {e.id for e in eps[:2]}
-    assert all(j.status == "pending" for j in byte_jobs)
-    # 第 3 集没拿到搬字节帽时仍可走探针（可探针）：探针未命中删单
-    assert result["triggered"] is True
-    assert fake.simple_calls == []
 
 
-def test_byte_cap_separate_from_prefetch_cap(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    _strong_setup(db, anchor, series)
-    # 先把详情页 prefetch 帽 5 打满（与预热分开计数）
-    for n in range(5):
-        item = _episode(db, series.id, 20 + n, season=3)
-        db.add(em.TransferJob(item_id=item.id, trigger="prefetch",
-                              drive_id="shared1", provider="drive",
-                              owner_scope="user", owner_ref="7",
-                              dest_drive_id="pan115:user-7",
-                              status="pending"))
-    db.commit()
-    eps = [_episode(db, series.id, n) for n in (2, 3)]
-    fake = _FakeUser115(rapid="miss")
-    _preheat(db, monkeypatch, anchor, fake)
-    byte_jobs = [j for j in _jobs(db)
-                 if j.trigger == "series_preheat_byte"]
-    assert len(byte_jobs) == 2  # prefetch 帽满了也不影响预热帽
-    assert {j.item_id for j in byte_jobs} == {e.id for e in eps}
 
 
-def test_weak_signal_never_creates_byte_job(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    _umd(db, 7, anchor.id, days_ago=0)  # 只播过锚这一集 = 弱信号
-    eps = [_episode(db, series.id, n) for n in (2, 3)]
-    fake = _FakeUser115(rapid="miss")
-    _preheat(db, monkeypatch, anchor, fake)
-    assert [j for j in _jobs(db)
-            if j.trigger == "series_preheat_byte"] == []
-    # 弱信号 + 可探针：只探针（未命中删单），不建搬字节单
-    assert _jobs(db) == []
-    assert len(fake.rapid_calls) == 2
 
 
-def test_follow_row_is_strong_signal(db, monkeypatch):
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    anchor = _episode(db, series.id, 1)
-    _follow(db, 7, series.id)  # 显式追剧订阅 = 强信号（无播放史也算）
-    eps = [_episode(db, series.id, n) for n in (2, 3)]
-    fake = _FakeUser115(rapid="miss")
-    _preheat(db, monkeypatch, anchor, fake)
-    byte_jobs = [j for j in _jobs(db)
-                 if j.trigger == "series_preheat_byte"]
-    assert len(byte_jobs) == 2
-    assert {j.item_id for j in byte_jobs} == {e.id for e in eps}
 
 
 def test_unprobeable_candidate_gets_no_job_on_weak_signal(db, monkeypatch):
@@ -475,24 +349,6 @@ def test_preheat_off_creates_nothing(db, monkeypatch):
 
 # ---------- 工人两道认领跳过探针单 ----------
 
-def test_worker_lanes_skip_probe_only_jobs(db, monkeypatch, db_factory):
-    _enable(monkeypatch)
-    _mount(db)
-    _binding(db, 7)
-    series = _series(db)
-    _episode(db, series.id, 1)
-    ep2 = _episode(db, series.id, 2)
-    db.add(em.TransferJob(item_id=ep2.id, trigger="series_preheat",
-                          drive_id="shared1", provider="drive",
-                          owner_scope="user", owner_ref="7",
-                          dest_drive_id="pan115:user-7",
-                          status="pending"))
-    db.commit()
-    assert tv.claim_due_jobs(db) == []
-    assert tv.claim_probe_jobs(db) == []
-    row = (db.query(em.TransferJob)
-           .filter(em.TransferJob.trigger == "series_preheat").first())
-    assert row.status == "pending"  # 两道都不碰它
 
 
 # ---------- 同内容去重：在途/已就绪不重复建单 ----------

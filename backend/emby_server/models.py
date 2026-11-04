@@ -77,6 +77,23 @@ class Library(Base):
     # 虚拟媒体库：按发行平台（Netflix / Disney+ …）自动生成，没有自己的文件与路径
     is_virtual = Column(Boolean, default=False)
     platform = Column(String(30))  # 虚拟库对应的平台 id（见 scanner.PLATFORM_LABELS）
+    # 库类型判别（苹果 CMS 媒体库类型，2026-11-02）：local = 现有全部库
+    # （本机/挂载扫描喂数）；applecms = 内容由 CMS 同步工人喂托管行、
+    # 没有本地文件与路径。与 is_virtual+platform 是两套语义（虚拟库是
+    # 已有本地行的聚合视图、没有自有内容），不复用、不混淆。老库补列
+    # 后为 'local'，行为与升级前逐字一致（见 database._auto_migrate）。
+    kind = Column(String(20), default="local")
+    # kind=applecms 时本库收哪些上游源（upstream_sources.id，逗号分隔，
+    # 照 mount_ids 的仓库惯例）；一行 CMS 库可收多家源，同步时合并去重。
+    upstream_source_ids = Column(Text, default="")
+    # kind=applecms 时的分类映射（JSON 文本）：源分类名 → "in"/"out"，
+    # 数据驱动、管理员配，不写死站名/分类名；空 = 全收。
+    cms_type_map = Column(Text)
+    # kind=applecms 时的地区分流桶（抓详情分流，2026-11-02）：空/NULL
+    # = 不分地区（总库行为，与升级前逐字一致）；huayu/oumei/rihan =
+    # 只收该地区条目，地区由同步工人按 vod_area 归一化判定（唯一
+    # 实现在 applecms_library.area_bucket），判不出的不入地区库。
+    cms_area_bucket = Column(String(20))
     # 绑定 115 账号配置档（pan115_accounts.id）：不同媒体库可用不同 115 账号转存/下载。
     # 未绑定时回退到默认账号，再回退到服务器级 PAN115_COOKIE（兼容旧部署）。
     account_115_id = Column(Integer)
@@ -145,6 +162,14 @@ class MediaItem(Base):
         Index("idx_item_enrich_claim_cover", "enrich_status", "enrich_next_retry_at",
               postgresql_include=["series_id", "date_added", "library_id"],
               postgresql_where=text("deleted_at IS NULL AND merged_into_id IS NULL")),
+        # 单集认领反连接：只索引仍 pending/enriching 的 series/season 主键。
+        # EXISTS 按父级 id 探测这块小集合，而不是扫全部 pending 单集。
+        # 回滚：DROP INDEX idx_item_enrich_open_parent。只加索引，不改行。
+        Index("idx_item_enrich_open_parent", "id",
+              postgresql_where=text(
+                  "item_type IN ('series', 'season') "
+                  "AND enrich_status IN ('pending', 'enriching') "
+                  "AND deleted_at IS NULL")),
         # 追新日历：按「入库时间落在某月」取条目（date_added BETWEEN 起 止）。
         # 没有索引时这是一张全表扫 + filesort，条目量上万后打开日历要几秒。
         # 复合第二列带上 item_type：日历的类型筛选（电影 / 剧集 / 单集）
@@ -1213,6 +1238,129 @@ class UpstreamItemMapping(Base):
                         nullable=False)
 
 
+class CmsAdSkipDetection(Base):
+    """CMS 片头印制广告检测结果（广告剪除试点，2026-11-03）。
+
+    一行 = 一条上游映射（upstream_item_mappings.id）的一次现行
+    检测结论：后台检测把片头抽帧后按「静止段 + 已知赞助卡指纹」
+    双信号判定，结果记在这里供清单代理剪除时查（高置信 ad 才
+    剪，见 emby_server/cms_ad_skip）。证据只留帧文件路径与短码
+    说明，不存视频字节、不存任何凭据。不加外键（照
+    UpstreamItemMapping 先例）：映射删了行留着供追溯。由
+    create_all 自动建表，老库无需 ALTER。
+    """
+
+    __tablename__ = "cms_ad_skip_detections"
+
+    __table_args__ = (
+        UniqueConstraint("mapping_id",
+                         name="uq_cms_ad_skip_detection_mapping"),
+        Index("ix_cms_ad_skip_detections_source", "source_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mapping_id = Column(Integer, nullable=False)  # upstream_item_mappings.id
+    local_item_id = Column(Integer, nullable=False)  # emby_items.id
+    source_id = Column(Integer, nullable=False)  # upstream_sources.id
+    # ad / clean / static_unknown / insufficient / fetch_blocked / failed
+    status = Column(String(30), nullable=False, default="pending")
+    skip_seconds = Column(Float, nullable=True)  # 建议剪除的片头时长（仅 ad）
+    ad_start = Column(Float, nullable=True)
+    ad_end = Column(Float, nullable=True)
+    confidence = Column(Float, nullable=False, default=0.0)
+    detector_version = Column(String(20), nullable=False, default="")
+    seed_name = Column(String(100), nullable=False, default="")  # 命中的指纹名
+    evidence_path = Column(String(300), nullable=False, default="")  # 证据帧路径
+    detail = Column(String(500), nullable=False, default="")  # 短码/失败原因
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
+                        nullable=False)
+
+
+class CmsGraftRepair(Base):
+    """CMS 片头印制广告「借帧修复」记账（2026-11-03 站主亲定产品化）。
+
+    一行 = 一条上游映射（upstream_item_mappings.id）的修复结论：
+    修复工人（emby_server/cms_graft_worker）把脏版片头条带用同片
+    干净版的同一帧像素贴回，产物分段落在数据卷
+    ``cms_graft/<mapping_id>/seg_*.ts``，本行记状态与段表。
+    播放路径只认 ``status='verified'`` 的行（修完必须经真取流
+    验证才许下发，见 emby_server/cms_graft.lookup_verified）；
+    其余状态一律当无修复、原样播（选线降权兜底）。证据只留
+    路径/短码，不存凭据。不加外键（照 UpstreamItemMapping
+    先例）：映射删了行留着供追溯。由 create_all 自动建表。
+    """
+
+    __tablename__ = "cms_graft_repairs"
+
+    __table_args__ = (
+        UniqueConstraint("mapping_id",
+                         name="uq_cms_graft_repair_mapping"),
+        Index("ix_cms_graft_repairs_source", "source_id"),
+        Index("ix_cms_graft_repairs_status", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mapping_id = Column(Integer, nullable=False)  # upstream_item_mappings.id
+    local_item_id = Column(Integer, nullable=False)  # emby_items.id
+    source_id = Column(Integer, nullable=False)  # upstream_sources.id
+    # queued / running / verified / repaired（修完未验，不下发）/
+    # skipped（不入选，reason 记因）/ failed / verify_failed
+    status = Column(String(30), nullable=False, default="queued")
+    # 修复方法（2026-11-04 自帧线并列）：graft（借帧，存量默认）/
+    # self（自帧处理中）/ self_fill（均匀背景填充）/ self_blur
+    # （复杂画面强模糊）。下发只认 status=verified、与 method 无关。
+    method = Column(String(20), nullable=False, default="graft")
+    # no_clean_sibling / band_too_long / watermark_or_overlong /
+    # align_failed / gate_failed / codec_unsupported / fetch_failed /
+    # sibling_dirty / probe_failed（短码，detail 里可带补充）
+    reason = Column(String(60), nullable=False, default="")
+    band_end_sec = Column(Float, nullable=True)  # 解码轴上带结束秒
+    band_family = Column(String(10), nullable=False, default="")  # A/B/C/D
+    strip_json = Column(Text, nullable=False, default="")  # {y0,y1,h}
+    sibling_mapping_id = Column(Integer, nullable=True)  # 借帧方映射
+    segments_json = Column(Text, nullable=False, default="")  # 段表 JSON
+    mouth_sec = Column(Float, nullable=True)  # 本次入选口子
+    worker_version = Column(String(20), nullable=False, default="")
+    detail = Column(String(500), nullable=False, default="")  # 短码/统计
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
+                        nullable=False)
+
+
+class AppleCMSDetailCache(Base):
+    """苹果 CMS detail 抓取缓存（抓详情分流，2026-11-02）。
+
+    一行 = 一个（源, vod）的 detail 提取结果：``area`` 是
+    ``vod_area`` 原文，``harvest`` 是多源填充用的源站字段 JSON
+    （海报/简介/评分/演员/导演/备注/分类名，键名与
+    ``UpstreamCatalogRecord`` 透传组一致）。为什么新表：detail
+    只许打一次是**跨库**不变式——同一个（源, vod）会被总库与
+    地区库各处理一遍，被某库按桶跳过的条目不建行、不记映射，
+    现有表（upstream_item_mappings / upstream_hosted_lifecycle）
+    都以 local_item_id 为键，挂不下「还没有本地行」的抓取结果。
+
+    只存提取后的字段，**绝不存 detail 原文**（vod_play_url 等
+    播放地址不落库的红线不变）。抓取失败不写行：下轮重试。
+    不加外键（照 UpstreamSource 先例），由 create_all 自动建表。
+    """
+
+    __tablename__ = "applecms_detail_cache"
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "upstream_item_id",
+                         name="uq_applecms_detail_cache_pair"),
+        Index("ix_applecms_detail_cache_source", "source_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_id = Column(Integer, nullable=False)  # upstream_sources.id，无外键
+    upstream_item_id = Column(String(100), nullable=False)  # 源站 vod_id
+    area = Column(String(200), nullable=False, default="")  # vod_area 原文
+    harvest = Column(Text, nullable=False, default="")  # 提取字段 JSON
+    fetched_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 class UpstreamLibraryLink(Base):
     """上游库 ↔ 本地库对应关系（独有资源进库二期：自动建库落点）。
 
@@ -1762,6 +1910,11 @@ class TransferJob(Base):
     # 普通认领不读它。老库由 auto-migrate 补列。
     claimed_at = Column(DateTime)
     last_probe_at = Column(DateTime)
+    # 滞留回队轮数（2026-11-03）：failed/retriable 终态行被看门狗
+    # 扫回 pending 的累计次数，达 TRANSFER_RETRIABLE_RESCHEDULE_MAX
+    # 后不再回队（仿 enrich_failed_reschedules 口径）。老库补列后
+    # 可能为 NULL，读取方一律按 0 处理。
+    reschedule_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -2957,40 +3110,6 @@ class EmbyMediaSetTemplate(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
-class TmdbDatasetItem(Base):
-    """302 Next A1：本地 TMDB 数据集行（只存展示字段）。
-
-    新表：由 ``create_all`` 自动建表，老库无需 ALTER。
-    只存展示用的字段（标题、原名、年份、简介、类型、海报路径、评分），
-    不存版权文本全文，不存任何密钥与用户数据。
-    同一 (tmdb_id, media_type) 只留一行，同步时按该键 upsert。
-    搜索只读本表，不在请求时现调 TMDB（A2 的硬口径）。
-    """
-
-    __tablename__ = "tmdb_dataset_items"
-    __table_args__ = (
-        UniqueConstraint("tmdb_id", "media_type",
-                         name="uq_tmdb_dataset_tmdb_type"),
-        Index("idx_tmdb_dataset_title", "title"),
-        Index("idx_tmdb_dataset_type_year", "media_type", "year"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    tmdb_id = Column(String(20), nullable=False, index=True)
-    media_type = Column(String(20), nullable=False)  # movie / tv
-    title = Column(String(300), nullable=False)
-    original_title = Column(String(300))
-    year = Column(Integer)
-    overview = Column(Text)
-    genres_json = Column(Text, default="[]")  # 类型名列表 JSON
-    poster_path = Column(String(300))  # TMDB poster_path 原值，不拼全 URL
-    vote_average = Column(Float)
-    release_date = Column(String(20))  # YYYY-MM-DD 原值，不解析
-    source = Column(String(40))  # trending / popular / top_rated / backfill
-    updated_at = Column(DateTime, default=datetime.now)
-    last_synced_at = Column(DateTime, default=datetime.now)
-
-
 class TransferSedimentRecord(Base):
     """指纹沉淀记账行（转存等待压缩期三，2026-11-01）。
 
@@ -3019,21 +3138,3 @@ class TransferSedimentRecord(Base):
     bytes_read = Column(BigInteger, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     consumed_at = Column(DateTime)
-
-
-class TmdbDatasetMeta(Base):
-    """302 Next A1：数据集新鲜度（单行，id=1）。
-
-    搜索响应里带出 last_success_at 与 total_rows，让用户看得到数据
-    新不新鲜；同步断了会悄悄变旧，所以失败也要记 last_error，绝不
-    静默过期。同步任务只写本行，不删数据集行。
-    """
-
-    __tablename__ = "tmdb_dataset_meta"
-
-    id = Column(Integer, primary_key=True)
-    last_sync_at = Column(DateTime)
-    last_success_at = Column(DateTime)
-    total_rows = Column(Integer, default=0)
-    last_error = Column(Text)
-    updated_at = Column(DateTime, default=datetime.now)

@@ -166,10 +166,14 @@ def _draw_barcode(draw, x: int, y: int) -> None:
 
 
 def render_rank_poster(period: str, rows: list[dict], window_start: datetime,
-                       out_path=None) -> Path:
+                       out_path=None, *, headline: str | None = None,
+                       value_of=None, session_label: str | None = None,
+                       foot: str | None = None) -> Path:
     """把榜单行绘成电影票根海报 PNG，返回文件路径。
 
-    rows：queries.watch_duration_rank 的返回（已排序、已截断）。
+    rows：观影榜是 queries.watch_duration_rank 的返回（秒数在 seconds）。
+    游戏榜传入 headline / value_of / foot，版式不变，只换标题和右侧数字。
+    不传这些参数时，输出与原来的观影榜逐字一致。
     out_path 为空时落系统临时目录（调用方负责发送后删除）。
     """
     Image, ImageDraw, ImageFont = _pil()
@@ -221,6 +225,9 @@ def render_rank_poster(period: str, rows: list[dict], window_start: datetime,
     f_foot = _font(ImageFont, "NotoSansSC-Regular.ttf", 25)
 
     is_week = period == "week"
+    title_text = headline or ("本周观影榜" if is_week else "今日观影榜")
+    session_text = session_label or ("周日 21:00 场" if is_week else "晚场 20:30")
+    foot_text = foot or ("Aetrix · 每周日 21:00 更新" if is_week else "Aetrix · 每日 20:30 更新")
     _draw_spaced_text(
         draw,
         (content_left, ticket_top + 40),
@@ -230,14 +237,13 @@ def render_rank_poster(period: str, rows: list[dict], window_start: datetime,
     )
     draw.text(
         (content_left, ticket_top + 78),
-        "本周观影榜" if is_week else "今日观影榜",
+        title_text,
         font=f_title,
         fill=_INK,
     )
-    session_label = "周日 21:00 场" if is_week else "晚场 20:30"
     draw.text(
         (content_left, ticket_top + 162),
-        f"{_date_label(period, window_start)} · {session_label}",
+        f"{_date_label(period, window_start)} · {session_text}",
         font=f_date,
         fill=_MUTED,
     )
@@ -252,7 +258,10 @@ def render_rank_poster(period: str, rows: list[dict], window_start: datetime,
         y = rows_top + i * _ROW_H
         center_y = y + _ROW_H // 2
         name_font = f_name_first if rank == 1 else f_name
-        duration = format_duration(int(row.get("seconds") or 0))
+        if value_of is None:
+            duration = format_duration(int(row.get("seconds") or 0))
+        else:
+            duration = str(value_of(row))
         duration_width = draw.textlength(duration, font=f_duration)
         name_max = content_right - duration_width - (content_left + _NAME_OFFSET) - 24
         name = _fit_text(draw, row.get("username") or "", name_font, max(0, int(name_max)))
@@ -299,9 +308,7 @@ def render_rank_poster(period: str, rows: list[dict], window_start: datetime,
         font=f_admit,
         fill=_TAN,
     )
-    update_text = (
-        "Aetrix · 每周日 21:00 更新" if is_week else "Aetrix · 每日 20:30 更新"
-    )
+    update_text = foot_text
     update_width = draw.textlength(update_text, font=f_foot)
     draw.text(
         (content_right - update_width, stub_y + 96),

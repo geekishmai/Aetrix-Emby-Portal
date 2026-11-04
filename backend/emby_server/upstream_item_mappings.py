@@ -296,6 +296,155 @@ def get_best_mapping(db: Session, local_item_id: int, *,
     return None
 
 
+def get_all_mappings(db: Session, local_item_id: int, *,
+                     validate: bool = True) -> list:
+    """读本地条目的全部有效映射（偏好序与 get_best_mapping 逐字一致）。
+
+    播放源列表按映射逐条下发（每条线路一个 MediaSource、点选哪条
+    定向解析哪条）需要全量读口；单条口径仍走 get_best_mapping。
+    ``validate=True``（默认，O-10 读契约）与 get_best_mapping
+    同口径：本地条目非活行 → 空列表；源不存在/未 enabled 的映射
+    逐条剔除。``validate=False`` 返回原始全量行（按同一偏好序），
+    只许追溯类调用方显式使用。
+    """
+    local_id = _as_pos_int(local_item_id, "local_item_id")
+    rows = (db.query(em.UpstreamItemMapping)
+            .filter(em.UpstreamItemMapping.local_item_id == local_id)
+            .order_by(em.UpstreamItemMapping.confidence.desc(),
+                      em.UpstreamItemMapping.updated_at.desc(),
+                      em.UpstreamItemMapping.id.desc())
+            .all())
+    if not rows or not validate:
+        return rows
+    if not _local_item_live(db, local_id):
+        return []
+    source_ids = {row.source_id for row in rows}
+    enabled_ids = {
+        source_id for (source_id,) in (
+            db.query(em.UpstreamSource.id)
+            .filter(em.UpstreamSource.id.in_(source_ids),
+                    em.UpstreamSource.enabled.is_(True))
+            .all())
+    }
+    return [row for row in rows if row.source_id in enabled_ids]
+
+
+def identity_sibling_ids(db: Session, item) -> list:
+    """与条目同身份的重复行 id（不含自身，id 升序）。
+
+    身份口径与货架去重（``dedup.dedup_key`` 的 tmdb 路径）一致：
+    同库、同 tmdb_id。只认 tmdb 列这一条硬身份——名字+年份是
+    启发式，展示层拿它藏重复可以，播放聚合拿它并线有把别的片子
+    的线路挂错条目的风险，不用。无 tmdb 身份 → 无兄弟行（等识别
+    补齐 tmdb 后自然成组）。
+
+    - movie：同库同类型同 tmdb_id 的活行；
+    - episode：先按所属 series 的 tmdb 身份找同组 series 行，再
+      取这些 series 下季集号相同的活集行（season_number /
+      episode_number 的 None 按 0，与货架集去重口径一致）；
+    - 其余类型不聚合。
+
+    「活行」口径与 :func:`_local_item_live` 一致：未软删、未
+    合并、未隐藏。
+    """
+    library_id = getattr(item, "library_id", None)
+    item_type = getattr(item, "item_type", None)
+    if library_id is None or item_type not in ("movie", "episode"):
+        return []
+
+    def _live(query):
+        return query.filter(em.MediaItem.deleted_at.is_(None),
+                            em.MediaItem.merged_into_id.is_(None),
+                            em.MediaItem.is_hidden == False)  # noqa: E712
+
+    if item_type == "movie":
+        tmdb_id = (getattr(item, "tmdb_id", None) or "").strip()
+        if not tmdb_id:
+            return []
+        rows = (_live(db.query(em.MediaItem.id)
+                      .filter(em.MediaItem.library_id == library_id,
+                              em.MediaItem.item_type == "movie",
+                              em.MediaItem.tmdb_id == tmdb_id,
+                              em.MediaItem.id != item.id))
+                .order_by(em.MediaItem.id).all())
+        return [row[0] for row in rows]
+    # episode：经所属 series 的身份成组
+    series_id = getattr(item, "series_id", None)
+    if not series_id:
+        return []
+    series = (db.query(em.MediaItem)
+              .filter(em.MediaItem.id == series_id).first())
+    if series is None:
+        return []
+    tmdb_id = (getattr(series, "tmdb_id", None) or "").strip()
+    if not tmdb_id:
+        return []
+    series_ids = [row[0] for row in _live(
+        db.query(em.MediaItem.id)
+        .filter(em.MediaItem.library_id == library_id,
+                em.MediaItem.item_type == "series",
+                em.MediaItem.tmdb_id == tmdb_id)).all()]
+    if len(series_ids) <= 1:
+        return []
+    season_no = getattr(item, "season_number", None) or 0
+    ep_no = getattr(item, "episode_number", None) or 0
+    cands = (_live(db.query(em.MediaItem.id,
+                            em.MediaItem.season_number,
+                            em.MediaItem.episode_number)
+                   .filter(em.MediaItem.item_type == "episode",
+                           em.MediaItem.series_id.in_(series_ids),
+                           em.MediaItem.id != item.id))
+             .order_by(em.MediaItem.id).all())
+    return [cid for cid, s_no, e_no in cands
+            if (s_no or 0) == season_no and (e_no or 0) == ep_no]
+
+
+def get_grouped_mappings(db: Session, local_item_id: int, *,
+                         validate: bool = True) -> list:
+    """播放/展示口径的映射全量读：自身映射 + 同身份重复行映射。
+
+    背景：同一部片在上游托管库里可能有多行未合并重复（每行各挂
+    几条线路），货架/搜索按身份组只露代表行，但播放若只读命中
+    行自身映射，代表行线路全死时、同片在兄弟行上的活线路永远
+    用不上（2026-11-03《丛林猎凶》实证：代表行 2 线全死、兄弟
+    行有活线，Reflix 报「没有可用的源」）。本读口按
+    :func:`identity_sibling_ids` 的身份组把线路并起来：自身映射
+    在前（偏好序不变），兄弟行按 id 升序、各按自身偏好序续后，
+    同（source_id, upstream_item_id, episode_index）先到先得
+    去重。
+
+    校验口径与 :func:`get_all_mappings` 一致：``validate=True``
+    时命中行本身非活行 → 空列表（不许靠兄弟行把已死条目救
+    活）；每个兄弟行的映射各自过 get_all_mappings 的校验（兄弟
+    行非活行、源停用的映射不进来）。``validate=False`` 返回原始
+    行，只许追溯类调用方显式使用——此时仍只并未删/未合并的
+    兄弟行。
+    """
+    local_id = _as_pos_int(local_item_id, "local_item_id")
+    own = get_all_mappings(db, local_id, validate=validate)
+    if validate and not _local_item_live(db, local_id):
+        return []
+    item = (db.query(em.MediaItem)
+            .filter(em.MediaItem.id == local_id).first())
+    if item is None:
+        return own
+    sibling_ids = identity_sibling_ids(db, item)
+    if not sibling_ids:
+        return own
+    seen = {(row.source_id, row.upstream_item_id, row.episode_index)
+            for row in own}
+    grouped = list(own)
+    for sib_id in sibling_ids:
+        for row in get_all_mappings(db, sib_id, validate=validate):
+            key = (row.source_id, row.upstream_item_id,
+                   row.episode_index)
+            if key in seen:
+                continue
+            seen.add(key)
+            grouped.append(row)
+    return grouped
+
+
 def migrate_mappings(db: Session, from_local_id: int, to_local_id: int) -> int:
     """把一个本地条目的全部映射改挂到另一个条目（合并跟随用）。
 

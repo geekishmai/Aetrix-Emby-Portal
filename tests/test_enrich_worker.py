@@ -484,7 +484,7 @@ def test_mount_id_of():
 
 
 def test_claim_batch_groups_series_parent_first(db):
-    """成组抢单（处方 2）：同一部剧整组抢走，父级排在最前；组按最近入库倒序"""
+    """成组抢单：父级未终态时只抢父级，单集留在队里；父级终态后按集号认领。"""
     now = datetime.now()
     series = _make_item(db, item_type="series", name="组抢剧",
                         enrich_status="pending",
@@ -503,20 +503,24 @@ def test_claim_batch_groups_series_parent_first(db):
                        date_added=now)  # 最新 → 组排最前
     claimed = enrich_worker._claim_batch(db, 10)
     ids = [c.id for c in claimed]
-    # 组之间：最新的电影组在前；组内：父级（剧）先于集；整组连在一起
-    assert ids[0] == movie.id
-    assert ids[1] == series.id
-    assert ids[2:] == [e.id for e in eps]
-    assert len(ids) == 5
-    # 抢到的都置 enriching + 租约
+    # 组之间：最新的电影组在前；父级未终态时单集不进本批
+    assert ids == [movie.id, series.id]
     assert all(c.enrich_status == "enriching" and c.enrich_claimed_at for c in claimed)
+    for ep in eps:
+        db.refresh(ep)
+        assert ep.enrich_status == "pending"
+    db.refresh(series)
+    series.enrich_status = "done"
+    db.commit()
+    claimed_eps = enrich_worker._claim_batch(db, 10)
+    assert [c.id for c in claimed_eps] == [e.id for e in eps]
 
 
 def test_claim_batch_keeps_group_whole_across_batches(db):
-    """批量截断时组剩余部分仍在队里，下一批继续抢（同一部剧不被打散）"""
+    """父级终态后，批量截断留下的单集下一批继续抢（同一部剧不被打散）"""
     now = datetime.now()
     series = _make_item(db, item_type="series", name="长剧",
-                        enrich_status="pending", date_added=now)
+                        enrich_status="done", date_added=now)
     for n in (1, 2, 3, 4):
         _make_item(db, item_type="episode", name=f"E{n}",
                    file_path=f"mount://9/长剧/S1/E{n}.mkv",
@@ -525,11 +529,11 @@ def test_claim_batch_keeps_group_whole_across_batches(db):
                    date_added=now - timedelta(minutes=n))
     first = enrich_worker._claim_batch(db, 2)
     assert len(first) == 2
-    assert first[0].id == series.id          # 父级先抢
+    assert all(c.series_id == series.id for c in first)
     rest = enrich_worker._claim_batch(db, 10)
-    # 剩余三集（同组）被下一批抢走
+    # 剩余两集（同组）被下一批抢走
     assert all(c.series_id == series.id for c in rest)
-    assert len(rest) == 3
+    assert len(rest) == 2
 
 
 def test_claim_batch_skips_locked_out_and_not_due_groups(db):
@@ -558,10 +562,97 @@ def test_claim_batch_repair_jumps_the_queue(db):
                     date_added=now - timedelta(hours=2))
     claimed = enrich_worker._claim_batch(db, 10)
     ids = [c.id for c in claimed]
-    # repair 组最高优先：整组在前，父级先于集
-    assert ids[0] == repair_series.id
-    assert ids[1] == ep.id
-    assert ids[2] == normal_movie.id
+    # repair 剧优先于新电影；父级未终态时单集不跟着被抢
+    assert ids == [repair_series.id, normal_movie.id]
+    db.refresh(ep)
+    assert ep.enrich_status == "pending"
+
+
+def test_claim_fresh_group_beats_library_turn(db, monkeypatch):
+    """窗口内新入库的组排在库轮转之前；窗口外的存量仍按库绕圈。"""
+    enrich_worker._library_turn_state["lib_id"] = None
+    monkeypatch.setattr(enrich_worker, "ENRICH_FRESH_FIRST_HOURS", 48)
+    monkeypatch.setattr(enrich_worker, "ENRICH_LIBRARY_FAIRNESS", True)
+    now = datetime.now()
+    lib_old = em.Library(guid=uuid.uuid4().hex, name="存量库",
+                         collection_type="movies", paths="")
+    lib_new = em.Library(guid=uuid.uuid4().hex, name="新库",
+                         collection_type="movies", paths="")
+    db.add_all([lib_old, lib_new])
+    db.flush()
+    _make_item(db, name="存量大库条目", enrich_status="pending",
+               library_id=lib_old.id, date_added=now - timedelta(days=20))
+    fresh = _make_item(db, name="刚入库", enrich_status="pending",
+                       library_id=lib_new.id, date_added=now)
+    # 游标停在新库：公平调度会把新库沉到队尾。新鲜窗口必须把它捞回来。
+    enrich_worker._library_turn_state["lib_id"] = lib_new.id
+    claimed = enrich_worker._claim_batch(db, 1)
+    assert [c.id for c in claimed] == [fresh.id]
+
+    # 两边都在窗口外：公平调度照旧，游标库沉底。
+    db.rollback()
+    db.query(em.MediaItem).update(
+        {"enrich_status": "pending", "enrich_claimed_at": None,
+         "date_added": now - timedelta(days=20)},
+        synchronize_session=False)
+    db.commit()
+    enrich_worker._library_turn_state["lib_id"] = lib_new.id
+    claimed = enrich_worker._claim_batch(db, 1)
+    assert claimed[0].library_id == lib_old.id
+
+
+def test_negative_inherit_skips_episode_io(db, monkeypatch):
+    """父级终态 none：单集继承结论，不读 NFO、不查 TMDB，直接 done。"""
+    series = _make_item(
+        db, item_type="series", name="搜过没有", enrich_status="done",
+        metadata_source="none", tmdb_id=None, poster_path=None,
+        primary_image_url=None, file_path=None, file_fingerprint="fp-s")
+    ep = _make_item(
+        db, item_type="episode", name="第 1 集", series_id=series.id,
+        parent_id=series.id, season_number=1, episode_number=1,
+        enrich_status="enriching", file_path="mount://9/剧/S1/E01.mkv",
+        enrich_claim_token="tok", file_fingerprint="fp-e")
+    info = enrich_worker._inherit_parent_info(db, ep)
+    assert info["negative"] is True
+    assert info["tmdb_id"] is None
+
+    def _boom(*_a, **_k):
+        raise AssertionError("阴性继承不应再碰目录/NFO")
+
+    monkeypatch.setattr(enrich_worker, "_shared_ctx", _boom)
+    result, ctx = enrich_worker._enrich_fetch_pre(
+        ep, holder={}, inherit_parent=info)
+    assert ctx is None
+    assert result["pure_inherit"] is True
+    assert result["inherit_negative"] is True
+    enrich_worker._enrich_apply(db, ep, result)
+    assert ep.enrich_status == "done"
+    assert ep.metadata_source == "inherit"
+
+
+def test_negative_inherit_off_keeps_full_fetch(db, monkeypatch):
+    """开关关闭：无图无 tmdb 的已完成父级不构成继承条件。"""
+    monkeypatch.setattr(enrich_worker, "ENRICH_EPISODE_INHERIT_PARENT", False)
+    series = _make_item(
+        db, item_type="series", name="搜过没有", enrich_status="done",
+        metadata_source="none", file_path=None, file_fingerprint="fp-s2")
+    ep = _make_item(
+        db, item_type="episode", name="第 1 集", series_id=series.id,
+        enrich_status="pending", file_path="mount://9/剧/S1/E01.mkv")
+    assert enrich_worker._inherit_parent_info(db, ep) is None
+
+
+def test_split_batch_puts_parents_before_episodes(monkeypatch):
+    """同批既有父级又有单集时，先处理父级，单集才能继承本批结论。"""
+    monkeypatch.setattr(enrich_worker, "ENRICH_EPISODE_INHERIT_PARENT", True)
+    series = type("I", (), {"item_type": "series", "id": 1})()
+    episode = type("I", (), {"item_type": "episode", "id": 2})()
+    movie = type("I", (), {"item_type": "movie", "id": 3})()
+    parts = enrich_worker._split_batch_for_inherit([episode, series, movie])
+    assert [[it.id for it in part] for part in parts] == [[1, 3], [2]]
+    assert len(enrich_worker._split_batch_for_inherit([episode])) == 1
+    monkeypatch.setattr(enrich_worker, "ENRICH_EPISODE_INHERIT_PARENT", False)
+    assert len(enrich_worker._split_batch_for_inherit([episode, series])) == 1
 
 
 def test_claim_batch_library_round_robin(db):

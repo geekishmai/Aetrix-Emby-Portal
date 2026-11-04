@@ -241,19 +241,21 @@ def main_markup(db, web_user, is_private: bool) -> dict:
         if not is_private:
             # 群里未绑定：绑定/帮助之外加老虎机围观入口（公共面板
             # 人人可看；点注时未绑定按既有逻辑只回绑定引导、不扣款）。
-            return {"inline_keyboard": [
-                [{"text": "🔗 绑定账号", "callback_data": "menu:bind"}],
-                [
-                    {"text": "🎰 老虎机", "callback_data": "menu:slots"},
-                    {"text": "❓ 帮助", "callback_data": "menu:help"},
-                ],
-            ]}
+            from backend.tg_bot import games_menu
+
+            rows = [[{"text": "🔗 绑定账号", "callback_data": "menu:bind"}]]
+            second = []
+            if games_menu.any_enabled(db):
+                second.append({"text": "🎮 游戏", "callback_data": "menu:games"})
+            second.append({"text": "❓ 帮助", "callback_data": "menu:help"})
+            rows.append(second)
+            return {"inline_keyboard": rows}
         return {"inline_keyboard": [
             [{"text": "🔗 绑定账号", "callback_data": "menu:bind"}],
             [{"text": "❓ 帮助", "callback_data": "menu:help"}],
         ]}
     if not is_private:
-        return _group_menu_markup()
+        return _group_menu_markup(db)
     rows: list[list[dict]] = []
     url = login_token.build_login_url(db, web_user)
     if url:
@@ -268,27 +270,26 @@ def main_markup(db, web_user, is_private: bool) -> dict:
     return {"inline_keyboard": rows}
 
 
-def _group_menu_markup() -> dict:
-    """群聊主菜单（2026-10-30 定版）：无登录行、无私聊专属入口。
+def _group_menu_markup(db) -> dict:
+    """群聊主菜单：游戏收成一个入口，关掉的游戏不出现在里面。
 
-    老虎机进第一屏；个人查询（我的绑定/转存进度/为什么播不了/
-    我的想看）不进群菜单——点开会把点击者个人数据编辑进群里的
-    共享消息，与命令层私聊限定口径冲突，统一回私聊（callbacks
-    对这四项的群分支回「私聊使用」卡＋去私聊深链）。
+    个人查询不进群菜单。点开「游戏」才看到老虎机、抽奖、红包，
+    以及后台打开的对决、红包雨。
     """
+    from backend.tg_bot import games_menu
+
     rows: list[list[dict]] = [
         [
             {"text": "✅ 签到", "callback_data": "menu:checkin"},
             {"text": "✨ 能量", "callback_data": "menu:points"},
         ],
-        [
-            {"text": "🎰 老虎机", "callback_data": "menu:slots"},
-            {"text": "🎲 抽奖", "callback_data": "menu:lottery"},
-        ],
-        [
-            {"text": "🧧 发红包", "callback_data": "menu:redpacket"},
-            {"text": "🏆 能量榜", "callback_data": "menu:rank"},
-        ],
+    ]
+    play_row = []
+    if games_menu.any_enabled(db):
+        play_row.append({"text": "🎮 游戏", "callback_data": "menu:games"})
+    play_row.append({"text": "🏆 能量榜", "callback_data": "menu:rank"})
+    rows.append(play_row)
+    rows.extend([
         [
             {"text": "🔥 求片榜", "callback_data": "menu:requestboard"},
             {"text": "📜 群规", "callback_data": "menu:rules"},
@@ -297,19 +298,19 @@ def _group_menu_markup() -> dict:
             {"text": "👤 账号中心", "callback_data": "menu:account"},
             {"text": "❓ 帮助", "callback_data": "menu:help"},
         ],
-    ]
+    ])
     return {"inline_keyboard": rows}
 
 
 def private_only_card() -> str:
-    """私聊限定功能在群里被点到时的统一提示卡（与 callbacks 既有口径一致）。"""
+    """私聊命令在群里被调用时的统一提示卡（命令层与按钮层同一张）。"""
     return layout.card(
         layout.title("私聊使用"),
-        [layout.row("🔒", "使用方式", "这个功能请私聊机器人使用")])
+        [layout.row("🔒", "使用方式", "这是一条私聊命令，请私聊机器人使用")])
 
 
 def private_only_markup(db) -> dict:
-    """私聊卡按钮：「💬 去私聊」深链（可解析时）＋回主界面。
+    """私聊提示卡按钮：「💬 点我去私聊」深链（可解析时）＋回主界面。
 
     深链用户名走既有来源 tg_bind.get_bot_username（缓存配置
     telegram_bot_username，缺失时 getMe 回填）；解析不到就不挂
@@ -324,7 +325,7 @@ def private_only_markup(db) -> dict:
     except Exception:
         username = ""
     if username:
-        rows.append([{"text": "💬 去私聊", "url": f"https://t.me/{username}"}])
+        rows.append([{"text": "💬 点我去私聊", "url": f"https://t.me/{username}"}])
     rows.append(layout.home_row())
     return {"inline_keyboard": rows}
 
@@ -340,6 +341,7 @@ USER_PANEL_GROUPS: dict[str, dict] = {
             {"text": "🎬 求片", "callback_data": "menu:request"},
             {"text": "📋 我的求片", "callback_data": "menu:myrequests"},
             {"text": "⭐ 我的想看", "callback_data": "menu:wants"},
+            {"text": "🔥 求片榜", "callback_data": "menu:requestboard"},
         ],
     },
     "drive": {
@@ -356,12 +358,14 @@ USER_PANEL_GROUPS: dict[str, dict] = {
             {"text": "🏆 能量榜", "callback_data": "menu:rank"},
             {"text": "🎟️ 续期", "callback_data": "menu:login"},
             {"text": "🔗 绑定账号", "callback_data": "menu:bind"},
+            {"text": "🏅 成就", "callback_data": "menu:achievements"},
         ],
     },
     "welfare": {
         "label": "🎁 福利活动",
         "buttons": [
             {"text": "🎲 抽奖", "callback_data": "menu:lottery"},
+            {"text": "🏆 我的抽奖", "callback_data": "menu:mylottery"},
             {"text": "🧧 发红包", "callback_data": "menu:redpacket"},
             {"text": "🎰 老虎机", "callback_data": "menu:slots"},
         ],
@@ -528,21 +532,32 @@ def admin_markup() -> dict:
     ]}
 
 
+def group_start_text() -> str:
+    """群内 /start 入口卡：只说明私密操作入口与群内通知口径，不带个人数据。
+
+    学参照形态：群里输 /start 只回简短入口提示＋功能按钮（按钮由
+    main_markup 按绑定状态给群菜单/未绑定菜单），账号信息不在群里铺开。
+    """
+    return layout.card(
+        layout.title("私密操作入口"),
+        [
+            layout.row("🔒", "操作入口", "这里是私密操作入口，个人功能请点下方按钮直达，或私聊我使用"),
+            layout.row("📣", "群内通知", "群里只保留入库喜报等通知"),
+        ],
+    )
+
+
 def handle_start(db, tg_user: dict, chat_id: int, args: str) -> str | tuple[str, dict | None]:
     site_name = html.escape(str(store.get_value(db, "site_name", "Aetrix")))
     telegram_id = tg_user.get("id")
     web_user = resolve(db, int(telegram_id)) if telegram_id else None
     is_private = (chat_id == telegram_id)
 
-    if web_user:
-        if not is_private:
-            from backend.tg_bot.features import compact_dashboard
+    if not is_private:
+        # 群里：只回入口卡＋功能按钮（绑定与否同形态），不渲染账号卡。
+        return group_start_text(), main_markup(db, web_user, False)
 
-            greet = tg_user.get("first_name") or web_user.username
-            # 正文仍是现行九行信息卡（一字不改），补挂群菜单按钮：
-            # 此前只回纯文本，群里没有任何按钮能点进功能。
-            return (compact_dashboard(db, web_user, display_name=greet),
-                    main_markup(db, web_user, False))
+    if web_user:
         return main_card_text(tg_user, web_user), main_markup(db, web_user, True)
 
     return unbound_card_text(tg_user, site_name), main_markup(db, None, is_private)
@@ -617,13 +632,23 @@ def handle_points(db, tg_user: dict, chat_id: int, args: str) -> str:
             rows.append(layout.row("⚡", "活力数值", f"{v}/{vmax} <code>{bar}</code>"))
     except Exception:
         pass
-    return layout.card(layout.title("我的能量"), rows)
+    # 群发言能量已并入 /points 输出（菜单简化）：同一段行与 /chatpoints
+    # 独立卡共用 _chatpoints_section，计分口径一字不改。读状态失败时
+    # 只略过该段（与上方活力块同一容错口径），不拖垮能量主卡。
+    try:
+        chat_rows, chat_notes = _chatpoints_section(db, user)
+        rows.extend(chat_rows)
+    except Exception:
+        chat_notes = []
+    return layout.card(layout.title("我的能量"), rows, chat_notes)
 
 
-def handle_chatpoints(db, tg_user: dict, chat_id: int, args: str) -> str:
-    user = resolve(db, int(tg_user.get("id") or 0))
-    if user is None:
-        return _bind_guide_text()
+def _chatpoints_section(db, user) -> tuple[list[str], list[str]]:
+    """群发言能量段（信息行＋备注）：/points 合并展示与 /chatpoints 共用。
+
+    口径全部取自 points.get_chat_points_status（与发分侧同一只读口），
+    本段只负责渲染，不改任何计分语义。
+    """
     from backend import points as points_mod
 
     status = points_mod.get_chat_points_status(db, user.id)
@@ -631,13 +656,10 @@ def handle_chatpoints(db, tg_user: dict, chat_id: int, args: str) -> str:
     cap = status["daily_cap"]
     per_msg = status["per_msg"]
     if per_msg == 0:
-        return layout.card(
-            layout.title("群发言能量"),
-            [
-                layout.row("💬", "发言奖励", "当前已关闭，在群里发言暂不发放能量"),
-                layout.row("🏆", "累计能量", f"<b>{status['total_earned']}</b> 能量"),
-            ],
-        )
+        return ([
+            layout.row("💬", "发言奖励", "当前已关闭，在群里发言暂不发放能量"),
+            layout.row("🏆", "累计能量", f"<b>{status['total_earned']}</b> 能量"),
+        ], [])
     filled = round(earned / cap * 10) if cap > 0 else 0
     bar = "▓" * filled + "░" * (10 - filled)
     rows = [
@@ -648,6 +670,14 @@ def handle_chatpoints(db, tg_user: dict, chat_id: int, args: str) -> str:
     notes = []
     if earned >= cap:
         notes.append("✅ 今日发言能量已达上限，明天再继续。")
+    return rows, notes
+
+
+def handle_chatpoints(db, tg_user: dict, chat_id: int, args: str) -> str:
+    user = resolve(db, int(tg_user.get("id") or 0))
+    if user is None:
+        return _bind_guide_text()
+    rows, notes = _chatpoints_section(db, user)
     return layout.card(layout.title("群发言能量"), rows, notes)
 
 
@@ -728,7 +758,7 @@ def handle_lottery(db, tg_user: dict, chat_id: int, args: str, is_group: bool) -
         suffix = f"/{max_entries}" if max_entries else ""
 
         text = layout.card(
-            layout.title("群抽奖"),
+            layout.title(f"点「参加」，{draw_at_text} 开奖，已有 {entry_text}{suffix} 人"),
             [
                 layout.row("📌", "活动名称", f"<b>{title}</b>"),
                 layout.row("🎁", "活动奖品", prize),
@@ -739,7 +769,7 @@ def handle_lottery(db, tg_user: dict, chat_id: int, args: str, is_group: bool) -
         )
         reply_markup = {
             "inline_keyboard": [
-                [{"text": "🎲 参加抽奖", "callback_data": f"lottery_join:{round_id}"}]
+                [{"text": "参加", "callback_data": f"lottery_join:{round_id}"}]
             ]
         }
         return (text, reply_markup)
@@ -828,12 +858,98 @@ def handle_redpacket(db, tg_user: dict, chat_id: int, args: str,
     return (text, redpacket_common.claim_markup(packet.id))
 
 
+def handle_duel(db, tg_user: dict, chat_id: int, args: str,
+                update_id: int | None = None, in_group: bool = False):
+    """群内骰子对决。成功时返回面板标记，由 router 发送并记下消息编号。
+
+    重放且面板已经发出时返回静默标记，避免再刷一条。
+    """
+    from backend import duel as duel_svc
+    from backend.tg_bot import duel_ui
+
+    if not in_group:
+        return duel_svc.reason_message("not_group")
+    if not duel_svc.is_enabled(db):
+        return duel_svc.reason_message("disabled")
+    user = resolve(db, int(tg_user.get("id") or 0))
+    if user is None:
+        return _bind_guide_text()
+    parts = args.split()
+    if len(parts) != 1:
+        return layout.card(
+            layout.title("骰子对决"),
+            [
+                layout.row("🎲", "使用方法", f"{_cmd('/duel')} <i>能量</i>"),
+                layout.row("💡", "对决示例", f"{_cmd('/duel 50')}（押 50，30 秒内等一人应战）"),
+            ],
+        )
+    try:
+        stake = int(parts[0])
+    except ValueError:
+        return duel_svc.reason_message("bad_amount")
+    idempotency_key = f"tg:{update_id}" if update_id is not None else None
+    try:
+        result = duel_svc.create_duel(
+            db, user, int(chat_id), stake, idempotency_key=idempotency_key)
+    except Exception:
+        logger.exception("duel create failed")
+        return "骰子对决发起失败，请稍后再试"
+    if not result.get("ok"):
+        extra = {k: v for k, v in result.items() if k not in ("ok", "reason")}
+        return duel_svc.reason_message(result.get("reason") or "", **extra)
+    row = result["duel"]
+    if result.get("duplicate") and (row.message_id or row.status != "open"):
+        return (duel_ui.SILENT,)
+    initiator_name = html.escape(str(user.username or "玩家"))
+    return (
+        duel_ui.PANEL,
+        duel_ui.open_text(row, initiator_name),
+        duel_ui.open_markup(row.id, row.stake),
+        row.id,
+    )
+
+
+def handle_rain(db, tg_user: dict, chat_id: int, args: str,
+                update_id: int | None = None, in_group: bool = False):
+    """管理员在群里立刻下一场红包雨。金额和份数读后台配置。"""
+    from backend import rain as rain_svc
+    from backend.tg_bot import rain_ui
+
+    if not in_group:
+        return rain_svc.reason_message("not_group")
+    if not rain_svc.is_enabled(db):
+        return rain_svc.reason_message("disabled")
+    user = resolve(db, int(tg_user.get("id") or 0))
+    if user is None:
+        return _bind_guide_text()
+    if not bool(getattr(user, "is_staff", False)):
+        return rain_svc.reason_message("not_staff")
+    idempotency_key = f"tg:{update_id}" if update_id is not None else None
+    try:
+        result = rain_svc.start_rain(
+            db, user, int(chat_id), idempotency_key=idempotency_key)
+    except Exception:
+        logger.exception("rain start failed")
+        return "红包雨发起失败，请稍后再试"
+    if not result.get("ok"):
+        return rain_svc.reason_message(result.get("reason") or "")
+    rain = result["rain"]
+    if result.get("duplicate") and (rain.message_id or rain.status != "running"):
+        return (rain_ui.SILENT,)
+    return (
+        rain_ui.PANEL,
+        rain_ui.open_text(db, rain),
+        rain_ui.open_markup(rain.id),
+        rain.id,
+    )
+
+
 def slots_markup(db) -> dict:
     """老虎机注额按钮（一行三档）＋回主界面行；陪玩与结果卡共用。"""
     from backend import slots as slots_svc
 
     tier_row = [
-        {"text": f"🎰 {tier} 能量", "callback_data": f"slots_bet:{tier}"}
+        {"text": f"押 {tier}", "callback_data": f"slots_bet:{tier}"}
         for tier in slots_svc.bet_tiers(db)
     ]
     return {"inline_keyboard": [tier_row, layout.home_row()]}
@@ -851,11 +967,11 @@ def handle_slots(db, tg_user: dict, chat_id: int, args: str) -> str | tuple[str,
     pays = slots_svc.pay_table(db)
     tiers = " / ".join(str(t) for t in slots_svc.bet_tiers(db))
     text = layout.card(
-        layout.title("老虎机"),
+        layout.title(f"选一档下注（{tiers}），777 ×{pays['seven']}，另抱头奖池"),
         [
-            layout.row("🏆", "头奖池", f"<b>{slots_svc.pool_balance(db)} 能量</b>"),
+            layout.row("🏆", "当前奖池", f"<b>{slots_svc.pool_balance(db)} 能量</b>"),
             layout.row("✨", "我的能量", f"<b>{int(user.points or 0)}</b>"),
-            layout.row("🎯", "注额", f"{tiers} 能量三档，点下方按钮开摇"),
+            layout.row("🎯", "注额档位", f"{tiers} 能量，点「押 N」开摇"),
         ],
         [
             f"赔付：777 ×{pays['seven']} · BAR 三连 ×{pays['bar']} · "
@@ -880,11 +996,11 @@ def handle_slots_group(db, tg_user: dict, chat_id: int, args: str) -> str | tupl
     pays = slots_svc.pay_table(db)
     tiers = " / ".join(str(t) for t in slots_svc.bet_tiers(db))
     text = layout.card(
-        layout.title("老虎机"),
+        layout.title(f"选一档下注（{tiers}），777 ×{pays['seven']}，另抱头奖池"),
         [
-            layout.row("🏆", "头奖池", f"<b>{slots_svc.pool_balance(db)} 能量</b>"),
-            layout.row("🎯", "注额", f"{tiers} 能量三档，点下方按钮开摇"),
-            layout.row("👤", "下注", "扣点按钮的人自己的能量，中奖也归他"),
+            layout.row("🏆", "当前奖池", f"<b>{slots_svc.pool_balance(db)} 能量</b>"),
+            layout.row("🎯", "注额档位", f"{tiers} 能量，点「押 N」开摇"),
+            layout.row("👤", "下注规则", "扣点按钮的人自己的能量，中奖也归他"),
         ],
         [
             f"赔付：777 ×{pays['seven']} · BAR 三连 ×{pays['bar']} · "
@@ -1118,15 +1234,18 @@ def handle_whois(db, tg_user: dict, chat_id: int, args: str,
                  reply_from: dict | None = None) -> str:
     """管理员查人（只读，embyboss 借鉴第 2 项 + 群内精简卡）。
 
-    私聊（默认路径）：审计全卡，口径逐字不变——双门与 handle_admin
-    同一口径：私聊限定（handler 层 guard，router 的 private_only
-    另有一层）+ resolve 后 is_staff 判定；非管理员回现行拒绝卡，
-    未绑定回绑定指引。查询与渲染全在 whois.py（只读，只查现有表）。
+    私聊（默认路径）：双门与 handle_admin 同一口径：私聊限定
+    （handler 层 guard，router 的 private_only 另有一层）+ resolve
+    后 is_staff 判定；非管理员回现行拒绝卡，未绑定回绑定指引。
+    二期面板：回复定位或带参定位到具体用户时出管理员面板第一页
+    （whois_panel.main_page：精简卡＋翻页/写操作按钮）；定位不到
+    具体用户（IP/设备等关键词）仍走 whois.render_whois 审计全卡
+    搜索，口径不变。
 
     群聊（router 显式传 in_group=True 才进，2026-11-01 用户拍板）：
-    同一 is_staff 判定，只出精简卡；见 _whois_group。
+    同一 is_staff 判定，出面板第一页；见 _whois_group。
     """
-    from backend.tg_bot import queries, whois
+    from backend.tg_bot import queries, whois, whois_panel
 
     tg_id = tg_user.get("id")
     if in_group:
@@ -1141,6 +1260,14 @@ def handle_whois(db, tg_user: dict, chat_id: int, args: str,
             layout.title("账号反查"),
             [layout.row("🔒", "访问状态", "仅管理员可用")],
         )
+    if reply_from and reply_from.get("id"):
+        target = resolve(db, int(reply_from["id"]))
+        if target is not None:
+            name = (f"{reply_from.get('first_name') or ''} "
+                    f"{reply_from.get('last_name') or ''}").strip()
+            if not name:
+                name = str(reply_from.get("username") or "")
+            return whois_panel.main_page(db, target, name or None)
     keyword = (args or "").strip()
     if not keyword:
         return layout.card(
@@ -1150,6 +1277,9 @@ def handle_whois(db, tg_user: dict, chat_id: int, args: str,
                 layout.row("🧭", "可查", "IP 地址、TG 号、站内用户名 / Emby 名、设备或客户端名"),
             ],
         )
+    target = whois.find_lite_user(db, keyword)
+    if target is not None:
+        return whois_panel.main_page(db, target)
     return whois.render_whois(db, keyword)
 
 
@@ -1160,10 +1290,11 @@ def _whois_group(db, tg_id, args: str, reply_from: dict | None) -> str:
     🔒 拒绝卡（卡里绝不带被查人任何信息）。目标定位：优先被回复
     消息的发送者（reply_from，凭其 TG 号走 identity 链），其次
     带参（站内用户名 / TG 号，whois.find_lite_user 只查 web_users）。
-    查无此人 / 对方未绑定一律回明示卡，不报错、不建行（全只读）；
-    渲染只走 whois.render_whois_lite 的字段白名单。
+    查无此人 / 对方未绑定一律回明示卡，不报错、不建行；定位成功出
+    管理员面板第一页（whois_panel.main_page：精简卡＋按钮，精简卡
+    字段仍只走 whois.render_whois_lite 的字段白名单）。
     """
-    from backend.tg_bot import whois
+    from backend.tg_bot import whois, whois_panel
 
     if not tg_id:
         return _bind_guide_text()
@@ -1186,7 +1317,7 @@ def _whois_group(db, tg_id, args: str, reply_from: dict | None) -> str:
                 f"{reply_from.get('last_name') or ''}").strip()
         if not name:
             name = str(reply_from.get("username") or "")
-        return whois.render_whois_lite(db, target, name or None)
+        return whois_panel.main_page(db, target, name or None)
     keyword = (args or "").strip()
     if not keyword:
         return layout.card(
@@ -1202,4 +1333,4 @@ def _whois_group(db, tg_id, args: str, reply_from: dict | None) -> str:
             layout.title("账号速览"),
             [layout.row("📭", "结果", "没查到这个账号")],
         )
-    return whois.render_whois_lite(db, target)
+    return whois_panel.main_page(db, target)

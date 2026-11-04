@@ -505,11 +505,13 @@ def pseed():
         probe_status="done")
     db.add(hosted)
     db.flush()
-    db.add(em.UpstreamItemMapping(
+    map_row = em.UpstreamItemMapping(
         local_item_id=hosted.id, source_id=src.id, upstream_item_id=UP_ID,
-        confidence=1.0, evidence="tmdb"))
+        confidence=1.0, evidence="tmdb")
+    db.add(map_row)
+    db.flush()
     db.commit()
-    data = {"guid": hosted.guid, "src": src.id}
+    data = {"guid": hosted.guid, "src": src.id, "map_id": map_row.id}
     db.close()
     yield data
     db = SessionLocal()
@@ -553,7 +555,7 @@ def free_token(pclient, pseed):
 
 def _upstream_line(body):
     return [s for s in body.get("MediaSources") or []
-            if str(s.get("Id", "")).endswith(":upstream")]
+            if ":upstream" in str(s.get("Id", ""))]
 
 
 def test_detail_hosted_movie_has_upstream_line(pclient, bound_token, pseed):
@@ -563,11 +565,18 @@ def test_detail_hosted_movie_has_upstream_line(pclient, bound_token, pseed):
     body = r.json()
     lines = _upstream_line(body)
     assert len(lines) == 1, body.get("MediaSources")
-    assert lines[0]["Name"] == f"{HOSTED_NAME} · 上游 · {SRC2_NAME}"
-    # 本地合成源不带取流地址（没有本地文件可取），只有上游线路能播
+    # Name＝纯画质标口径：详情路径不现查媒体参数、判不出画质 → 回落
+    # 条目名，绝不带源名凑数（2026-11-02 站主口径）
+    assert lines[0]["Name"] == HOSTED_NAME
+    assert SRC2_NAME not in lines[0]["Name"]
+    # 空壳源已删（2026-11-02 详情 DTO 口径定版）：托管行详情
+    # 不再附带没有本地文件可取的本地合成源——它会被客户端渲
+    # 染成一条不可用来源（Rex 实证一红一绿）；只下发上游线
+    # 路，回归见 tests/test_cms_dto_phantom_source.py。
     local = [s for s in body["MediaSources"]
-             if not str(s.get("Id", "")).endswith(":upstream")]
-    assert local and not local[0].get("DirectPlayUrl")
+             if ":upstream" not in str(s.get("Id", ""))]
+    assert local == []
+    assert body["MediaSourceCount"] == 1
 
 
 def test_playbackinfo_hosted_movie_only_upstream_source(
@@ -588,7 +597,9 @@ def test_playbackinfo_hosted_movie_only_upstream_source(
     sources = r.json().get("MediaSources") or []
     assert len(sources) == 1, sources  # 只有上游线路一条源
     line = sources[0]
-    assert line["Id"] == f"{pseed['guid']}:upstream"
+    assert line["Id"] == f"{pseed['guid']}:upstream:{pseed['map_id']}"
+    # 现查参数带 3840×2160 → Name＝纯画质标「4K」，不带源名
+    assert line["Name"] == "4K"
     assert line["Size"] == 3_500_000_000
     assert line["RunTimeTicks"] == 5_400_000_000
     assert line["Container"] == "mkv"

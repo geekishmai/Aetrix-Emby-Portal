@@ -153,7 +153,7 @@ def test_body_sent_as_photo_with_cover(db, wires):
     assert "总额 50 能量" in caption and "剩余 5 个" in caption
     assert got_markup == markup
     btn = got_markup["inline_keyboard"][0][0]
-    assert btn["text"] == "🧧 抢红包"
+    assert btn["text"] == "抢"
     assert btn["callback_data"] == f"redpacket_claim:{packet.id}"
 
 
@@ -250,7 +250,7 @@ def test_claim_on_photo_body_edits_caption(db, wires):
     assert len(wires["cap_edits"]) == 1
     assert "剩余 4 个" in wires["cap_edits"][0][2]
     btn = wires["cap_edits"][0][3]["inline_keyboard"][0][0]
-    assert btn["text"] == "🧧 抢红包"
+    assert btn["text"] == "抢"
     assert db.query(models.RedPacketClaim).count() == 1
 
 
@@ -260,6 +260,26 @@ def test_claim_on_legacy_text_body_edits_text(db, wires):
     assert wires["cap_edits"] == []
     assert len(wires["text_edits"]) == 1
     assert "剩余 4 个" in wires["text_edits"][0][2]
+
+
+def test_group_claim_sends_claim_feedback_with_autodelete(db, wires):
+    """回归（#1831 误删）：群聊普通红包领取成功必须发群内领取反馈。
+
+    反馈走 sender.send_message_ex、文案走 claim_feedback_text 口径，
+    并按 bot_msg_delay 调度自毁；#1831 少刷屏改造误删了这条调用后，
+    领取只剩个人弹窗、群里静默无反馈。
+    """
+    packet, claimer = _setup_claimable(db)
+    callbacks.handle_callback(db, _claim_cq(packet.id, 700202, photo=True))
+    assert db.query(models.RedPacketClaim).count() == 1
+    claim = db.query(models.RedPacketClaim).first()
+    assert len(wires["ex"]) == 1
+    chat_id, text, _markup = wires["ex"][0]
+    assert chat_id == GROUP_CHAT
+    assert text == redpacket_common.claim_feedback_text(
+        "c_claim", int(claim.amount), 4)
+    # 反馈消息（fake_ex 返回 id 9001）已按默认 30 秒延时调度自毁
+    assert (GROUP_CHAT, 9001, 30) in wires["scheduled"]
 
 
 def test_claim_photo_caption_edit_failure_falls_back_to_text(db, wires, monkeypatch):
@@ -317,12 +337,10 @@ def test_packet_body_labels_unified_four_chars(db):
     packet, name = _sample_packet(db)
     packet_labels = _body_row_labels(redpacket_common.packet_text(packet, name))
     assert packet_labels == ["红包主人", "红包总额", "剩余份数", "有效期限"]
-    empty_labels = _body_row_labels(
-        redpacket_common.finished_text(packet, name, "empty"))
-    assert empty_labels == ["红包主人", "红包总额", "红包状态"]
-    expired_labels = _body_row_labels(
-        redpacket_common.finished_text(packet, name, "expired"))
-    assert expired_labels == ["红包主人", "红包总额", "红包状态", "过期退款"]
-    for label in packet_labels + empty_labels + expired_labels:
+    # 结束后面板收成一行，不再铺信息行
+    assert "\n" not in redpacket_common.finished_text(packet, name, "empty", "小明", 12)
+    assert "已抢完" in redpacket_common.finished_text(packet, name, "empty", "小明", 12)
+    assert "已过期" in redpacket_common.finished_text(packet, name, "expired")
+    for label in packet_labels:
         assert _CJK4.match(label), label
         assert label not in _OLD_BODY_LABELS

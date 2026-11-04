@@ -22,6 +22,9 @@ def handle_callback(db, callback_query: dict, redpacket_enabled: bool | None = N
     if data.startswith("menu:"):
         _handle_menu(db, callback_query)
         return
+    if data.startswith("whois:"):
+        _handle_whois_callback(db, callback_query)
+        return
     if data.startswith("redpacket_claim:"):
         _handle_redpacket_claim(db, callback_query, redpacket_enabled)
         return
@@ -32,6 +35,12 @@ def handle_callback(db, callback_query: dict, redpacket_enabled: bool | None = N
         _handle_reconcile_callback(db, callback_query)
     if data.startswith("slots_bet:"):
         _handle_slots_bet(db, callback_query)
+        return
+    if data.startswith("duel_accept:"):
+        _handle_duel_accept(db, callback_query)
+        return
+    if data.startswith("rain_grab:"):
+        _handle_rain_grab(db, callback_query)
         return
 
 
@@ -96,6 +105,62 @@ def _handle_menu(db, callback_query: dict) -> None:
         # 群面板滑动自毁（PR-2）：编辑成功落地＝一次互动，把自毁
         # 重挂为「最后互动＋bot_msg 延时」，正点着不会准点消失。
         # 编辑失败走上面的删旧发新回落，旧消息已删、无可重挂，不进这里。
+        _rearm_group_panel_autodelete(db, chat_id, message_id)
+
+
+def _handle_whois_callback(db, callback_query: dict) -> None:
+    """处理 /whois 管理员面板按钮（whois:<page>:<user_id>[:<op>]）。
+
+    每次点击都重新校验点击者：未绑定或非管理员、目标不存在时只给
+    点按者弹 toast 拒绝提示，绝不改写共享面板消息（PA-057：群面板是
+    共享消息，路人一点击就改写会毁掉管理员的面板）。渲染与写操作
+    全在 whois_panel（写操作二次确认在 ask/do 两步里，do 才执行）。
+    """
+    from . import whois_panel
+
+    data = callback_query.get("data") or ""
+    parts = data.split(":")
+    cq_id = callback_query.get("id")
+    from_user = callback_query.get("from") or {}
+    tg_id = from_user.get("id")
+    msg = callback_query.get("message") or {}
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = msg.get("message_id")
+    if not chat_id or not message_id or not tg_id or len(parts) < 3:
+        return
+    sender.answer_callback_query(db, cq_id)
+    try:
+        page = parts[1]
+        target_id = int(parts[2])
+        op = parts[3] if len(parts) > 3 else None
+        # PA-058：赠送 do 回调第五段为一次性 nonce（其余回调无此段）。
+        nonce = parts[4] if len(parts) > 4 else None
+    except (IndexError, ValueError):
+        return
+    caller = resolve(db, int(tg_id))
+    if caller is None or not bool(getattr(caller, "is_staff", False)):
+        # PA-057：只弹 toast，不改写共享面板消息。
+        sender.answer_callback_query(db, cq_id, text="仅管理员可用")
+        return
+    target = (
+        db.query(models.WebUser)
+        .filter(models.WebUser.id == target_id)
+        .first()
+    )
+    if target is None:
+        # PA-057：同款改法，目标不存在也不改写共享面板消息。
+        sender.answer_callback_query(db, cq_id, text="目标账号不存在")
+        return
+    try:
+        text, markup = whois_panel.render(db, caller, target, page, op,
+                                          nonce=nonce)
+    except Exception:
+        logger.warning("tg whois panel render failed: %s", data, exc_info=True)
+        return
+    ok, _err = sender.edit_message_text(db, chat_id, message_id, text, markup)
+    if ok and chat_id != int(tg_id):
+        # 群面板续命：与 menu 面板同一口径，互动后重挂自毁定时。
         _rearm_group_panel_autodelete(db, chat_id, message_id)
 
 
@@ -164,10 +229,13 @@ def _render_menu(db, tg_user: dict, tg_id: int, chat_id: int, is_private: bool,
         text = handlers.handle_points(db, tg_user, chat_id, "")
         markup = handlers.back_markup()
     elif action == "chatpoints":
-        text = handlers.handle_chatpoints(db, tg_user, chat_id, "")
+        # 发言能量已并入 /points 输出：按钮入口一律指向合并后面板。
+        text = handlers.handle_points(db, tg_user, chat_id, "")
         markup = handlers.back_markup()
     elif action in ("account", "request", "myrequests", "rank", "requestboard", "rules", "login", "govlog", "level", "report", "propose", "launch"):
-        # 凭据类与求片类仍私聊限定；账号展示已放行群聊（只展示个人面板信息）。
+        # 凭据类与求片类仍私聊限定；账号展示（account/level）群里放行
+        # （2026-10-28 用户亲定、2026-11-02 重申）：落下面正常渲染分支
+        # 出点击者本人的账号卡，与命令层 /me 口径一致。
         if not is_private and action in ("request", "myrequests", "login", "govlog", "report", "propose", "launch"):
             text = layout.card(
                 layout.title("私聊使用"),
@@ -183,7 +251,7 @@ def _render_menu(db, tg_user: dict, tg_id: int, chat_id: int, is_private: bool,
                 "rules": handlers.handle_rules,
                 "login": handlers.handle_login,
                 "govlog": handlers.handle_govlog,
-                "level": handlers.handle_level,
+                "level": handlers.handle_account,
                 "report": handlers.handle_report,
                 "propose": handlers.handle_propose,
                 "launch": handlers.handle_direct_launch,
@@ -227,6 +295,28 @@ def _render_menu(db, tg_user: dict, tg_id: int, chat_id: int, is_private: bool,
         markup = handlers.back_markup()
     elif action == "help":
         text = handlers.handle_help(db, tg_user, chat_id, "")
+        markup = handlers.back_markup()
+    elif action == "games":
+        from backend.tg_bot import games_menu
+
+        text, markup = games_menu.render(db)
+    elif action == "duel":
+        text = layout.card(
+            layout.title("在群里发送 /duel 和押注"),
+            [
+                layout.row("🎲", "玩法说明", "两人各掷一次骰子，大的赢，平局各退"),
+                layout.row("💡", "对决示例", f"{handlers._cmd('/duel 50')}，30 秒内点应战"),
+            ],
+        )
+        markup = handlers.back_markup()
+    elif action == "rain":
+        text = layout.card(
+            layout.title("红包雨由管理员开场"),
+            [
+                layout.row("🌧", "玩法说明", "系统出钱，落下后点「抢」领一份"),
+                layout.row("👮", "谁能发起", "管理员在群里发送 /rain"),
+            ],
+        )
         markup = handlers.back_markup()
     elif action == "redpacket":
         text = layout.card(
@@ -663,6 +753,34 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
     sender_user = db.query(models.WebUser).filter(models.WebUser.id == packet.sender_id).first()
     sender_name = html.escape(str(sender_user.username)) if sender_user and sender_user.username else "未知"
 
+    def _top_claim():
+        row = (
+            db.query(models.RedPacketClaim, models.WebUser)
+            .join(models.WebUser, models.WebUser.id == models.RedPacketClaim.user_id)
+            .filter(models.RedPacketClaim.packet_id == packet.id)
+            .order_by(models.RedPacketClaim.amount.desc(), models.RedPacketClaim.id.asc())
+            .first()
+        )
+        if row is None:
+            return None, None
+        claim, claimer = row
+        name = html.escape(str(claimer.username or "朋友"))
+        return name, int(claim.amount)
+
+    def _finish(reason: str) -> None:
+        top_name, top_amount = (None, None)
+        if reason == "empty":
+            top_name, top_amount = _top_claim()
+        _update_message(
+            redpacket_common.finished_text(
+                packet, sender_name, reason, top_name, top_amount),
+            {"inline_keyboard": []},
+        )
+        if chat.get("type") in ("group", "supergroup") and chat_id and message_id:
+            delay = ephemeral.bot_msg_delay_seconds(db)
+            if delay > 0:
+                ephemeral.schedule_delete(int(chat_id), int(message_id), delay)
+
     def _update_message(text: str, reply_markup: dict) -> None:
         if not chat_id or not message_id:
             logger.warning("tg redpacket message update skipped: chat_id=%s message_id=%s", chat_id, message_id)
@@ -684,12 +802,12 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
     now = datetime.now()
     if packet.expires_at and packet.expires_at < now:
         _answer("🧧 红包已过期")
-        _update_message(redpacket_common.finished_text(packet, sender_name, "expired"), {"inline_keyboard": []})
+        _finish("expired")
         return
 
     if packet.remaining_count <= 0:
         _answer("🧧 红包已被抢完")
-        _update_message(redpacket_common.finished_text(packet, sender_name, "empty"), {"inline_keyboard": []})
+        _finish("empty")
         return
 
     from backend import welfare_redpacket
@@ -701,9 +819,9 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
         logger.warning("tg redpacket claim rejected: packet=%s user=%s err=%s", packet_id, user.id, err)
         _answer(f"🧧 {err}")
         if "已被抢完" in err:
-            _update_message(redpacket_common.finished_text(packet, sender_name, "empty"), {"inline_keyboard": []})
+            _finish("empty")
         elif "已过期" in err:
-            _update_message(redpacket_common.finished_text(packet, sender_name, "expired"), {"inline_keyboard": []})
+            _finish("expired")
         return
     except Exception:
         logger.exception("tg redpacket claim failed: packet=%s user=%s", packet_id, user.id)
@@ -712,6 +830,12 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
 
     amount = result["amount"]
     _answer(f"🧧 恭喜抢到 {amount} 能量！")
+    if getattr(packet, "funding", "user") == "system":
+        # 红包雨不按普通红包那样每抢一次刷一条群消息，只改原面板。
+        from backend.tg_bot import rain_ui
+
+        rain_ui.after_claim(db, getattr(packet, "rain_id", None))
+        return
     if chat.get("type") in ("group", "supergroup"):
         _send_claim_feedback(db, chat_id, user, amount, packet.remaining_count)
     logger.info(
@@ -721,9 +845,14 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
         amount,
         packet.remaining_count,
     )
-    if packet.remaining_count <= 0:
-        _update_message(redpacket_common.finished_text(packet, sender_name, "empty"), {"inline_keyboard": []})
+    fresh = db.query(models.RedPacket).filter(models.RedPacket.id == packet_id).first()
+    if fresh is not None and fresh.remaining_count <= 0:
+        packet.remaining_count = 0
+        _finish("empty")
     else:
+        if fresh is not None:
+            packet.remaining_count = fresh.remaining_count
+            packet.remaining_amount = fresh.remaining_amount
         _update_message(redpacket_common.packet_text(packet, sender_name), redpacket_common.claim_markup(packet_id))
 
 
@@ -778,19 +907,20 @@ def _handle_reconcile_callback(db, callback_query: dict) -> None:
                       has_photo=bool(msg.get("photo")))
 
 def _send_slots_group_result(db, chat_id, player_name: str, spin, dice_message_id) -> None:
-    """群老虎机结算后的公开播报（旁路：失败只记日志，绝不影响结算结果）。
+    """群老虎机：骰子动画按自毁时间删掉。普通输赢只弹给本人。
 
-    结果消息与本局骰子消息都按 bot_msg_autodelete_seconds（默认 30 秒）
-    自毁，与抢红包群反馈同口径；公共面板不编辑。player_name 在此转义。
+    公共面板是大家一起用的入口，收成一行会把别人的按钮拆掉，所以不改面板。
+    只有抱走头奖池时，群里再发一条一行播报，同样自毁。
     """
-    from . import handlers
-
     try:
         delay = ephemeral.bot_msg_delay_seconds(db)
         if dice_message_id and delay > 0:
             ephemeral.schedule_delete(chat_id, dice_message_id, delay)
-        text = handlers.slots_group_result_text(
-            db, spin, html.escape(str(player_name)))
+        if int(getattr(spin, "pool_payout", 0) or 0) <= 0:
+            return
+        total = int(spin.base_payout or 0) + int(spin.pool_payout or 0)
+        name = html.escape(str(player_name))
+        text = f"🎉 {name} 中了头奖，一共 +{total} 能量"
         ok, err, result_id = sender.send_message_ex(db, chat_id, text)
         if not ok:
             logger.warning(
@@ -800,6 +930,156 @@ def _send_slots_group_result(db, chat_id, player_name: str, spin, dice_message_i
             ephemeral.schedule_delete(chat_id, result_id, delay)
     except Exception:
         logger.warning("tg slots group result failed: chat=%s", chat_id, exc_info=True)
+
+
+def _handle_rain_grab(db, callback_query: dict) -> None:
+    """红包雨「抢」。个人结果只弹 toast，面板原地改剩余份数。"""
+    from backend import rain as rain_svc
+    from backend import welfare_redpacket
+    from backend.tg_bot import rain_ui
+
+    cb_id = callback_query.get("id")
+    data = callback_query.get("data") or ""
+    from_user = callback_query.get("from") or {}
+    tg_id = from_user.get("id")
+    msg = callback_query.get("message") or {}
+    chat = msg.get("chat") or {}
+
+    def _answer(text: str, show_alert: bool = False) -> None:
+        if cb_id:
+            sender.answer_callback_query(db, cb_id, text=text, show_alert=show_alert)
+
+    if not cb_id or not tg_id:
+        _answer("请求无效，请重新点击")
+        return
+    try:
+        rain_id = int(data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        _answer("这场面已失效")
+        return
+    from backend.tg_bot import router as bot_router
+
+    if int(tg_id) == bot_router.GROUP_ANONYMOUS_BOT_ID:
+        _answer(bot_router.ANON_ADMIN_TEXT, show_alert=True)
+        return
+    user = resolve(db, int(tg_id))
+    if user is None:
+        _answer(rain_svc.reason_message("unbound"), show_alert=True)
+        return
+    rain = db.query(models.RedPacketRain).filter(models.RedPacketRain.id == rain_id).first()
+    if rain is None or rain.status != "running":
+        _answer(rain_svc.reason_message("closed"))
+        if rain is not None:
+            rain_ui.publish_terminal(db, rain)
+        return
+    if not rain_svc.is_enabled(db):
+        # 已经开着的这场仍允许抢完，避免系统的钱卡在面板上。
+        pass
+    try:
+        result = welfare_redpacket.claim_packet(db, user, int(rain.packet_id))
+    except ValueError as exc:
+        _answer(str(exc), show_alert=True)
+        return
+    except Exception:
+        logger.exception("rain grab failed id=%s", rain_id)
+        db.rollback()
+        _answer("系统繁忙，请稍后再试", show_alert=True)
+        return
+    _answer(f"抢到 {int(result['amount'])} 能量")
+    rain_ui.after_claim(db, rain_id)
+
+
+def _handle_duel_accept(db, callback_query: dict) -> None:
+    """应战按钮。个人结果只弹 toast；终态把原面板收成一行。"""
+    from backend import duel as duel_svc
+    from backend.tg_bot import duel_ui
+
+    cb_id = callback_query.get("id")
+    data = callback_query.get("data") or ""
+    from_user = callback_query.get("from") or {}
+    tg_id = from_user.get("id")
+    msg = callback_query.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+
+    def _answer(text: str, show_alert: bool = False) -> None:
+        if cb_id:
+            sender.answer_callback_query(db, cb_id, text=text, show_alert=show_alert)
+
+    if not cb_id or not tg_id or not chat_id:
+        _answer("请求无效，请重新点击")
+        return
+    try:
+        duel_id = int(data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        _answer("这局面板已失效")
+        return
+    from backend.tg_bot import router as bot_router
+
+    if int(tg_id) == bot_router.GROUP_ANONYMOUS_BOT_ID:
+        _answer(bot_router.ANON_ADMIN_TEXT, show_alert=True)
+        return
+    user = resolve(db, int(tg_id))
+    if user is None:
+        _answer("请先绑定账号后再应战", show_alert=True)
+        return
+    try:
+        result = duel_svc.accept_duel(db, user, duel_id, f"tgcq:{cb_id}")
+    except Exception:
+        logger.exception("duel accept failed id=%s", duel_id)
+        db.rollback()
+        _answer("系统繁忙，请稍后再试", show_alert=True)
+        return
+    if not result.get("ok"):
+        extra = {k: v for k, v in result.items() if k not in ("ok", "reason", "duel")}
+        _answer(duel_svc.reason_message(result.get("reason") or "", **extra), show_alert=True)
+        expired = result.get("duel")
+        if result.get("reason") == "expired" and expired is not None:
+            duel_ui.publish_terminal(db, expired)
+        return
+    row = result["duel"]
+    if result.get("duplicate"):
+        if row.status == "rolling":
+            _answer(duel_svc.reason_message("rolling"))
+        else:
+            _answer(duel_svc.reason_message("settled"))
+        return
+
+    ok1, _err1, dice1, mid1 = sender.send_dice(db, int(chat_id), "🎲")
+    ok2, _err2, dice2, mid2 = (False, None, None, None)
+    if ok1 and isinstance(dice1, int):
+        ok2, _err2, dice2, mid2 = sender.send_dice(db, int(chat_id), "🎲")
+    if not (ok1 and ok2 and isinstance(dice1, int) and isinstance(dice2, int)):
+        aborted = duel_svc.abort_roll(db, row.id, reason="dice_failed")
+        _answer("掷骰失败，押注已退回", show_alert=True)
+        if aborted is not None:
+            duel_ui.publish_terminal(db, aborted)
+        return
+    try:
+        settled = duel_svc.settle_duel(db, row.id, int(dice1), int(dice2))
+    except Exception:
+        logger.exception("duel settle failed id=%s", row.id)
+        db.rollback()
+        _answer("结算异常，请联系管理员", show_alert=True)
+        return
+    if not settled.get("ok"):
+        aborted = duel_svc.abort_roll(db, row.id, reason="bad_dice")
+        _answer(duel_svc.reason_message(settled.get("reason") or "bad_dice"), show_alert=True)
+        if aborted is not None:
+            duel_ui.publish_terminal(db, aborted)
+        return
+    final = settled["duel"]
+    delay = ephemeral.bot_msg_delay_seconds(db)
+    if delay > 0:
+        for mid in (mid1, mid2):
+            if mid:
+                ephemeral.schedule_delete(int(chat_id), int(mid), delay)
+    if final.status == "settled":
+        _answer(f"🎉 你这局{('赢了' if final.winner_id == user.id else '输了')}，结果见面板")
+    elif final.status == "tie":
+        _answer("平局，押注已退回")
+    else:
+        _answer("本局已退回")
+    duel_ui.publish_terminal(db, final)
 
 
 def _handle_slots_bet(db, callback_query: dict) -> None:

@@ -16,10 +16,14 @@
 一致。本模块不碰扫描器、播放变体、身份锚（source_id / provider_file_id
 是另一路的地盘）、绑定管理、列表接口、凭据密封。
 
-Frodo 在本模块里的位置：补资料段的缺口来源之一（不是识别段的认亲
-依据——认亲只认 TMDB / NFO / 别名给出的身份，Frodo 片名搜不用来定
-身份）。桥用的 IMDb 编号解析口径见 _frodo_imdb_id：条目已有 →
-本轮 tmdb_details → nfo_data，只用已有证据、不另拉详情。
+Frodo 在本模块里的位置：原为补资料段的缺口来源之一；2026-11-02
+站主拍板后，识别段新增豆瓣认亲腿（见 extract_binding 末尾的兜底
+段）：TMDB / NFO / 别名证据全落空时，先消费本轮多源采集的
+external_ids 桥回 tmdb/imdb，再以豆瓣证据（rich 兜底命中经标题＋
+年份复核、或多源采集的豆瓣号、或条目已持久化的豆瓣号）定身份，
+只落 external_ids.douban、不写 tmdb/imdb 列。桥用的 IMDb 编号解析
+口径见 _frodo_imdb_id：条目已有 → 本轮 tmdb_details → nfo_data，
+只用已有证据、不另拉详情。
 Frodo 腿复用 #1203 熔断注册表（douban_frodo 源名，403 / 429
 立即熔断、冷却约 60 秒半开）；熔断中、封禁中、任何异常都只返回空
 ——不挡其他源、不静默出旧数、不抛异常进补资料流程。
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -51,9 +56,16 @@ IDENTIFY_FRODO_FILL_ENABLED = env_int("IDENTIFY_FRODO_FILL_ENABLED", 0, 0, 1)
 IDENTIFY_UNFILLED_RETRY_SEC = env_int("IDENTIFY_UNFILLED_RETRY_SEC", 300, 0, 86400)
 
 #: 补资料段允许写的资料字段（白名单制：不在表里的字段一律不写）。
-#: overview / poster_path / backdrop_path / community_rating 四项而已——
-#: 演员、季海报、字幕、NFO 等仍归现行写库路径，本段不越权。
-FILL_FIELDS = ("overview", "poster_path", "backdrop_path", "community_rating")
+#: overview / poster_path / backdrop_path / community_rating / genres
+#: 五项——演员、季海报、字幕、NFO 等仍归现行写库路径，本段不越权。
+#: genres 是 2026-11-02 补进来的：CMS 托管行无本地文件、不走扫描，
+#: 扫描期 apply()/apply_details() 写类型的路它走不到，只剩本段；
+#: 此前白名单不含 genres，托管行 TMDB 命中后类型永远为空（库 58
+#: 实查 tmdb 1614 行 genres 0 行）。genres 候选只来自 TMDB 证据
+#: （见 fill_candidates_from_fetched），Frodo / 中文聚合的字段集
+#: 不变、不供 genres——类型以 TMDB 为准，不引第二来源。
+FILL_FIELDS = ("overview", "poster_path", "backdrop_path", "community_rating",
+               "genres")
 
 #: Frodo 补资料时问的缺口字段（overview / 评分 / 海报三项；backdrop 不问
 #: Frodo——它的 image 口径是海报，不是背景图）。
@@ -124,11 +136,107 @@ def _first_identity(*values):
     return None
 
 
-def _item_year(item) -> Optional[int]:
-    """条目年份（Frodo 按标题搜用；取不到就 None，不编年份）。"""
+#: 标题尾年份的合理区间下限：早于此的四位尾数按片名本身处理
+#: （与 applecms_sync.split_trailing_year 同口径）。
+_TITLE_YEAR_MIN = 1900
+_TRAILING_YEAR_BRACKET_RE = re.compile(r"[\(（\[]\s*(\d{4})\s*[\)）\]]\s*$")
+_TRAILING_YEAR_PLAIN_RE = re.compile(r"(\d{4})\s*$")
+
+
+def _title_trailing_year(name) -> Optional[int]:
+    """片名尾巴黏着的年份（「诅咒2025」→ 2025），解析不出返回 None。
+
+    解析口径与 applecms_sync.split_trailing_year 对齐（#1789 在同步侧
+    落的同名函数，落地后两边应收敛为一份）：只认结尾四位，括号包裹
+    （「（2026）」「[2026]」）或裸黏尾；剥后名为空、尾数前一位仍是
+    数字（更长数字串的一部分）、年份不在 1900..当前年+2 区间内
+    （如「银翼杀手2049」是片名本身），都不认。
+    """
+    text = name.strip() if isinstance(name, str) else ""
+    if not text:
+        return None
+    year_max = datetime.now().year + 2
+    match = _TRAILING_YEAR_BRACKET_RE.search(text)
+    if match:
+        clean = text[: match.start()].strip()
+        year = int(match.group(1))
+        if clean and _TITLE_YEAR_MIN <= year <= year_max:
+            return year
+        return None
+    match = _TRAILING_YEAR_PLAIN_RE.search(text)
+    if match:
+        start = match.start(1)
+        if start == 0 or text[start - 1].isdigit():
+            return None
+        clean = text[:start].strip()
+        year = int(match.group(1))
+        if clean and _TITLE_YEAR_MIN <= year <= year_max:
+            return year
+    return None
+
+
+def known_item_year(item) -> Optional[int]:
+    """条目的首要已知年份：production_year（入库时由 vod 年份落账）
+    优先，其次片名尾黏年份。都取不到返回 None——不编年份。
+
+    背景（2026-11-03 错认亲定案）：CMS 入库的 list 载荷常缺
+    vod_year，production_year 留空、年份只黏在片名尾（「诅咒2025」
+    实为 2025 年台湾片，vod detail 里 vod_year=2025），识别链此前
+    只认 production_year，年份校验整体落空，同名旧片（Cursed
+    2005，中文名正好同为《诅咒》）被直接绑上。
+    """
     year = getattr(item, "production_year", None)
     if isinstance(year, int) and year > 0:
         return year
+    return _title_trailing_year(getattr(item, "name", ""))
+
+
+def known_item_years(item) -> tuple:
+    """条目全部已知年份（去重，production_year 在前）。
+
+    片名尾年份与 production_year 互相冲突时两个都在——绑定候选与
+    任一冲突即拒（见 binding_reject_reason_for_item）：年份证据自相
+    矛盾的条目宁可不绑，留待人工/后续口径，不许挑一个顺眼的用。
+    """
+    years: list = []
+    year = getattr(item, "production_year", None)
+    if isinstance(year, int) and year > 0:
+        years.append(year)
+    tail = _title_trailing_year(getattr(item, "name", ""))
+    if tail is not None and tail not in years:
+        years.append(tail)
+    return tuple(years)
+
+
+def _item_year(item) -> Optional[int]:
+    """条目年份（Frodo 按标题搜用；取不到就 None，不编年份）。
+
+    口径已扩为 known_item_year：production_year 缺失时认片名尾黏
+    年份（2026-11-03 错认亲定案，见 known_item_year 背景）。
+    """
+    return known_item_year(item)
+
+
+def binding_reject_reason_for_item(data, kind, item) -> Optional[str]:
+    """识别落账的绑定复核收口（年份证据版）。
+
+    候选载荷逐一对条目的每个已知年份过 tmdb.binding_reject_reason
+    （全仓唯一口径，年份差 >1 年 → year_mismatch），任一冲突即拒。
+    条目年份全未知时以 None 判（只查 details_not_found /
+    kind_mismatch），与既有口径一致、不新降门槛。enrich 单段复核门
+    与两段式识别段共用本函数，不许再各自拿 production_year 裸调
+    binding_reject_reason——那正是「诅咒2025」错绑 Cursed(2005)
+    的洞：production_year 为空时年份校验被整体跳过。
+    """
+    from backend.emby_server.tmdb import binding_reject_reason
+
+    years = known_item_years(item)
+    if not years:
+        return binding_reject_reason(data, kind, None)
+    for year in years:
+        reason = binding_reject_reason(data, kind, year)
+        if reason:
+            return reason
     return None
 
 
@@ -187,7 +295,14 @@ def extract_binding(item, fetched: dict) -> Optional[dict]:
         fetched.get("imdb_id"),
     )
     if not tmdb_id and not imdb_id:
-        return None
+        # 2026-11-02 豆瓣参与识别兜底（站主亲令）：TMDB / NFO / 别名 /
+        # 搜索命中全落空后，先看本轮多源采集能否桥回 tmdb/imdb，
+        # 再认豆瓣身份。两腿都只消费已采集证据、不发新请求；豆瓣
+        # 不可用时 fetched 里没有对应键，两腿自然落空，不阻塞主流程。
+        bridged = _multisource_bridge(fetched)
+        if bridged is not None:
+            return bridged
+        return _douban_binding(item, fetched)
     if tmdb_id:
         provider, external_id = "tmdb", str(tmdb_id)
     else:
@@ -236,6 +351,139 @@ def extract_binding(item, fetched: dict) -> Optional[dict]:
         "confidence": confidence,
         "evidence": evidence,
     }
+
+
+def _multisource_bridge(fetched: dict) -> Optional[dict]:
+    """多源接力桥：本轮多源采集（metasources engine）的 external_ids
+    里若有 tmdb/imdb，直接按身份列口径成绑定——引擎的 IMDb→TMDB
+    接力、TVmaze/OMDb 的 IMDb 携带都经这里落账。只认 tmdb/imdb 两键，
+    其余来源键不由本桥定身份列。"""
+    multi = fetched.get("multisource")
+    if not isinstance(multi, dict):
+        return None
+    ext = multi.get("external_ids")
+    if not isinstance(ext, dict):
+        return None
+    tmdb_id = _clean_identity(ext.get("tmdb"))
+    imdb_id = _clean_identity(ext.get("imdb"))
+    if not tmdb_id and not imdb_id:
+        return None
+    if tmdb_id:
+        provider, external_id = "tmdb", str(tmdb_id)
+    else:
+        provider, external_id = "imdb", str(imdb_id)
+    return {
+        "provider": provider,
+        "external_id": external_id,
+        "tmdb_id": str(tmdb_id) if tmdb_id else None,
+        "imdb_id": str(imdb_id) if imdb_id else None,
+        "confidence": "search",
+        "evidence": {
+            "binding_source": "multisource",
+            "matched_by": "multisource_external_ids",
+            "tmdb_id_source": "multisource" if tmdb_id else None,
+            "imdb_id_source": "multisource" if imdb_id else None,
+        },
+    }
+
+
+def _douban_binding_dict(douban_id: str, source: str) -> dict:
+    return {
+        "provider": "douban",
+        "external_id": douban_id,
+        "tmdb_id": None,
+        "imdb_id": None,
+        "douban_id": douban_id,
+        "confidence": "search",
+        "evidence": {
+            "binding_source": source,
+            "matched_by": "douban_fallback" if source == "douban_rich" else source,
+            "douban_id_source": source,
+        },
+    }
+
+
+def _external_id_of(item, key: str):
+    """读条目已持久化 external_ids 里的某来源键（strip 后非空才算）。"""
+    raw = getattr(item, "external_ids", None)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return _clean_identity(parsed.get(key))
+    return None
+
+
+def _coerce_year(value) -> Optional[int]:
+    try:
+        year = int(str(value)[:4])
+    except (TypeError, ValueError):
+        return None
+    return year if 1900 <= year <= 2100 else None
+
+
+def _douban_binding(item, fetched: dict) -> Optional[dict]:
+    """豆瓣认亲腿（2026-11-02）：三路证据按可信度排序——
+
+    1. 条目已持久化的 external_ids.douban（往轮识别/引擎落的）：直接认；
+    2. 本轮豆瓣 rich 兜底命中：产出侧（douban.client.search）已过标题/
+       年份/类型门，这里再按同口径复核一遍（标题一致 + 年份都已知须
+       相等），任一不过不认——宁可少认不许错认；
+    3. 本轮多源采集的豆瓣号（suggest / Frodo / IMDb 桥，源侧已校验）。
+
+    认到只落 external_ids.douban（见 apply_identity），不写 tmdb/imdb
+    列；证据以 douban_id_source 标明来源，供审查回放。
+    """
+    own = _external_id_of(item, "douban")
+    if own:
+        return _douban_binding_dict(str(own), "item_external_ids")
+    hit = fetched.get("douban_fallback_hit")
+    if isinstance(hit, dict):
+        douban_id = _clean_identity(hit.get("id"))
+        hit_title = str(hit.get("title") or "").strip()
+        if douban_id and hit_title:
+            from backend.emby_server.metasources.sources import (
+                _title_consistent,
+            )
+            item_year = _item_year(item)
+            hit_year = _coerce_year(hit.get("year"))
+            if (_title_consistent(getattr(item, "name", "") or "", hit_title)
+                    and (item_year is None or hit_year is None
+                         or item_year == hit_year)):
+                return _douban_binding_dict(str(douban_id), "douban_rich")
+    multi = fetched.get("multisource")
+    if isinstance(multi, dict):
+        ext = multi.get("external_ids")
+        if isinstance(ext, dict):
+            douban_id = _clean_identity(ext.get("douban"))
+            if douban_id:
+                return _douban_binding_dict(str(douban_id), "multisource")
+    return None
+
+
+def _merge_external_id(item, key: str, value: str) -> None:
+    """把来源编号并进 item.external_ids：只填空缺，已有非空值不覆盖
+    （与 metasources/engine.apply_to_item 的合并口径一致）。"""
+    raw = getattr(item, "external_ids", None)
+    ids: dict = {}
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            ids = parsed
+    existing = _clean_identity(ids.get(key))
+    if existing is not None:
+        if str(existing) != value:
+            logger.warning(
+                "条目 #%s external_ids.%s 已有 %s，本轮证据 %s 不覆盖",
+                getattr(item, "id", None), key, existing, value)
+        return
+    ids[key] = value
+    item.external_ids = json.dumps(ids, ensure_ascii=False, sort_keys=True)
 
 
 def _upsert_stage_record(db, item_id: int, stage: str, binding: Optional[dict]) -> None:
@@ -494,6 +742,12 @@ def apply_identity(db, item, fetched: dict, tmdb_details_fetcher=None) -> Option
     裁决权在人不在 AI，门拒不再适用（权重仍钳制到 0.2）。
     """
     binding = extract_binding(item, fetched)
+    if binding is not None and binding.get("provider") == "douban":
+        # 豆瓣是兜底腿：远端同源继承能给出 tmdb/imdb（更强身份）时
+        # 优先继承、豆瓣让位；继承不到再用豆瓣绑定落 external_ids。
+        inherited = inherit_binding_from_remote_identity(db, item)
+        if inherited is not None:
+            binding = inherited
     if binding is None:
         # FMBY #13 接线：标题 / NFO / 详情都给不出身份时，按远端身份
         # 向已绑定的 donor 行继承；继承不到仍返回 None，行为与此前一致。
@@ -522,11 +776,10 @@ def apply_identity(db, item, fetched: dict, tmdb_details_fetcher=None) -> Option
             elif isinstance(_fh, dict) and _fh.get("id"):
                 _det = _fh
             if _det is not None:
-                from backend.emby_server.tmdb import (
-                    binding_reject_reason as _reject_reason,
-                )
-                _reason = _reject_reason(
-                    _det, _kind, getattr(item, "production_year", None))
+                # 年份证据走收口（binding_reject_reason_for_item）：
+                # production_year 为空时还要认片名尾黏年份，不许再
+                # 裸传 production_year 让年份校验整体落空（诅咒2025 案）。
+                _reason = binding_reject_reason_for_item(_det, _kind, item)
                 if _reason == "details_not_found":
                     _reason = None  # 局部证据缺 id 不是查不到，见上方注释
                 if _reason:
@@ -556,6 +809,10 @@ def apply_identity(db, item, fetched: dict, tmdb_details_fetcher=None) -> Option
         item.tmdb_id = binding["tmdb_id"]
     if _empty(getattr(item, "imdb_id", None)) and binding.get("imdb_id"):
         item.imdb_id = binding["imdb_id"]
+    if binding.get("douban_id"):
+        # 豆瓣身份落 external_ids（只填空缺）：货架判据、后续复认与
+        # 存量统计都读它；豆瓣号不写 tmdb/imdb 列（不是那两列的编号）。
+        _merge_external_id(item, "douban", str(binding["douban_id"]))
     _upsert_stage_record(db, item.id, "identified", binding)
     logger.info(
         "识别段提交 id=%s provider=%s external_id=%s confidence=%s",
@@ -577,8 +834,35 @@ def fill_candidates_from_fetched(fetched: dict) -> dict:
         "poster_path": fetched.get("poster") or details.get("poster_path") or "",
         "backdrop_path": fetched.get("fanart") or details.get("backdrop_path") or "",
         "community_rating": details.get("vote_average"),
+        "genres": _genres_candidate(fetched, details),
     }
     return {k: v for k, v in candidates.items() if not _empty(v)}
+
+
+def _genres_candidate(fetched: dict, details: dict) -> str:
+    """类型候选（只认 TMDB 证据，返回逗号拼接名串，无证据返回空串）。
+
+    详情 genres 优先——走 tmdb._genres_from_details，与单段写库的
+    apply_details 同一个解析口径（本地化 name 优先、上限 4、去重）；
+    详情缺失时用搜索命中的 genre_ids 经 tmdb._GENRE_NAMES 同一张
+    映射表翻译（与 apply() 同口径），映射表里没有的 id 跳过、不写
+    数字原文。Frodo / 聚合等其他源不供类型：类型以 TMDB 为准。
+    """
+    from backend.emby_server.tmdb import _GENRE_NAMES, _genres_from_details
+
+    names = _genres_from_details(details)
+    if names:
+        return ",".join(names)
+    hit = fetched.get("tmdb_hit") or {}
+    genre_ids = hit.get("genre_ids") or []
+    out = []
+    for gid in genre_ids:
+        name = _GENRE_NAMES.get(gid)
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= 4:
+            break
+    return ",".join(out)
 
 
 #: 补资料段图片字段 → (远程 URL 字段, _set_image 的 kind)。
@@ -839,8 +1123,11 @@ def _rename_from_bound_details(item, details: dict) -> bool:
 def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
     """补资料段：只在已绑定条目上、只填空缺字段。
 
-    调用方须保证条目已绑定（tmdb_id 或 imdb_id 非空）；未绑定时本函数
-    拒绝写任何字段、返回 []（防线，不依赖调用方自觉）。
+    调用方须保证条目已绑定；未绑定时本函数拒绝写任何字段、返回 []
+    （防线，不依赖调用方自觉）。绑定判据与全站同源 identity_gate
+    .is_bound_row：tmdb/imdb 列之外，external_ids 任一来源键非空
+    （如只有豆瓣号）也算已绑定（2026-11-02 扩围）——此处若只认两列，
+    豆瓣定身份的条目永远补不上资料。
     顺序：先用已采集证据填，仍缺的 overview / 评分 / 海报再问 Frodo；
     Frodo 只补缺口，不覆盖已填。Frodo 之后仍缺的字段再问中文聚合
     通道（聚合开关关时它返回空，行为与本批之前逐字一致；聚合开时
@@ -849,16 +1136,18 @@ def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
     只填本条目已有人物行的 role / image / person_tmdb_id 空缺，
     永不覆盖、不新建行；开关关时不问源。返回实际填上的字段名列表。
     """
-    if _empty(getattr(item, "tmdb_id", None)) and _empty(
-        getattr(item, "imdb_id", None)
-    ):
+    from backend.emby_server import identity_gate
+
+    if not identity_gate.is_bound_row(item):
         logger.warning("补资料段拒绝未绑定条目 id=%s（不写任何字段）", item.id)
         return []
     filled = []
     candidates = fill_candidates_from_fetched(fetched)
     fetched = fetched or {}
-    # 文字字段（简介 / 评分）：只填空缺，原口径不变。
-    for field in ("overview", "community_rating"):
+    # 文字字段（简介 / 评分 / 类型）：只填空缺，原口径不变。类型此前
+    # 不在白名单里，托管行（无扫描路径）永远补不上，2026-11-02 补入；
+    # 候选只来自 TMDB 证据（见 fill_candidates_from_fetched）。
+    for field in ("overview", "community_rating", "genres"):
         if _empty(getattr(item, field, None)) and field in candidates:
             setattr(item, field, candidates[field])
             filled.append(field)

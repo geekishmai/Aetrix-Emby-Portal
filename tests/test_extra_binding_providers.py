@@ -29,16 +29,17 @@ def test_default_only_enabled_mounts(monkeypatch):
     assert ub.list_binding_providers(_DB([("drive",), ("rclone",)])) == ["drive"]
 
 
-def test_extra_pan115_without_mount(monkeypatch):
+def test_extra_pan115_removed_not_opened(monkeypatch):
+    # 已下线 provider 写进额外名单也不再开放（2026-11-02 删除单）。
     monkeypatch.setenv("BYOS_EXTRA_BINDING_PROVIDERS", "pan115")
-    assert ub.list_binding_providers(_DB([("drive",)])) == ["drive", "pan115"]
+    assert ub.list_binding_providers(_DB([("drive",)])) == ["drive"]
 
 
 def test_extra_ignores_invalid_and_dedups(monkeypatch):
     monkeypatch.setenv("BYOS_EXTRA_BINDING_PROVIDERS", " PAN115 , bogus,drive,pan115 ")
-    assert ub.list_binding_providers(_DB([])) == ["drive", "pan115"]
+    assert ub.list_binding_providers(_DB([])) == ["drive"]
 
 
 def test_extra_empty_is_noop(monkeypatch):
     monkeypatch.setenv("BYOS_EXTRA_BINDING_PROVIDERS", "")
-    assert ub.list_binding_providers(_DB([("115",)])) == ["pan115"]
+    assert ub.list_binding_providers(_DB([("115",)])) == []

@@ -346,16 +346,14 @@ export const deviceApi = {
 // 后端口径（backend/emby_server/portal.py user_emby_router，前缀 /api/user/emby）：
 // GET /storage-bindings → { bindings: [...] }；POST /storage-bindings/drive/oauth/start
 // { account_label } → { authorization_url, expires_in }；POST /storage-bindings
-// { provider: 'pan115', account_label, credential } → 201 绑定行（验活失败属三档内时
-// 仍 201 返回该行，status=invalid/expired + error_message，由客户端展示重绑引导）；
+// 现行只剩 Drive 的 OAuth 建绑口（夸克 / 115 的 Cookie 建绑口已于 2026-11-02
+// 下线，后端对这两家一律拒绝）；
 // POST /storage-bindings/{id}/verify → 绑定行；DELETE /storage-bindings/{id} → { success: true }。
-// 115 的 credential 是 115 Cookie（后端经 transfer115.normalize_cookie 后密封存），
-// 前端只原样送出一次，绝不在日志与报错里回显。
 // 绑定行字段照抄 backend/emby_server/user_bindings.py serialize_binding：
 // id / provider / account_label / status / last_verified_at / last_error_kind /
 // error_message / has_credential / needs_rebind / granted_scopes / created_at，绝不含凭据原文。
 // needs_rebind：Drive 行已授范围缺 drive.file 即 True（老绑定无记录也 True），
-// 115 行恒 False；granted_scopes：实授范围列表，老绑定无记录为 null。
+// 非 Drive 存量行恒 False；granted_scopes：实授范围列表，老绑定无记录为 null。
 export interface StorageBinding {
   id: number
   provider: string
@@ -380,7 +378,8 @@ export interface DriveOAuthStartResponse {
 }
 
 // 后台实际启用的挂载类型映射后的 provider 名单（GET /storage-bindings/providers）：
-// 只含 provider 名串（如 drive / pan115 / quark），不含挂载路径、凭据、账号等敏感字段。
+// 只含 provider 名串（现行只有 drive；夸克 / 115 已于 2026-11-02 下线），
+// 不含挂载路径、凭据、账号等敏感字段。
 // 前端“我的网盘”按这份名单渲染对应块，名单里没有的块整个不渲染。
 export interface StorageBindingProvidersResponse {
   providers: string[]
@@ -400,16 +399,6 @@ export const storageBindingApi = {
           ? { rebind_binding_id: rebindBindingId }
           : {}),
       },
-    ),
-  createPan115: (accountLabel: string, cookie: string) =>
-    api.post<never, StorageBinding>(
-      '/api/user/emby/storage-bindings',
-      { provider: 'pan115', account_label: accountLabel, credential: cookie },
-    ),
-  createQuark: (accountLabel: string, cookie: string) =>
-    api.post<never, StorageBinding>(
-      '/api/user/emby/storage-bindings',
-      { provider: 'quark', account_label: accountLabel, credential: cookie },
     ),
   verify: (bindingId: number) =>
     api.post<never, StorageBinding>(

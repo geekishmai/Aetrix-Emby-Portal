@@ -45,6 +45,9 @@
 - CMS 条目转 ``UpstreamCatalogRecord``：``title=vod_name``、
   ``year=vod_year`` 转 int 或 None、``provider_ids`` 为空；经
   ``aggregate_sources`` 聚合后按聚合键与本地候选的标题+年份键比对。
+  记录另透传源站自带元数据（海报/地区/评分/演职员/简介等，见
+  ``cms_entry_to_record``）：不参与配对，本模块不消费，只供 CMS
+  库同步工人的合行填空。
 - 配对成功：证据固定 ``'title+year'``、置信度封顶 0.7（CMS 无外部
   身份，0.7 即上限）；剧集按本地组成员顺序每集一行，
   ``episode_index`` 组内 1 起顺序编号（不从集标题文字解析）；
@@ -78,11 +81,13 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import math
 import os
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -249,13 +254,142 @@ def _cms_year(value: Any) -> Optional[int]:
     return None
 
 
+#: 标题尾年份的合理区间下限：早于此的四位尾数按片名本身处理。
+_TITLE_YEAR_MIN = 1900
+
+_TRAILING_YEAR_BRACKET_RE = re.compile(
+    r"[\(（\[]\s*(\d{4})\s*[\)）\]]\s*$")
+_TRAILING_YEAR_PLAIN_RE = re.compile(r"(\d{4})\s*$")
+
+
+def _plausible_title_year(year: int) -> bool:
+    """尾数是否可作年份：1900..当前年+2。
+
+    区间外（如「银翼杀手2049」的 2049）是片名本身的一部分，
+    不许当作年份剥离——未来题材片名常把年份写进标题。
+    """
+    from datetime import datetime
+
+    return _TITLE_YEAR_MIN <= year <= datetime.now().year + 2
+
+
+def split_trailing_year(name: str):
+    """解析标题尾部年份，返回 ``(清洗名, 年份|None)``。
+
+    形态：括号/方括号包裹（「（2026）」「[2026]」）、空格分隔、
+    裸黏尾（「爆发夜2026」）。只认结尾四位：片名中间的数字、
+    「第X季」类季后缀不受影响；剥后名为空（整名就是四位数字）
+    不剥；四位尾数前一位仍是数字（更长数字串的一部分）不剥；
+    年份不在合理区间（见 :func:`_plausible_title_year`）不剥。
+    解析不出时原样返回 ``(name, None)``。
+    """
+    text = (name or "").strip()
+    if not text:
+        return text, None
+    match = _TRAILING_YEAR_BRACKET_RE.search(text)
+    if match:
+        clean = text[:match.start()].strip()
+        year = int(match.group(1))
+        if clean and _plausible_title_year(year):
+            return clean, year
+        return text, None
+    match = _TRAILING_YEAR_PLAIN_RE.search(text)
+    if match:
+        start = match.start(1)
+        if start == 0 or text[start - 1].isdigit():
+            return text, None
+        clean = text[:start].strip()
+        year = int(match.group(1))
+        if clean and _plausible_title_year(year):
+            return clean, year
+    return text, None
+
+
+def _resolve_title_year(name: str, vod_year: Optional[int]):
+    """标题尾年份与 ``vod_year`` 的合并口径，返回 ``(name, year)``。
+
+    - ``vod_year`` 为空 → 采用尾年份并把年份从名里剥掉（存干净名）；
+    - 两者相等 → 剥掉尾年份，年份用 ``vod_year``；
+    - 两者冲突 → 名与年份都保持原样（不剥不改，留待人工/后续口径）；
+    - 标题无可解析尾年份 → 原样。
+    """
+    clean, tail_year = split_trailing_year(name)
+    if tail_year is None:
+        return name, vod_year
+    if vod_year is None:
+        return clean, tail_year
+    if vod_year == tail_year:
+        return clean, vod_year
+    return name, vod_year
+
+
+def _cms_score(value: Any) -> Optional[float]:
+    """vod_score 转 float 或 None。
+
+    CMS 的 ``0`` / ``0.0`` 是「暂无评分」占位（实测多源如此），
+    落成 0.0 分会把没评分的片显示成 0 分，故 <=0 一律按缺失处理；
+    非法值不猜，返回 None。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return score if 0 < score <= 10 else None
+
+
+def _cms_people(value: Any) -> tuple:
+    """vod_actor / vod_director 人名串 → 去重保序元组。
+
+    分隔符各源不一（半角/全角逗号、顿号、斜杠、分号都见过），
+    统一切分；空名丢弃。上限与 TMDB 演员表同口径（前 10 个）。
+    """
+    if not value:
+        return ()
+    parts = re.split(r"[,，、/;；]", str(value))
+    out: List[str] = []
+    for part in parts:
+        name = part.strip()
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= 10:
+            break
+    return tuple(out)
+
+
+def _cms_blurb(entry: dict) -> str:
+    """简略简介：优先 ``vod_blurb``，缺时退 ``vod_content``。
+
+    ``vod_content`` 常带 HTML 标签/实体，去标签、解实体、折叠
+    空白后截断；list 负载多数源根本不带这两个字段（只有 detail
+    才有），缺了就空——同步不为采集多打 detail 请求。
+    """
+    raw = str(entry.get("vod_blurb") or "").strip()
+    if not raw:
+        raw = str(entry.get("vod_content") or "").strip()
+    if not raw:
+        return ""
+    text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+    return re.sub(r"\s+", " ", text).strip()[:2000]
+
+
 def cms_entry_to_record(
     entry: dict, *, source_id: str, category_id: str = ""
 ) -> agg.UpstreamCatalogRecord:
     """CMS 条目转聚合记录。
 
-    只读 ``vod_id`` / ``vod_name`` / ``vod_year``。``vod_play_url``
+    配对只读 ``vod_id`` / ``vod_name`` / ``vod_year``。``vod_play_url``
    （播放地址）与 ``vod_douban_id``（绝不用于配对）刻意不读。
+    另把 list 负载现成带的源站元数据（海报/地区/分类名/备注/评分/
+    演员/导演/简介）透传到记录的同名字段：**不参与配对与聚合键**，
+    只供 CMS 库同步工人合行填空（见 UpstreamCatalogRecord 透传组
+    注释）；字段在各源有无不一（实测：非凡/豆瓣 list 几乎只有名与
+    备注，量子等源才带海报/评分/演职员），缺了就空。
+
+    标题尾年份在此一并解析（:func:`_resolve_title_year`）：源站常把
+    年份黏在标题尾（「爆发夜2026」）且 ``vod_year`` 为空，放任不管
+    会让行年份为空、enrich 搜 TMDB 不带年份而错认同名旧片。
     """
     if not isinstance(entry, dict):
         raise ValueError("cms entry must be a dict")
@@ -265,16 +399,42 @@ def cms_entry_to_record(
     name = str(entry.get("vod_name") or entry.get("name") or "").strip()
     if not name:
         raise ValueError("cms entry missing vod_name")
+    name, production_year = _resolve_title_year(
+        name, _cms_year(entry.get("vod_year")))
     return agg.UpstreamCatalogRecord(
         source_id=source_id,
         upstream_item_id=vod_id,
         name=name,
         item_type="Movie",
         category_id=str(category_id or ""),
-        production_year=_cms_year(entry.get("vod_year")),
+        production_year=production_year,
         tmdb_id=None,
         imdb_id=None,
+        poster_url=str(entry.get("vod_pic") or "").strip(),
+        area=str(entry.get("vod_area") or "").strip(),
+        category_name=str(entry.get("type_name") or "").strip(),
+        remarks=str(entry.get("vod_remarks") or "").strip(),
+        score=_cms_score(entry.get("vod_score")),
+        actors=_cms_people(entry.get("vod_actor")),
+        directors=_cms_people(entry.get("vod_director")),
+        blurb=_cms_blurb(entry),
     )
+
+
+def cms_entry_poster(entry) -> str:
+    """源站海报地址（``vod_pic``）：只认 http(s) 绝对地址，其余空串。
+
+    字段名按源站 provide 协议实证（2026-11-02 抽非凡 / 暴风 / 优酷
+    三家原始响应核对）：暴风 list 载荷即带 ``vod_pic``；非凡 list
+    不带、detail 带；优酷 detail 带。相对路径 / 协议相对 / 非 http
+    一律不采（不猜、不拼），调用方拿到空串即按无图处理。
+    """
+    if not isinstance(entry, dict):
+        return ""
+    pic = str(entry.get("vod_pic") or "").strip()
+    if pic.startswith("http://") or pic.startswith("https://"):
+        return pic
+    return ""
 
 
 def _local_work_key(local: Any) -> Optional[str]:

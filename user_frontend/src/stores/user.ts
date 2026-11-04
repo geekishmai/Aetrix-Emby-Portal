@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { authApi, tokenStore, type AuthUser } from '@/api'
-import { resetEmbyBaseUrl } from '@/api/emby'
+import { resetEmbyBaseUrl, refreshEmbyBaseUrl } from '@/api/emby'
 
 export type { AuthUser as User }
 
@@ -49,6 +49,9 @@ export const useUserStore = defineStore('user', () => {
     sessionSeq.value += 1
     tokenStore.set(response.access_token, response.refresh_token)
     localStorage.setItem('user', JSON.stringify(response.user))
+    // PA-036：登录后立刻拉一次账号卡，把图片 api_key 落地——否则首屏海报
+    // 要等别的页面顺带读卡才有凭据（App 启动预取在未登录时是跳过的）
+    refreshEmbyBaseUrl()
   }
 
   async function login(username: string, password: string, captchaToken?: string) {
@@ -115,7 +118,18 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  function logout() {
+  // PA-048：退出必须先调后端注销口（吊销当前 access 的 jti＋bump token_version
+  // 使全部 refresh 失效），不能只清本地——否则偷到的 refresh 可在 30 天内不断换票。
+  // 顺序是先发请求、后清本地：请求拦截器从 tokenStore 取 Bearer 发请求，清早了
+  // 服务端就定位不到要吊销的会话；注销口失败也继续本地清除，绝不因服务端
+  // 失败把用户锁在登录态里。
+  async function logout() {
+    try {
+      await authApi.logout()
+    } catch {
+      // 注销口失败（离线/500/401）时仍继续本地清除；残余服务端会话窗口
+      // 由 access 120 分钟过期兜底，不以此阻塞用户退出。
+    }
     user.value = null
     token.value = null
     sessionSeq.value += 1

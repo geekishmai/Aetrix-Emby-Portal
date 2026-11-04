@@ -30,6 +30,10 @@
 库直接填的本机目录任何快照都覆盖不到 → ``warn`` 并给出改法（换成共享挂载），
 只有快照明确证明「本机读得到、EA 读不到」时才升级为 ``bad``。
 
+第三种来源形态是 CMS 库的 ``upstream_source_ids``（接入的上游源名单）：内容由 CMS
+同步工人按名单灌入、播放走上游线路解析，既不经本机目录也不经挂载出流——名单非空
+即算「有来源」，且不参与 EA 挂载体检口径（体检证据只覆盖挂载）。
+
 除了逐库判定，还提供 `client_endpoint_check`：用户客户端**该连哪个地址**是否与
 当前出流方式一致（面板已关协议面却仍让用户连面板、地址解析成 localhost 等）。
 """
@@ -43,6 +47,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from backend import models, realms
+from backend.emby_server import applecms_library as cms_lib
 from backend.emby_server import models as em
 from backend.emby_server import mount_health, mounts as mount_lib, nodes
 
@@ -200,12 +205,18 @@ def library_reachability(db: Session, library, ctx: Optional[Context] = None,
         else:
             shared_sources.append(label)
 
+    # CMS 库的来源形态：接入的上游源名单。内容由 CMS 同步工人按名单灌入、播放走
+    # 上游线路解析，不经本机目录 / 挂载出流；解析口径与同步工人共用一份实现。
+    upstream_ids = cms_lib.parse_upstream_source_ids(library)
+    upstream_sources = [f"CMS 源 #{sid}" for sid in upstream_ids]
+
     is_virtual = bool(getattr(library, "is_virtual", False))
     if is_virtual:
         return {
             "level": LEVEL_OK, "code": "", "message": "虚拟库：内容来自其它媒体库，可达性随来源库",
             "fix": "", "playback": ctx.playback, "playback_label": ctx.playback_label,
             "targets": [], "local_sources": [], "shared_sources": [],
+            "upstream_sources": upstream_sources,
             "problems": [], "checked_at": ctx.ea_health_at,
         }
 
@@ -234,10 +245,10 @@ def library_reachability(db: Session, library, ctx: Optional[Context] = None,
         or (not targets and not _ea_colocated)
     )
 
-    if not local_sources and not shared_sources:
+    if not local_sources and not shared_sources and not upstream_ids:
         problems.append(_problem(
             LEVEL_WARN, "no_sources",
-            "这条库没有配置任何来源（路径或挂载）",
+            "这条库没有配置任何来源（路径、挂载或上游源）",
             "在「媒体库」里补一条来源，否则扫描与播放都没有内容",
         ))
     elif not local_sources and not on_other_machine:
@@ -313,16 +324,24 @@ def library_reachability(db: Session, library, ctx: Optional[Context] = None,
 
     level = worst_level(p["level"] for p in problems) if problems else LEVEL_OK
     primary = next((p for p in problems if p["level"] == LEVEL_BAD), None) or (problems[0] if problems else None)
+    if primary:
+        ok_message = primary["message"]
+    elif upstream_ids and not local_sources and not shared_sources:
+        # 纯 CMS 供源：内容不在出流节点的文件系统上，默认那句「节点能拿到」不准确
+        ok_message = f"内容由 CMS 同步供源：已接入 {len(upstream_ids)} 家上游来源，播放走上游线路"
+    else:
+        ok_message = "出流节点能拿到这条库的内容"
     return {
         "level": level,
         "code": primary["code"] if primary else "",
-        "message": primary["message"] if primary else "出流节点能拿到这条库的内容",
+        "message": ok_message,
         "fix": primary["fix"] if primary else "",
         "playback": ctx.playback,
         "playback_label": ctx.playback_label,
         "targets": target_names,
         "local_sources": local_sources,
         "shared_sources": shared_sources,
+        "upstream_sources": upstream_sources,
         "problems": problems,
         "checked_at": ctx.ea_health_at,
     }

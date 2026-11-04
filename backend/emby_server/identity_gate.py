@@ -8,10 +8,11 @@
 任何出口不许私自判 tmdb_id）。
 
 已绑定判据：
-- movie/series：自身 ``tmdb_id`` 或 ``imdb_id`` 任一 strip 后非空。
-  只有豆瓣身份（``external_ids`` 里的 douban）**不算**——豆瓣 ID 从不写入
-  规范身份列、不参与合并分组；只有 IMDb **算**（合并 worker 与
-  HasAnyProviderId 的现行口径都认 imdb_id 为正式身份）。
+- movie/series：自身 ``tmdb_id`` 或 ``imdb_id`` 任一 strip 后非空，
+  或 ``external_ids`` 里任一在用来源键（见 EXTERNAL_ID_KEYS）非空。
+  2026-11-02 站主拍板扩围（先「豆瓣认到就上架」、再「都要算进去」），
+  推翻此前「只有豆瓣身份不算」：任一元数据源认到的编号都是身份；
+  名单只认代码实际写入的键，名单外（含手填自由键）不算。
 - season/episode：跟随所属 series 行（``series_id`` 指向行满足上面的
   判据）；自身有 tmdb/imdb 亦算（episode 口径与 AnyProviderIdEquals、
   DTO 层 ``_provider_ids`` 的「集继承剧编号」既有先例一致）。
@@ -52,6 +53,7 @@ items_dedup_cache）；只改 env 不清缓存等于没切换——写进上线/
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from sqlalchemy import and_, exists, func, or_, select
@@ -94,21 +96,101 @@ def phase3_enabled() -> bool:
     return gate_enabled() and IDENTITY_SHELF_PHASE3_ENABLED > 0
 
 
+#: external_ids 里算数的来源键（2026-11-02 站主拍板扩围）：以代码实际
+#: 写入的键为准——全部经 metasources/engine.apply_to_item 落库，键来自
+#: metasources/sources.py 各源 Hit 的 external_ids：tmdb / imdb（TMDB、
+#: OMDb、TVmaze、TheTVDB 命中与接力产物）、douban（suggest / Frodo /
+#: IMDb 桥）、bangumi、anilist、tvmaze、tvdb。TheTVDB remote_ids 的
+#: sourceName 自由键（如 "IMDB"）形状不规范，不在名单内；名单外键
+#: （含管理端手填）一律不算——要扩围改这一处，全站口径随之变。
+EXTERNAL_ID_KEYS = ("tmdb", "imdb", "douban", "bangumi",
+                    "anilist", "tvmaze", "tvdb")
+
+
+def _external_ids_map(item) -> dict:
+    """条目 external_ids 解析成 dict（坏 JSON / 非 dict 一律 {}）。"""
+    raw = getattr(item, "external_ids", None)
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def has_external_identity(item) -> bool:
+    """external_ids 任一在用来源键非空（Python 口径，与 SQL 同判据）。"""
+    ids = _external_ids_map(item)
+    for key in EXTERNAL_ID_KEYS:
+        value = ids.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                return True
+        elif isinstance(value, (int, float)):
+            if value:
+                return True
+        elif str(value).strip():
+            return True
+    return False
+
+
 def is_bound_row(item) -> bool:
     """Python 侧单行已绑定判定（movie/series 自身口径）。
 
     与 :func:`_own_bound` 的 SQL 语义逐字对应：``tmdb_id`` / ``imdb_id``
-    任一 strip 后非空。只用于内存对象（如组内选主）；查询一律走
+    任一 strip 后非空，或 ``external_ids`` 任一在用来源键非空（2026-11-02
+    扩围）。只用于内存对象（如组内选主）；查询一律走
     :func:`identity_clause`，不许各处私自拼条件。season/episode 的
     「跟随 series」不在此函数内——内存选主只处理 movie/series 组
     （``DEDUP_TYPES``），集跟随只在 SQL 层表达。
     """
     return bool(((getattr(item, "tmdb_id", None) or "").strip())
-                or ((getattr(item, "imdb_id", None) or "").strip()))
+                or ((getattr(item, "imdb_id", None) or "").strip())
+                or has_external_identity(item))
+
+
+def _external_bound_sql(col) -> object:
+    """external_ids（JSON 文本列）任一在用来源键非空的 SQL 判据。
+
+    PG 与 SQLite 双口径：只用 LIKE（两边同语义），不用各库方言的
+    json 函数。落库形为 json.dumps 标准形（``"键": "值"``，冒号后带
+    空格），手写/历史数据可能无空格——两种分隔形都认；``"键": ""``
+    的空值形必须排除：正形命中且空形不命中才算该键非空。空白值
+    （``" "``）各写入方都不会产生（写入前已按真值过滤实编号），SQL
+    层不另处理，口径以 Python 侧 :func:`is_bound_row` 为准。
+    """
+    conds = []
+    for key in EXTERNAL_ID_KEYS:
+        present = or_(
+            col.like(f'%"{key}": "%'),
+            col.like(f'%"{key}":"%'),
+        )
+        empty = or_(
+            col.like(f'%"{key}": ""%'),
+            col.like(f'%"{key}":""%'),
+        )
+        conds.append(and_(present, ~empty))
+    return or_(*conds)
+
+
+def external_bound_sql(col) -> object:
+    """external_ids 任一在用来源键非空的 SQL 判据（公开入口）。
+
+    实现就是 :func:`_external_bound_sql`；enrich 队列谓词复用它，
+    不许在队列模块里另写一份 LIKE 模式（横切能力只许一套）。
+    """
+    return _external_bound_sql(col)
 
 
 def _own_bound(item) -> object:
-    """行自身已绑定：tmdb_id / imdb_id 任一在 strip 后非空。
+    """行自身已绑定：tmdb_id / imdb_id 任一在 strip 后非空，或
+    external_ids 任一在用来源键非空（2026-11-02 扩围）。
 
     ``item`` 可以是 MediaItem 实体类或 aliased 别名。存量数据可能有空串 /
     纯空白（扫描种子里就有 ``tmdb_id="   "`` 的行），必须 trim 后判空，
@@ -117,6 +199,7 @@ def _own_bound(item) -> object:
     return or_(
         and_(item.tmdb_id.isnot(None), func.trim(item.tmdb_id) != ""),
         and_(item.imdb_id.isnot(None), func.trim(item.imdb_id) != ""),
+        _external_bound_sql(item.external_ids),
     )
 
 
