@@ -1104,7 +1104,7 @@ def build_announce_markup(round: models.LotteryRound, count: int) -> dict:
         }
     return {
         "inline_keyboard": [
-            [{"text": f"🎲 参加抽奖（{count} 人已参与）",
+            [{"text": "参加",
               "callback_data": f"lottery_join:{round.id}"}]
         ]
     }

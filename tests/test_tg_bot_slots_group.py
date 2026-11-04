@@ -172,11 +172,9 @@ def test_group_bets_charge_clickers_not_opener(db, monkeypatch):
     spins = {s.user_id: s for s in _spins(db)}
     assert spins[bob.id].bet == 10 and spins[bob.id].status == "settled"
     assert spins[carol.id].bet == 5 and spins[carol.id].status == "settled"
-    # 两条公开结果，各带点注人
-    texts = [t for _c, t in state["messages"]]
-    assert len(texts) == 2
-    assert any("Bob" in t for t in texts)
-    assert any("Carol" in t for t in texts)
+    # 普通输赢不发群消息，只弹给本人
+    assert state["messages"] == []
+    assert any("未中奖" in (t or "") or "中奖" in (t or "") for t, _a in state["answers"])
 
 
 def test_group_same_callback_replay_single_spin(db, monkeypatch):
@@ -201,7 +199,7 @@ def test_group_result_message_and_autodelete(db, monkeypatch):
     assert len(state["messages"]) == 1
     chat_id, text = state["messages"][0]
     assert chat_id == GROUP_CHAT
-    assert "Bob" in text and "头奖池" in text and "300" in text
+    assert "Bob" in text and "头奖" in text and "+300" in text and "\n" not in text
     # 骰子消息与结果消息都挂 30 秒自毁（bot_msg 默认口径，与抢红包反馈同）
     deleted = {(c, m) for c, m, _d in state["deletes"]}
     assert (GROUP_CHAT, state["dice_mids"][0]) in deleted
