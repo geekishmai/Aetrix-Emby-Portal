@@ -8,7 +8,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeftRight, Bot, Coins, Dices, Gift, KeyRound, RefreshCw, Save, Send, Settings2, Wallet } from 'lucide-vue-next'
+import { ArrowLeftRight, Bot, Coins, Dices, Gift, KeyRound, RefreshCw, Save, Send, Settings2, Swords, Wallet } from 'lucide-vue-next'
 import { EmptyState, PageHeader, SectionCard } from '@/components/ui'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 import { fetchWelfareConfig, saveWelfareConfig } from '@/api/welfare'
@@ -65,6 +65,19 @@ const slotsGroupEnabled = computed({
   get: () => (form.value['slots_group_enabled'] ?? 'true') === 'true',
   set: (v: boolean) => { form.value['slots_group_enabled'] = v ? 'true' : 'false' },
 })
+
+// 骰子对决总开关：word 风格 true/false，默认关
+const duelEnabled = computed({
+  get: () => (form.value['bot_duel_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['bot_duel_enabled'] = v ? 'true' : 'false' },
+})
+
+const duelFields = [
+  { key: 'bot_duel_min', label: '单注下限', hint: '发起时最少押多少能量，默认 10', suffix: '能量' },
+  { key: 'bot_duel_max', label: '单注上限', hint: '发起时最多押多少能量，默认 200', suffix: '能量' },
+  { key: 'bot_duel_rake_pct', label: '系统抽成', hint: '从双方奖池里抽走的比例，默认 5，填 0 不抽。零头留给胜者', suffix: '%' },
+  { key: 'bot_duel_daily_win_cap', label: '每日赢取上限', hint: '每人每天从对决拿到的奖金上限，默认 500，填 0 不限', suffix: '能量/天' },
+]
 
 const slotsFields = [
   { key: 'slots_bet_tiers', label: '注额档位', hint: '逗号分隔的能量数，默认 5,10,20', suffix: '能量' },
@@ -351,6 +364,24 @@ onMounted(load)
             <span class="field-hint">名单群内的老虎机面板与注额按钮在群里直接可用：点按钮的人用自己的能量下注、中奖归他，公开结果按机器人消息自毁时间自动删除；关闭后群里只提示去私聊，私聊玩法不受影响。默认开</span>
           </el-form-item>
           <el-form-item v-for="f in slotsFields" :key="f.key" :label="f.label">
+            <el-input v-model="form[f.key]" class="field-input" />
+            <span class="field-suffix">{{ f.suffix }}</span>
+            <span class="field-hint">{{ f.hint }}</span>
+          </el-form-item>
+        </el-form>
+      </SectionCard>
+
+      <SectionCard
+        title="骰子对决"
+        :icon="Swords"
+        description="群里 /duel 押能量掷骰子。默认关。30 秒无人应战会退回，一个群同时只开一局"
+      >
+        <el-form :label-position="labelPosition" label-width="120px" class="config-form">
+          <el-form-item label="总开关">
+            <el-switch v-model="duelEnabled" />
+            <span class="field-hint">关闭后群里不能新开对决；已经押上的一局仍会结算或退回。默认关</span>
+          </el-form-item>
+          <el-form-item v-for="f in duelFields" :key="f.key" :label="f.label">
             <el-input v-model="form[f.key]" class="field-input" />
             <span class="field-suffix">{{ f.suffix }}</span>
             <span class="field-hint">{{ f.hint }}</span>

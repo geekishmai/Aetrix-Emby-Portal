@@ -36,6 +36,9 @@ def handle_callback(db, callback_query: dict, redpacket_enabled: bool | None = N
     if data.startswith("slots_bet:"):
         _handle_slots_bet(db, callback_query)
         return
+    if data.startswith("duel_accept:"):
+        _handle_duel_accept(db, callback_query)
+        return
 
 
 def _handle_menu(db, callback_query: dict) -> None:
@@ -862,6 +865,99 @@ def _send_slots_group_result(db, chat_id, player_name: str, spin, dice_message_i
             ephemeral.schedule_delete(chat_id, result_id, delay)
     except Exception:
         logger.warning("tg slots group result failed: chat=%s", chat_id, exc_info=True)
+
+
+def _handle_duel_accept(db, callback_query: dict) -> None:
+    """应战按钮。个人结果只弹 toast；终态把原面板收成一行。"""
+    from backend import duel as duel_svc
+    from backend.tg_bot import duel_ui
+
+    cb_id = callback_query.get("id")
+    data = callback_query.get("data") or ""
+    from_user = callback_query.get("from") or {}
+    tg_id = from_user.get("id")
+    msg = callback_query.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+
+    def _answer(text: str, show_alert: bool = False) -> None:
+        if cb_id:
+            sender.answer_callback_query(db, cb_id, text=text, show_alert=show_alert)
+
+    if not cb_id or not tg_id or not chat_id:
+        _answer("请求无效，请重新点击")
+        return
+    try:
+        duel_id = int(data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        _answer("这局面板已失效")
+        return
+    from backend.tg_bot import router as bot_router
+
+    if int(tg_id) == bot_router.GROUP_ANONYMOUS_BOT_ID:
+        _answer(bot_router.ANON_ADMIN_TEXT, show_alert=True)
+        return
+    user = resolve(db, int(tg_id))
+    if user is None:
+        _answer("请先绑定账号后再应战", show_alert=True)
+        return
+    try:
+        result = duel_svc.accept_duel(db, user, duel_id, f"tgcq:{cb_id}")
+    except Exception:
+        logger.exception("duel accept failed id=%s", duel_id)
+        db.rollback()
+        _answer("系统繁忙，请稍后再试", show_alert=True)
+        return
+    if not result.get("ok"):
+        extra = {k: v for k, v in result.items() if k not in ("ok", "reason", "duel")}
+        _answer(duel_svc.reason_message(result.get("reason") or "", **extra), show_alert=True)
+        expired = result.get("duel")
+        if result.get("reason") == "expired" and expired is not None:
+            duel_ui.publish_terminal(db, expired)
+        return
+    row = result["duel"]
+    if result.get("duplicate"):
+        if row.status == "rolling":
+            _answer(duel_svc.reason_message("rolling"))
+        else:
+            _answer(duel_svc.reason_message("settled"))
+        return
+
+    ok1, _err1, dice1, mid1 = sender.send_dice(db, int(chat_id), "🎲")
+    ok2, _err2, dice2, mid2 = (False, None, None, None)
+    if ok1 and isinstance(dice1, int):
+        ok2, _err2, dice2, mid2 = sender.send_dice(db, int(chat_id), "🎲")
+    if not (ok1 and ok2 and isinstance(dice1, int) and isinstance(dice2, int)):
+        aborted = duel_svc.abort_roll(db, row.id, reason="dice_failed")
+        _answer("掷骰失败，押注已退回", show_alert=True)
+        if aborted is not None:
+            duel_ui.publish_terminal(db, aborted)
+        return
+    try:
+        settled = duel_svc.settle_duel(db, row.id, int(dice1), int(dice2))
+    except Exception:
+        logger.exception("duel settle failed id=%s", row.id)
+        db.rollback()
+        _answer("结算异常，请联系管理员", show_alert=True)
+        return
+    if not settled.get("ok"):
+        aborted = duel_svc.abort_roll(db, row.id, reason="bad_dice")
+        _answer(duel_svc.reason_message(settled.get("reason") or "bad_dice"), show_alert=True)
+        if aborted is not None:
+            duel_ui.publish_terminal(db, aborted)
+        return
+    final = settled["duel"]
+    delay = ephemeral.bot_msg_delay_seconds(db)
+    if delay > 0:
+        for mid in (mid1, mid2):
+            if mid:
+                ephemeral.schedule_delete(int(chat_id), int(mid), delay)
+    if final.status == "settled":
+        _answer(f"🎉 你这局{('赢了' if final.winner_id == user.id else '输了')}，结果见面板")
+    elif final.status == "tie":
+        _answer("平局，押注已退回")
+    else:
+        _answer("本局已退回")
+    duel_ui.publish_terminal(db, final)
 
 
 def _handle_slots_bet(db, callback_query: dict) -> None:

@@ -348,6 +348,13 @@ WELFARE_CONFIG_KEYS = {
     "slots_pool_seed": "100",
     "slots_daily_bet_cap": "200",
     "slots_daily_win_cap": "1000",
+    # 骰子对决（默认关）：单注上下限、奖池抽成、每日赢取上限。
+    # 超时固定 30 秒，不在这里配。读侧 backend.duel。
+    "bot_duel_enabled": "false",
+    "bot_duel_min": "10",
+    "bot_duel_max": "200",
+    "bot_duel_rake_pct": "5",
+    "bot_duel_daily_win_cap": "500",
     # 注册后 TG 绑定引导页总开关
     # 求片 v2：总开关 / 附议 / 附议者入库通知（默认全开）
     # C2 积分转账：总开关默认开启，手续费/限额可配（0=不收/不限）

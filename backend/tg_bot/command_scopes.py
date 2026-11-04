@@ -59,7 +59,7 @@ ADMIN_ONLY_COMMANDS: frozenset[str] = frozenset({
 GROUP_COMMANDS: frozenset[str] = frozenset({
     "start", "help", "bind", "checkin", "points",
     "rank", "requestboard", "rules",
-    "redpacket", "lottery", "slots",
+    "redpacket", "lottery", "slots", "duel",
     "me", "account", "level",
 })
 

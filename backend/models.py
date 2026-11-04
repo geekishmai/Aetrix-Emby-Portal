@@ -1896,6 +1896,62 @@ class SlotsSpin(Base):
     settled_at = Column(DateTime, nullable=True)
 
 
+class Duel(Base):
+    """群内骰子对决（一行一局）。
+
+    发起时冻结发起人押注；第一个应战的人押同额。结果只认 Telegram
+    sendDice 🎲 的 dice.value（1-6）。idempotency_key（tg:<update_id>）
+    与 accept_key（tgcq:<callback id>）各自唯一，poller 重放不双花。
+    终态：settled 分出胜负 / tie 平局各退 / refunded 超时或上限退回 /
+    failed 掷骰失败退回。
+    """
+    __tablename__ = 'duels'
+
+    __table_args__ = (
+        UniqueConstraint('idempotency_key', name='uq_duel_idempotency'),
+        UniqueConstraint('accept_key', name='uq_duel_accept_key'),
+        Index('idx_duel_chat_status', 'chat_id', 'status'),
+        Index('idx_duel_status_expires', 'status', 'expires_at'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, nullable=False)
+    message_id = Column(BigInteger, nullable=True)
+    initiator_id = Column(Integer, ForeignKey('web_users.id'), nullable=False)
+    challenger_id = Column(Integer, ForeignKey('web_users.id'), nullable=True)
+    stake = Column(Integer, nullable=False)
+    rake_pct = Column(Integer, nullable=False, default=5)
+    status = Column(String(16), nullable=False, default='open')
+    initiator_dice = Column(Integer, nullable=True)
+    challenger_dice = Column(Integer, nullable=True)
+    winner_id = Column(Integer, ForeignKey('web_users.id'), nullable=True)
+    rake = Column(Integer, nullable=False, default=0)
+    prize = Column(Integer, nullable=False, default=0)
+    idempotency_key = Column(String(64), nullable=True)
+    accept_key = Column(String(64), nullable=True)
+    panel_finalized = Column(Boolean, nullable=False, default=False, server_default='0')
+    created_at = Column(DateTime, default=datetime.now)
+    expires_at = Column(DateTime, nullable=False)
+    accepted_at = Column(DateTime, nullable=True)
+    settled_at = Column(DateTime, nullable=True)
+    last_panel_edit_at = Column(DateTime, nullable=True)
+
+    initiator = relationship('WebUser', foreign_keys=[initiator_id])
+    challenger = relationship('WebUser', foreign_keys=[challenger_id])
+
+
+class DuelLive(Base):
+    """一个群同时只留一局进行中的对决（chat_id 主键）。
+
+    开局插入、终态删除。不依赖部分唯一索引，SQLite / PostgreSQL / MySQL
+    都能靠主键冲突挡住并发第二局。
+    """
+    __tablename__ = 'duel_live'
+
+    chat_id = Column(BigInteger, primary_key=True)
+    duel_id = Column(Integer, ForeignKey('duels.id'), nullable=False)
+
+
 class Review(Base):
     """影评表"""
     __tablename__ = 'reviews'

@@ -55,6 +55,7 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("redpacket", "[群/私聊] 发红包"),
     ("lottery", "[群/私聊] 抽奖"),
     ("slots", "[群/私聊] 老虎机"),
+    ("duel", "[群/私聊] 骰子对决"),
     ("redeem", "[私聊] 兑换码兑换"),
     ("bindings", "[私聊] 查网盘绑定"),
     ("transfers", "[私聊] 查转存进度"),

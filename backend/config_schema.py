@@ -223,6 +223,13 @@ WELFARE_CONFIG_SCHEMA: dict[str, tuple] = {
     "slots_pool_seed": ("int", 0, _BIG),
     "slots_daily_bet_cap": ("int", 0, _BIG),
     "slots_daily_win_cap": ("int", 0, _BIG),
+    # 骰子对决：总开关默认关（word 风格，读侧 economy._get_bool_config
+    # 只认 "true"）；单注上下限至少 1；抽成 0-100；每日赢取上限 0=不限。
+    "bot_duel_enabled": ("bool",),
+    "bot_duel_min": ("int", 1, _BIG),
+    "bot_duel_max": ("int", 1, _BIG),
+    "bot_duel_rake_pct": ("int", 0, 100),
+    "bot_duel_daily_win_cap": ("int", 0, _BIG),
     # 2026-10-17 第 4 批 4-4：白名单里但此前无 spec 的群 id 列表键（端点现行按原文
     # 存字符串）。注册为 ("str",) 与今天逐字一致：原文直存，None/空串→删行
     # （读侧 _get_str_config 缺行/空行都回默认 ""，等价）。
