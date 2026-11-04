@@ -109,14 +109,27 @@ def test_get_db_uses_current_factory():
 
 
 def test_proxy_does_not_recurse_when_untouched():
-    """没被改写时，代理转发到 _real_session_local（不能自己调自己）"""
+    """代理转发当前目标（不能自己调自己）。
+
+    T1 后全局 factory 由 conftest 守卫维持「最后已知良好」值，不再恒等于
+    _real_session_local（先前文件的换绑/恢复会把指向留在某个有表的全局库）。
+    本用例钉的语义是「代理转发、不自递归」：把目标指到哨兵 factory，
+    SessionLocal() 必须产出哨兵的 session。"""
     if not isinstance(dbmod.SessionLocal, dbmod._SessionLocalProxy):
         pytest.skip("当前 SessionLocal 不是代理")
-    s = dbmod.SessionLocal()
+    engine = create_engine("sqlite:///:memory:")
+    sentinel = sessionmaker(bind=engine)
+    token = dbmod.SessionLocal._factory
     try:
-        assert s.get_bind() is dbmod._real_session_local.kw["bind"]
+        dbmod.SessionLocal._factory = sentinel
+        s = dbmod.SessionLocal()
+        try:
+            assert s.get_bind() is engine
+        finally:
+            s.close()
     finally:
-        s.close()
+        dbmod.SessionLocal._factory = token
+        engine.dispose()
 
 
 def test_proxy_object_is_never_replaced():
