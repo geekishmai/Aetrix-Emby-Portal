@@ -682,8 +682,14 @@ def _collect_observability() -> dict:
                 "error": str(e)[:120]}
 
 
+#: 公网反代（Caddy）给每个外部请求强制写上的标记头：客户端自带的同名头会被覆盖，
+#: 所以带它的请求一定来自公网。这类请求只回状态，内部指标（115 调用计数、版本、
+#: 体检明细）只给本机监控（127.0.0.1 直连，不经 Caddy）。空字符串 = 不区分。
+_HEALTH_PUBLIC_HEADER = os.getenv("HEALTH_PUBLIC_HEADER", "X-Aetrix-Public").strip()
+
+
 @app.get("/api/health")
-async def health_check():
+async def health_check(request: Request):
     """健康检查端点
 
     status **不再硬编码 healthy**：以前数据库断、Redis 挂、worker 刷几千条探测
@@ -695,6 +701,8 @@ async def health_check():
     """
     from starlette.concurrency import run_in_threadpool
     health = await run_in_threadpool(_collect_health)
+    if _HEALTH_PUBLIC_HEADER and request.headers.get(_HEALTH_PUBLIC_HEADER) == "1":
+        return {"status": health["status"], "timestamp": datetime.now().isoformat()}
     # 可观测底座（v2.56.0）：开关默认关；开时返回各子系统健康探针 + API 指标
     try:
         from backend.emby_server import observability as _obs
