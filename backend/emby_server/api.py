@@ -6562,7 +6562,7 @@ async def video_stream(
     # 播放门禁（2026-10-26 用户亲定硬规矩）：Emby token 直接调流是新播放，
     # 必须过门禁；带有效 play_sign 的请求是在消费已下发的链接，不追溯。
     from backend.emby_server import playback_gate as _gate
-    await run_db(_gate.ensure_binding_playback_allowed, db, user, request, item)
+    await run_db(_gate.ensure_binding_playback_allowed_for_item, db, user, item, request)
     _pt.mark("auth_playback")
     # 三层路径授权门禁（FMBY 挂载-7，#1240 落库、本 PR 接线）：放在占租约
     # 之前，拒绝的请求不占播放路数；非挂载路径 / 无授权行时放行，

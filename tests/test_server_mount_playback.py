@@ -72,7 +72,7 @@ def _item(file_path, library_id=None):
 
 
 def _ensure(db, user, item):
-    gate.ensure_binding_playback_allowed(db, user, None, item)
+    gate.ensure_binding_playback_allowed_for_item(db, user, item, None)
 
 
 # ---------------- 库级开关 ----------------

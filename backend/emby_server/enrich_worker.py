@@ -3716,7 +3716,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
     groups_q = (db.query(group_key.label("g"),
                          _func.max(em.MediaItem.date_added).label("latest"),
                          em.MediaItem.library_id.label("lib"))
-                .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+                .filter(em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
+                        due, unlocked,
                         not_episode, not_merged, not_ban_backfill, queue_pred,
                         parent_ready)
                 # library_id 必须显式入组（PG 要求）：组键是全局 id，
@@ -3741,7 +3742,8 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
             if len(claimed) >= limit:
                 break
             q = (db.query(em.MediaItem)
-                 .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+                 .filter(em.MediaItem.enrich_status.in_(_CLAIMABLE_STATUSES),
+                         due, unlocked,
                          not_episode, not_merged, not_ban_backfill, queue_pred,
                          parent_ready,
                          # 轻量化 P1：组员谓词改索引直取，与 coalesce

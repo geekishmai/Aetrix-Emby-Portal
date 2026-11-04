@@ -250,23 +250,21 @@ def _request_uses_issued_play_sign(request: Request, db: Session) -> bool:
 
 
 def ensure_binding_playback_allowed(
-    db: Session, user: models.WebUser, request: Request | None = None,
-    item=None,
+    db: Session, user: models.WebUser, request: Request | None = None
 ) -> None:
-    """播放门禁：无 active 绑定时抛 403。
+    """播放门禁：无 active 绑定时抛 403（上游签名，条目级豁免在调用方）。
 
-    豁免顺序（2026-11-03，服务器统一供片模式）：
+    豁免顺序（fork 语义 + 上游契约）：
     1. 绑定门整体关闭（``playback_require_user_binding`` false / env 0）→ 放行；
-    2. 条目是服务端挂载（``mount://``）→ 放行（服务端中继出流，不需要用户账号）；
-    3. 带有效 play_sign 的已下发链接消费 → 放行（不追溯）；
-    4. 其余仍要求本用户名下有 active 绑定（``byos://`` / 用户副本语义不变）。
+    2. 带有效 play_sign 的已下发链接消费 → 放行（不追溯）；
+    3. 其余仍要求本用户名下有 active 绑定（``byos://`` / 用户副本语义不变）。
 
-    ``request`` 为空时无条件判定（PlaybackInfo / 上游兜底口：本次调用
-    本身就是新下发）；用户对象取不到 id 时按无绑定处理（fail-closed：403）。
+    条目级豁免（CMS 库、库行 ``no_binding_required`` 的 ``mount://``）由
+    ``ensure_binding_playback_allowed_for_item`` 先判。``request`` 为空时
+    无条件判定（PlaybackInfo / 上游兜底口：本次调用本身就是新下发）；
+    用户对象取不到 id 时按无绑定处理（fail-closed：403）。
     """
     if not binding_gate_enabled(db):
-        return
-    if not binding_required_for_item(db, item):
         return
     if request is not None and _request_uses_issued_play_sign(request, db):
         return
