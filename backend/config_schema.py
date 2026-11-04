@@ -234,6 +234,11 @@ WELFARE_CONFIG_SCHEMA: dict[str, tuple] = {
     # 更新入库播报（tg_bot.updatedigest 读侧宽容解析）：总开关 + 攒批间隔分钟
     "bot_update_digest_enabled": ("bool",),
     "bot_update_digest_interval_minutes": ("int", 5, 1440),
+    # 主动私聊提醒（tg_bot.proactive）：两个开关默认关，合并窗口秒数默认 60。
+    # word 风格 ("bool",) 存 true/false。关时不发、不写已推记录。
+    "tg_notify_store_arrival_enabled": ("bool",),
+    "tg_notify_transfer_done_enabled": ("bool",),
+    "tg_notify_merge_window_sec": ("int", 0, 3600),
 
     "lottery_group_ids": ("str",),
 }

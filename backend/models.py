@@ -2062,6 +2062,46 @@ class TgUpdateDigestSent(Base):
     sent_at = Column(DateTime, default=datetime.now)
 
 
+class TgProactiveNotice(Base):
+    """Telegram 主动私聊提醒的已处理记录（求片到货 / 转存终态）。
+
+    一行 = 一个（事件, 用户）。唯一约束挡住重复扫描、重复回调、
+    多进程和重启后再插一行。状态：
+    - pending：已入队，等合并窗口到点再发；
+    - inflight：某个进程已领走、正在发；
+    - sent：已发出；
+    - blocked：对方屏蔽了机器人或聊不了，不再重试；
+    - gave_up：可重试的失败用完次数，不再重试。
+    开关关着时不写本表。新表由 init_db 的 create_all 建出，
+    不走补列（老库升级同样靠 create_all 补新表）。
+    """
+
+    __tablename__ = "tg_proactive_notices"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "kind", "subject_id", "user_id",
+            name="uq_tg_proactive_notice",
+        ),
+        Index("ix_tg_proactive_user_status", "user_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # store_arrival / transfer_ok / transfer_fail
+    kind = Column(String(32), nullable=False)
+    # 求片行 id 或转存任务 id
+    subject_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False)
+    title = Column(String(255), nullable=False, default="")
+    # 只存已经说成人话的失败原因；成功/到货为空。不存异常、路径、凭据。
+    detail = Column(String(200), nullable=False, default="")
+    status = Column(String(20), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
+
+
 class ChatPointsLog(Base):
     """群发言积分明细表（M1）
 

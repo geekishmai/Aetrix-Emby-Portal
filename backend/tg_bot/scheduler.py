@@ -60,6 +60,12 @@ def start_tg_bot_poller() -> bool:
         start_update_digest_scheduler()
     except Exception:
         logger.exception("updatedigest 调度启动失败（可忽略）")
+    try:
+        from backend.tg_bot.proactive import wake_flusher
+
+        wake_flusher()
+    except Exception:
+        logger.exception("主动私聊提醒调度启动失败（可忽略）")
     return True
 
 
