@@ -102,3 +102,89 @@ def restore_session_factory(token) -> None:
     """恢复 :func:`snapshot_session_factory` 保存的指向。"""
     from backend import database as _dbmod
     _dbmod.SessionLocal._factory = token
+
+
+# ==================== 全局 factory 守卫（T1 第二层） ====================
+#
+# 「换绑全局 factory 再恢复」在**多文件全量**下对不齐：victim 文件（模块级
+# init_db() + 全局 SessionLocal）的表建在它 **collection 时刻**的全局 engine；
+# 运行期任何 restorer 把 factory 恢复到"自己快照的值"，都可能指向更早的库
+# → 之后所有 victim ``no such table``。手写快照永远追不齐建表进度。
+#
+# 解法：进程级守卫——任何测试改绑全局 factory 前，先确保"当前指向"是可用的
+# 全局库（有核心表）；用例结束时若发现全局 factory 指向**缺核心表的库**，
+# 把它指回**最后已知良好**的全局库（最后一个成功 init_db 的全局 engine）。
+# 只兜底、不掩盖：restorer 自己的语义不变，守卫只在"恢复结果缺表"时纠偏。
+
+_LAST_GOOD_GLOBAL_FACTORY = None
+_GUARD_CORE_TABLES = ("web_users", "system_configs")
+_GUARD_INSTALLED = False
+_GUARD_LOCK = None
+
+
+def _factory_engine(factory):
+    """从 factory 里取 bind 的 engine（sessionmaker.kw['bind'] 或 .kw['bind']）。"""
+    kw = getattr(factory, "kw", None) or {}
+    return kw.get("bind")
+
+
+def _engine_has_core_tables(engine) -> bool:
+    if engine is None:
+        return False
+    try:
+        from sqlalchemy import inspect
+        names = set(inspect(engine).get_table_names())
+    except Exception:  # noqa: BLE001 — 探测失败按缺表处理
+        return False
+    return all(t in names for t in _GUARD_CORE_TABLES)
+
+
+def install_session_factory_guard():
+    """装全局 factory 守卫（幂等；conftest autouse fixture 调用）。
+
+    hook 两处：configure_session_local 与直接对 ``_factory`` 赋值都拦不住——
+    这里用**用例级对账**：每个用例 setup 时记当前 factory；teardown 时若
+    当前 factory 缺核心表且存在"最后已知良好"factory，则纠偏回去。
+    """
+    global _GUARD_INSTALLED, _GUARD_LOCK
+    import threading
+    if _GUARD_INSTALLED:
+        return
+    _GUARD_LOCK = threading.Lock()
+
+    from backend import database as _dbmod
+
+    def _note_good(factory):
+        global _LAST_GOOD_GLOBAL_FACTORY
+        with _GUARD_LOCK:
+            if factory is not None and factory is not _dbmod._real_session_local \
+                    and _engine_has_core_tables(_factory_engine(factory)):
+                _LAST_GOOD_GLOBAL_FACTORY = factory
+
+    def _patched_init_db():
+        _dbmod._orig_init_db()
+        _note_good(_dbmod.SessionLocal._factory)
+
+    if not getattr(_dbmod, "_orig_init_db", None):
+        _dbmod._orig_init_db = _dbmod.init_db
+        _dbmod.init_db = _patched_init_db
+    _GUARD_INSTALLED = True
+
+
+@pytest.fixture(autouse=True)
+def _guard_global_session_factory():
+    """每用例对账：teardown 时全局 factory 缺核心表 → 纠偏回最后已知良好值。"""
+    install_session_factory_guard()
+    from backend import database as _dbmod
+    before = _dbmod.SessionLocal._factory
+    yield
+    after = _dbmod.SessionLocal._factory
+    if after is before:
+        return
+    # factory 被本用例动过：若动完之后缺核心表，纠偏
+    global _LAST_GOOD_GLOBAL_FACTORY
+    with _GUARD_LOCK:
+        good = _LAST_GOOD_GLOBAL_FACTORY
+    if good is not None and after is not good \
+            and not _engine_has_core_tables(_factory_engine(after)):
+        _dbmod.SessionLocal._factory = good
