@@ -390,6 +390,8 @@ def _wait_db(parent_status):
 def test_c_p2_4_wait_caps_at_20_then_gives_up(monkeypatch):
     from backend.emby_server import enrich_worker as ew
 
+    # 默认开关开着时等父级不再转 none；这条钉的是开关关掉后的旧上限。
+    monkeypatch.setattr(ew, "ENRICH_PARENT_WAIT_NO_FALSE_NONE", 0)
     ew._parent_wait_counts.clear()
     db = _wait_db("pending")
     item = _wait_item()

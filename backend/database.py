@@ -1560,6 +1560,13 @@ _LEGACY_INDEXES: tuple[tuple[str, ...], ...] = (
      "  已迁移: emby_items.idx_item_enrich_claim_cover（抢单去重聚合部分覆盖索引）",
      "deleted_at IS NULL AND merged_into_id IS NULL", None,
      "series_id, date_added, library_id"),
+    # 单集认领：父级未终态反连接的内表。只含未终态 series/season 的主键，
+    # 约两万行量级，供 EXISTS 哈希探测。老库 create_all 不回填已建表，
+    # 这里补上。回滚：DROP INDEX idx_item_enrich_open_parent。只加索引，不改行。
+    ("emby_items", "idx_item_enrich_open_parent", "id", None,
+     "  已迁移: emby_items.idx_item_enrich_open_parent（未终态父级部分索引）",
+     "item_type IN ('series', 'season') AND enrich_status IN ('pending', 'enriching') "
+     "AND deleted_at IS NULL"),
     # A-115：详情页预取上限 COUNT 按 (owner_scope, owner_ref, trigger,
     # created_at) 过滤，TransferJob 旧 3 索引首列均为 item_id/status 均
     # 不可用，无界增长表上全表扫；models.py 已声明同名索引（新库
@@ -1684,15 +1691,17 @@ def _ensure_index(existing_tables: set, table: str, name: str, columns: str,
                     include_clause = f" INCLUDE ({include})"
                 else:
                     ddl_columns = f"{columns}, {include}"
-            ddl = f"CREATE INDEX {name} ON {table} ({ddl_columns}){include_clause}"
+            ddl = f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({ddl_columns}){include_clause}"
             if where is not None:
                 ddl += f" WHERE {where}"
             conn.execute(text(ddl))
         else:
             if where is None:
-                conn.execute(text(f"CREATE INDEX {name} ON {table} USING {using} ({columns})"))
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} USING {using} ({columns})"))
             else:
-                conn.execute(text(f"CREATE INDEX {name} ON {table} USING {using} ({columns}) WHERE {where}"))
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} USING {using} ({columns}) WHERE {where}"))
         logger.info(message)
 
 
@@ -2323,8 +2332,9 @@ def _sqlite_lock_path() -> str:
 def _acquire_migrate_lock():
     """跨进程互斥地跑 schema 初始化/迁移。
 
-    为什么必须有：init_db() 会被 api、worker、EA 三个进程**同时**调用，而建表/加列/
-    建索引在 PG 与 SQLite 上都没有 IF NOT EXISTS。三个进程同时判定"表不存在"→ 全部
+    为什么必须有：init_db() 会被 api、worker、EA 三个进程**同时**调用，而建表/加列
+    在 PG 与 SQLite 上都没有 IF NOT EXISTS（``_ensure_index`` 的 CREATE INDEX
+    已带 IF NOT EXISTS，挡不住建表竞态）。三个进程同时判定"表不存在"→ 全部
     执行 → 后到的抛 DuplicateTable / duplicate column name。而 main.py 与 worker.py
     都是 fail-closed 的 raise / return 1，restart: unless-stopped 下变成崩溃重启循环。
 

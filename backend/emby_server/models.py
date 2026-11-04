@@ -158,6 +158,14 @@ class MediaItem(Base):
         Index("idx_item_enrich_claim_cover", "enrich_status", "enrich_next_retry_at",
               postgresql_include=["series_id", "date_added", "library_id"],
               postgresql_where=text("deleted_at IS NULL AND merged_into_id IS NULL")),
+        # 单集认领反连接：只索引仍 pending/enriching 的 series/season 主键。
+        # EXISTS 按父级 id 探测这块小集合，而不是扫全部 pending 单集。
+        # 回滚：DROP INDEX idx_item_enrich_open_parent。只加索引，不改行。
+        Index("idx_item_enrich_open_parent", "id",
+              postgresql_where=text(
+                  "item_type IN ('series', 'season') "
+                  "AND enrich_status IN ('pending', 'enriching') "
+                  "AND deleted_at IS NULL")),
         # 追新日历：按「入库时间落在某月」取条目（date_added BETWEEN 起 止）。
         # 没有索引时这是一张全表扫 + filesort，条目量上万后打开日历要几秒。
         # 复合第二列带上 item_type：日历的类型筛选（电影 / 剧集 / 单集）

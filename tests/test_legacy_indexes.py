@@ -8,6 +8,7 @@
 """
 import logging
 import os
+import pathlib
 
 os.environ.setdefault("DATABASE_TYPE", "sqlite")
 os.environ.setdefault("REDIS_ENABLED", "false")
@@ -35,6 +36,8 @@ _ITEM_INDEXES = {
     # 2026-10-23：抢单去重聚合部分覆盖索引；SQLite 下 INCLUDE 列并进键列
     "idx_item_enrich_claim_cover": ["enrich_status", "enrich_next_retry_at",
                                     "series_id", "date_added", "library_id"],
+    # 单集认领：未终态 series/season 的主键部分索引
+    "idx_item_enrich_open_parent": ["id"],
 }
 
 
@@ -81,6 +84,8 @@ def test_spec_table_covers_all_seven_in_restored_order():
         # 2026-10-23：补全进度统计 + 抢单去重聚合（压测实锤，生产已手工先行）
         "idx_item_enrich_claimed",
         "idx_item_enrich_claim_cover",
+        # 单集认领反连接：未终态 series/season 主键部分索引
+        "idx_item_enrich_open_parent",
         # A-115：转存每日预取上限 COUNT 复合索引（models.py 同名声明）
         "ix_transfer_job_prefetch_daily",
     ]
@@ -163,6 +168,39 @@ def test_browse_sort_partial_predicate_and_model_spec_cross_check(tmp_path, monk
     eng.dispose()
 
 
+def test_open_parent_index_is_partial_and_if_not_exists(tmp_path, monkeypatch):
+    """未终态父级索引：models 谓词与迁移一致，DDL 带 IF NOT EXISTS，不改行。"""
+    from backend.emby_server import models as em
+
+    spec = next(s for s in database._LEGACY_INDEXES
+                if s[1] == "idx_item_enrich_open_parent")
+    where = spec[5]
+    assert "item_type IN ('series', 'season')" in where
+    assert "enrich_status IN ('pending', 'enriching')" in where
+    assert "deleted_at IS NULL" in where
+    ix = next(i for i in em.MediaItem.__table__.indexes
+              if i.name == "idx_item_enrich_open_parent")
+    assert [c.name for c in ix.columns] == ["id"]
+    pg_where = str(ix.dialect_options["postgresql"]["where"]).strip()
+    assert pg_where == where
+
+    eng = _engine(tmp_path)
+    monkeypatch.setattr(database, "engine", eng)
+    database._ensure_legacy_indexes({"emby_items"})
+    with eng.connect() as conn:
+        sql = conn.execute(text(
+            "SELECT sql FROM sqlite_master WHERE name='idx_item_enrich_open_parent'"
+        )).scalar()
+    assert sql
+    # SQLite 把 IF NOT EXISTS 从 sqlite_master.sql 里抹掉，谓词仍在。
+    # 幂等写法本身在 _ensure_index 的 DDL 模板里。
+    assert "deleted_at IS NULL" in sql
+    assert "item_type IN ('series', 'season')" in sql
+    src = pathlib.Path(database.__file__).read_text(encoding="utf-8")
+    assert "CREATE INDEX IF NOT EXISTS {name}" in src
+    eng.dispose()
+
+
 def test_creates_missing_indexes_and_is_idempotent(tmp_path, monkeypatch, caplog):
     eng = _engine(tmp_path)
     monkeypatch.setattr(database, "engine", eng)
@@ -180,7 +218,7 @@ def test_creates_missing_indexes_and_is_idempotent(tmp_path, monkeypatch, caplog
     # person_tmdb_id 列不存在 → 静默跳过
     assert _indexes(eng, "emby_people") == {}
     first = _migration_log_text()
-    assert first.count("已迁移") == 12
+    assert first.count("已迁移") == 13
 
     # 第二次：全部已存在，不再建、不再打日志
     caplog.clear()
