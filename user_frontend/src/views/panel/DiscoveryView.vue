@@ -204,9 +204,13 @@
 
       <!-- 右栏：世界入口 / 观影碑 / 告示牌 / 抽签 / 留言墙（桌面专属） -->
       <DiscoveryRightRail v-if="isWide" />
-      <!-- 底部全宽：媒体库速览带（桌面专属） -->
-      <LibraryBand v-if="isWide" />
     </div>
+    <!-- 底部全宽：媒体库速览带（桌面专属）。
+         必须放在三栏网格容器**外**：网格里的左栏是 position:sticky，页面滚动时
+         粘在视口内，其粘性包含块是网格容器；放同一容器里时滚动到底会把本带
+         压在下面（1780px 实测：信封卡盖住「华语电影」卡），移到容器外后
+         粘性包含块止于三栏行，永不与媒体库带重叠。 -->
+    <LibraryBand v-if="isWide" />
     <PlayerSchemeSheet v-model:open="parcelPickerOpen" :title="parcelPickerTitle" />
     </template>
   </div>
