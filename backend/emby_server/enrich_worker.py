@@ -3427,6 +3427,12 @@ def _claim_dialect_name(db) -> str:
     return bind.dialect.name if bind is not None else ""
 
 
+#: 可认领状态（合并上游后机械补回）：pending + 外部停泊的 retrying。
+#: 上游新版把认领谓词内联、没有这个常量，但 fork 的认领 UPDATE 仍引用它；
+#: 语义与 scan-cancel 时期一致（retrying 带 next_retry_at 到期才可领）。
+_CLAIMABLE_STATUSES = ("pending", "retrying")
+
+
 def _claim_group_atomic(db, q, now) -> list:
     """原子认领一组候选：单条 UPDATE ... WHERE enrich_status='pending'。
 

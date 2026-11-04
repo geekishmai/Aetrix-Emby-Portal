@@ -1949,6 +1949,9 @@ class LibraryUpdate(BaseModel):
     # 扫描策略开关（v2.44.0）：不传 = 不修改
     incremental_scan: bool | None = None
     fs_watch: bool | None = None
+    # 免绑定播放（2026-11-03 §16）：库行开关，默认关。合并上游后机械补回
+    # 字段定义（handler 与模型列都还在，只有类定义被上游版覆盖）。
+    no_binding_required: bool | None = None
     # 库类型：建库后不可更改——传了且与现值不同直接 400（见 update_library）
     kind: str | None = None
     # kind=applecms 的库可改来源清单；local 库传了直接 400
