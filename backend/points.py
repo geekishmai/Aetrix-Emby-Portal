@@ -73,6 +73,7 @@ POINT_TYPE_SELF_EARNED: dict[str, bool] = {
     "rebate": False,
     "promotion": False,
     "redpacket": False,
+    "redpacket_rain": False,  # 系统出的红包雨，不算自挣
     "code_redeem": False,
     "exchange": False,
     "recharge": False,
