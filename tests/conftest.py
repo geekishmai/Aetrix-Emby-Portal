@@ -77,3 +77,28 @@ def _isolate_transfer_stage_dir(tmp_path, monkeypatch):
     except Exception:
         pass
     yield
+
+
+# ==================== 全局 SessionLocal factory 的安全换绑 ====================
+#
+# 背景（2026-11-05 T1 复盘）：``configure_session_local`` 对「传入代理自身」有
+# 防递归保护——被忽略并回退到 ``_real_session_local``（bind 到 backend.database
+# **首次 import 时的 engine**）。测试里若写 ``original = dbmod.SessionLocal``
+# （保存的是代理对象）再 ``configure_session_local(original)`` "还原"，实际把
+# 全局 factory 打回进程首库（通常 0 表）——其后所有依赖全局 SessionLocal 的
+# 测试文件 ``no such table``（全量 95 个环境类 ERROR 的根因，单跑全绿）。
+#
+# 正确姿势：换绑前用 :func:`snapshot_session_factory` 保存**代理内部指向**，
+# 用 :func:`restore_session_factory` 恢复。
+
+
+def snapshot_session_factory():
+    """保存 SessionLocal 代理当前指向的 factory（不是代理本身）。"""
+    from backend import database as _dbmod
+    return _dbmod.SessionLocal._factory
+
+
+def restore_session_factory(token) -> None:
+    """恢复 :func:`snapshot_session_factory` 保存的指向。"""
+    from backend import database as _dbmod
+    _dbmod.SessionLocal._factory = token

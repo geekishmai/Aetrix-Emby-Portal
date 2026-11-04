@@ -29,6 +29,7 @@ from backend import database as dbmod  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
+from conftest import restore_session_factory, snapshot_session_factory
 import pytest  # noqa: E402
 from contextlib import suppress  # noqa: E402
 
@@ -47,7 +48,7 @@ def _with_factory(tmpdb):
     """把 database.SessionLocal 换成指向 tmpdb 的 factory，跑完后还原。"""
     engine = create_engine(f"sqlite:///{tmpdb}")
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    original = dbmod.SessionLocal
+    original = snapshot_session_factory()
     dbmod.configure_session_local(factory)
     return engine, original
 
