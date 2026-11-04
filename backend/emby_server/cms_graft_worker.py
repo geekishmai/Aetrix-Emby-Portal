@@ -2,7 +2,12 @@
 
 用法（容器内）：``python -m backend.emby_server.cms_graft_worker
 [--limit 500] [--verdicts /data/cms_graft/verdicts_seed.jsonl]
-[--pool 4000] [--dry-select]``
+[--pool 4000] [--dry-select] [--method graft|self]``
+
+``--method self`` 走自帧修复线（cms_self_frame，2026-11-04 主
+路线）：不找干净兄弟、队列口径不变；熔断换试点收紧版
+（cms_self_frame.host_ok_strict：内存 <1.2GB / load1 >6 /
+health TTFB >1s 连二），其余记账/续跑/家宽信号量与借帧线共用。
 
 纪律（派单口径）：
 
@@ -82,18 +87,47 @@ def _load_verdicts(path):
     return verdicts
 
 
-def _host_wait(max_checks=10, sleep_sec=30):
-    """熔断等候：宿主状态恢复返回 True；等满仍不达标返回 False。"""
+def _host_wait(max_checks=10, sleep_sec=30, strict=False):
+    """熔断等候：宿主状态恢复返回 True；等满仍不达标返回 False。
+
+    strict=True（自帧线）：阈值换试点收紧版，且 health TTFB
+    连续两次 >1s 也算未恢复（单次抖动不误杀，计数在本函数内维护）。
+    """
     from backend.emby_server import cms_graft
 
+    bad_ttfb = 0
     for _ in range(max_checks):
         mem_kb, load1 = cms_graft.host_state()
-        if cms_graft.host_ok(mem_kb, load1):
+        if strict:
+            from backend.emby_server import cms_self_frame
+
+            ok = cms_self_frame.host_ok_strict(mem_kb, load1)
+            if ok:
+                if cms_self_frame.health_ttfb() > 1.0:
+                    bad_ttfb += 1
+                    ok = bad_ttfb < 2
+                else:
+                    bad_ttfb = 0
+        else:
+            ok = cms_graft.host_ok(mem_kb, load1)
+        if ok:
             return True
         logger.warning("circuit breaker: mem_available=%dKB load1=%.1f, "
                        "waiting", mem_kb, load1)
         time.sleep(sleep_sec)
     return False
+
+
+def _host_ok_now(strict=False):
+    """派活前的即时熔断判定（口径与 _host_wait 同源）。"""
+    from backend.emby_server import cms_graft
+
+    mem_kb, load1 = cms_graft.host_state()
+    if strict:
+        from backend.emby_server import cms_self_frame
+
+        return cms_self_frame.host_ok_strict(mem_kb, load1)
+    return cms_graft.host_ok(mem_kb, load1)
 
 
 def main(argv=None) -> int:
@@ -106,7 +140,12 @@ def main(argv=None) -> int:
                         help="摸底判定底稿 jsonl（现成数据复用、不重测）")
     parser.add_argument("--dry-select", action="store_true",
                         help="只建队列+兄弟预检统计，不真修")
+    parser.add_argument("--method", choices=("graft", "self"),
+                        default="graft",
+                        help="修复线：graft=借帧（默认，存量行为）；"
+                             "self=自帧处理（cms_self_frame）")
     args = parser.parse_args(argv)
+    strict_breaker = args.method == "self"
 
     logging.basicConfig(
         level=logging.INFO,
@@ -180,6 +219,57 @@ def main(argv=None) -> int:
 
         session = _SL()
         try:
+            if strict_breaker:
+                # 自帧线：不需要干净兄弟，进管线即计数（入选与否
+                # 由检测+三门控在管线内 fail-closed 判定）。
+                from backend.emby_server import cms_self_frame
+
+                home_involved = bool(
+                    cand["source_id"] in home_ids
+                    or cand["source_id"]
+                    in cms_graft.HOME_FALLBACK_SOURCE_IDS)
+                with counters_lock:
+                    if counters["entered"] >= limit:
+                        return None
+                    counters["entered"] += 1
+                wall0 = time.time()
+                cpu0 = time.process_time()
+                try:
+                    def _run_self():
+                        return cms_self_frame.process_candidate_self(
+                            session, cand,
+                            mouth=cms_graft.mouth_sec(session),
+                            stats=stats,
+                            verdict=verdicts.get(cand["mapping_id"]))
+
+                    if home_involved:
+                        with home_sem:
+                            result = _run_self()
+                    else:
+                        result = _run_self()
+                except Exception as exc:  # noqa: BLE001 — 单条崩不许丢账
+                    logger.warning("candidate crashed mapping=%s: %s",
+                                   cand["mapping_id"], exc,
+                                   exc_info=True)
+                    try:
+                        cms_graft.upsert_repair(
+                            session, mapping_id=cand["mapping_id"],
+                            local_item_id=cand["local_item_id"],
+                            source_id=cand["source_id"], status="failed",
+                            reason="process_error", method="self",
+                            detail=f"{type(exc).__name__}: {exc}"[:200])
+                        session.commit()
+                    except Exception:  # noqa: BLE001
+                        session.rollback()
+                    result = {"mapping_id": cand["mapping_id"],
+                              "status": "failed",
+                              "reason": "process_error",
+                              "heat": cand.get("heat")}
+                _record(result, time.time() - wall0,
+                        time.process_time() - cpu0)
+                with counters_lock:
+                    counters["processed"] += 1
+                return result
             sibling = cms_graft.find_sibling(
                 session, cand["mapping_id"], cms_graft.CLEAN_SOURCE_IDS)
             entered = sibling is not None
@@ -259,9 +349,8 @@ def main(argv=None) -> int:
                     break
             finally:
                 probe.close()
-            mem_kb, load1 = cms_graft.host_state()
-            if not cms_graft.host_ok(mem_kb, load1):
-                if not _host_wait():
+            if not _host_ok_now(strict=strict_breaker):
+                if not _host_wait(strict=strict_breaker):
                     stop_reason["value"] = "circuit_breaker"
                     break
             fut = pool.submit(_process, todo[idx])
@@ -279,7 +368,8 @@ def main(argv=None) -> int:
                 logger.warning("candidate crashed: %s", fut.exception())
 
     # 汇总（逐条结果文件即明细，这里只出分布与账）
-    summary = {"run_dir": str(run_dir), "stop_reason": stop_reason["value"]
+    summary = {"run_dir": str(run_dir), "method": args.method,
+               "stop_reason": stop_reason["value"]
                or "queue_exhausted", "counters": dict(counters),
                "route_stats": stats.snapshot(),
                "finished_at": datetime.now().isoformat(timespec="seconds")}

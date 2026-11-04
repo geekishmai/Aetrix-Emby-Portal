@@ -1133,6 +1133,12 @@ def _auto_migrate():
         ("emby_libraries", [
             ("cms_area_bucket", "VARCHAR(20)", "NULL"),
         ]),
+        # 自帧修复线（2026-11-04）：修复方法列。老库补列后为
+        # 'graft'（存量行全是借帧修复），与升级前行为一致（见
+        # emby_server.cms_self_frame）。
+        ("cms_graft_repairs", [
+            ("method", "VARCHAR(20)", "'graft'"),
+        ]),
     ]
 
     _newly_added_columns: list[tuple[str, str]] = []

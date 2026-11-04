@@ -173,7 +173,7 @@ def segment_abspath(mapping_id, seg_file: str) -> Path:
 def upsert_repair(db, *, mapping_id, local_item_id, source_id, status,
                   reason="", segments=None, band_end_sec=None,
                   band_family="", strip=None, sibling_mapping_id=None,
-                  mouth=None, detail=""):
+                  mouth=None, detail="", method="", worker_version=None):
     """修复记账 upsert（一映射一行，后写覆盖状态类字段）。
 
     只更新调用方显式给出的字段：segments=None 表示不动段表，
@@ -209,7 +209,9 @@ def upsert_repair(db, *, mapping_id, local_item_id, source_id, status,
         row.mouth_sec = float(mouth)
     if detail:
         row.detail = detail[:500]
-    row.worker_version = WORKER_VERSION
+    if method:
+        row.method = method
+    row.worker_version = worker_version or WORKER_VERSION
     db.flush()
     return row
 
