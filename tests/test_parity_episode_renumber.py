@@ -30,12 +30,10 @@ from sqlalchemy.orm import sessionmaker as _sm
 # 本文件在 import 期换掉进程级 engine/SessionLocal/DATABASE_URL，且从不还原：
 # 排在本文件之后的测试文件会跑在 parity 的临时库上（r50 的 PlaybackInfo
 # 因此在新库上撞 403 门禁）。先存原值，模块跑完由文末 fixture 原样还原。
-_orig_engine = _dbmod.engine
-# T1：还原必须恢复**代理内部指向**（configure(None) 会回退 _real_session_local
-# ——进程首库、通常 0 表——把本文件之后的所有全局 SessionLocal 文件打成
-# no such table；与 12 文件"保存代理再传回"同一事故族的另一形态）。
-_orig_factory = snapshot_session_factory()
-_orig_db_url = os.environ.get("DATABASE_URL")
+# T1-v2：还原用 conftest 全量快照（factory/engine/DATABASE_URL 三件一起）。
+# configure(None) 会回退 _real_session_local——进程首库、通常 0 表——把本文件
+# 之后的所有全局 SessionLocal 文件打成 no such table（QA BO-3：三件必须一起还原）。
+_orig_snapshot = snapshot_session_factory()
 
 _dbmod.engine = _ce(os.environ["DATABASE_URL"])
 _dbmod.configure_session_local(_sm(bind=_dbmod.engine))
@@ -78,12 +76,7 @@ def _restore_db_engine():
     # 还原：否则排在本文件之后的测试文件会跑在 parity 的临时库上（成组才红，
     # 单文件全过，极难定位；此前 #1287/#1289 同类泄漏即此形态）。
     yield
-    _dbmod.engine = _orig_engine
-    restore_session_factory(_orig_factory)
-    if _orig_db_url is None:
-        os.environ.pop("DATABASE_URL", None)
-    else:
-        os.environ["DATABASE_URL"] = _orig_db_url
+    restore_session_factory(_orig_snapshot)
 
 
 def _series(db, tmdb_id="239577", name="囚犯医生"):

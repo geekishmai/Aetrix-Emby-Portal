@@ -7,6 +7,7 @@ enrich_worker 里有几个模块级 60s TTL 缓存（豆瓣/altmeta/夜间配置
 
 每个测试前把这些缓存清零，保证用例之间相互独立。只影响测试，生产代码无改动。
 """
+import os
 import pytest
 
 
@@ -93,98 +94,114 @@ def _isolate_transfer_stage_dir(tmp_path, monkeypatch):
 
 
 def snapshot_session_factory():
-    """保存 SessionLocal 代理当前指向的 factory（不是代理本身）。"""
+    """保存 SessionLocal 代理当前指向的 factory（不是代理本身）。
+
+    T1-v2（QA BO-3 P2）：victim 型文件把 ``_dbmod.engine`` /
+    ``os.environ["DATABASE_URL"]`` / factory 三件一起改；只快照 factory 会让
+    engine 与 env 残留指向他人 tmp 库。返回**完整快照 dict**，恢复时三件
+    一起还原。兼容：也接受旧式 factory 对象（restore 时只还原 factory 位）。
+    """
     from backend import database as _dbmod
-    return _dbmod.SessionLocal._factory
+    factory = _dbmod.SessionLocal._factory
+    kw = getattr(factory, "kw", None) or {}
+    return {
+        "factory": factory,
+        # factory 自己的 bind 原值（sessionmaker 形态才有）：restore 时重指，
+        # 修"同对象 bind 漂移"且不误伤"快照后未漂移"的 factory。
+        "factory_bind": kw.get("bind"),
+        "engine": _dbmod.engine,
+        "database_url": os.environ.get("DATABASE_URL"),
+    }
 
 
 def restore_session_factory(token) -> None:
-    """恢复 :func:`snapshot_session_factory` 保存的指向。"""
+    """恢复 :func:`snapshot_session_factory` 保存的指向。
+
+    ``token`` 为 dict（新式全量快照）→ factory/engine/DATABASE_URL 三件一起
+    还原；为 factory 对象（旧式调用）→ 只还原 factory 位。
+    """
     from backend import database as _dbmod
-    _dbmod.SessionLocal._factory = token
+    if isinstance(token, dict):
+        factory = token["factory"]
+        # BO 同对象漂移：sessionmaker 对象没换、kw['bind'] 被外部改写 →
+        # 恢复时把 bind 重指回快照 engine（对象身份与指向都还原）。
+        if factory is not None and token.get("factory_bind") is not None:
+            try:
+                factory.kw["bind"] = token["factory_bind"]
+            except (AttributeError, KeyError, TypeError):
+                pass  # 非 sessionmaker 形态的 factory：跳过 bind 对齐
+        _dbmod.SessionLocal._factory = factory
+        _dbmod.engine = token["engine"]
+        if token["database_url"] is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = token["database_url"]
+    else:
+        _dbmod.SessionLocal._factory = token
 
 
-# ==================== 全局 factory 守卫（T1 第二层） ====================
+# ==================== 用例级 factory 起点守卫（T1-v2，替代启发式守卫） ====================
 #
-# 「换绑全局 factory 再恢复」在**多文件全量**下对不齐：victim 文件（模块级
-# init_db() + 全局 SessionLocal）的表建在它 **collection 时刻**的全局 engine；
-# 运行期任何 restorer 把 factory 恢复到"自己快照的值"，都可能指向更早的库
-# → 之后所有 victim ``no such table``。手写快照永远追不齐建表进度。
+# QA BO-1/BO-2 实证废弃 c078855c 的「最后已知良好」启发式：
+# - BO-1：factory 对象没换、但它指向的库被 DROP 表 → ``before is after`` 为真
+#   → 守卫跳过，对同对象缺表全盲；
+# - BO-2：起点 A、错误结束于空库 C、最后 good=B → 纠偏到 B = **跨库误读**
+#   （表名存在 ≠ 目标库正确）。
 #
-# 解法：进程级守卫——任何测试改绑全局 factory 前，先确保"当前指向"是可用的
-# 全局库（有核心表）；用例结束时若发现全局 factory 指向**缺核心表的库**，
-# 把它指回**最后已知良好**的全局库（最后一个成功 init_db 的全局 engine）。
-# 只兜底、不掩盖：restorer 自己的语义不变，守卫只在"恢复结果缺表"时纠偏。
+# v2 不变量（Codex 定）：每个用例使用**自己的确定起点**，结束恢复它；
+# 绝不因某库「有两张核心表」就自动选成目标。缺表事件**显式报数**进
+# ``_FACTORY_GAPS``（测试/报告可断言），不静默换库。
 
-_LAST_GOOD_GLOBAL_FACTORY = None
+
+#: 用例起点快照（setup 时刻 factory/engine/env）
+_CASE_ORIGIN: dict = {}
+#: 缺表事件计数（显式暴露，不静默）：teardown 时起点 factory 的库缺核心表
+_FACTORY_GAPS: list = []
+#: 「核心表」判定集：这两张表在**任何** init_db 过的全局库里都存在；
+#: victim 型文件的库由各自 init_db 建，必然包含。临时库（restorer 目标）
+#: 通常 0 表 → 稳定区分「全局库」与「临时库」。
 _GUARD_CORE_TABLES = ("web_users", "system_configs")
-_GUARD_INSTALLED = False
-_GUARD_LOCK = None
 
 
-def _factory_engine(factory):
-    """从 factory 里取 bind 的 engine（sessionmaker.kw['bind'] 或 .kw['bind']）。"""
-    kw = getattr(factory, "kw", None) or {}
-    return kw.get("bind")
+def factory_gap_count() -> int:
+    """守卫观测到的「起点库缺核心表」事件数（测试/诊断用）。"""
+    return len(_FACTORY_GAPS)
 
 
-def _engine_has_core_tables(engine) -> bool:
+def _case_origin_engine_has_core_tables(engine) -> bool:
     if engine is None:
         return False
     try:
         from sqlalchemy import inspect
         names = set(inspect(engine).get_table_names())
-    except Exception:  # noqa: BLE001 — 探测失败按缺表处理
+    except Exception:  # noqa: BLE001 — 探测失败按缺表处理（保守报 GAP）
         return False
     return all(t in names for t in _GUARD_CORE_TABLES)
 
 
-def install_session_factory_guard():
-    """装全局 factory 守卫（幂等；conftest autouse fixture 调用）。
-
-    hook 两处：configure_session_local 与直接对 ``_factory`` 赋值都拦不住——
-    这里用**用例级对账**：每个用例 setup 时记当前 factory；teardown 时若
-    当前 factory 缺核心表且存在"最后已知良好"factory，则纠偏回去。
-    """
-    global _GUARD_INSTALLED, _GUARD_LOCK
-    import threading
-    if _GUARD_INSTALLED:
-        return
-    _GUARD_LOCK = threading.Lock()
-
-    from backend import database as _dbmod
-
-    def _note_good(factory):
-        global _LAST_GOOD_GLOBAL_FACTORY
-        with _GUARD_LOCK:
-            if factory is not None and factory is not _dbmod._real_session_local \
-                    and _engine_has_core_tables(_factory_engine(factory)):
-                _LAST_GOOD_GLOBAL_FACTORY = factory
-
-    def _patched_init_db():
-        _dbmod._orig_init_db()
-        _note_good(_dbmod.SessionLocal._factory)
-
-    if not getattr(_dbmod, "_orig_init_db", None):
-        _dbmod._orig_init_db = _dbmod.init_db
-        _dbmod.init_db = _patched_init_db
-    _GUARD_INSTALLED = True
-
-
 @pytest.fixture(autouse=True)
-def _guard_global_session_factory():
-    """每用例对账：teardown 时全局 factory 缺核心表 → 纠偏回最后已知良好值。"""
-    install_session_factory_guard()
+def _case_origin_factory_guard():
+    """用例级起点守卫（v2）：
+
+    setup：快照当前 factory/engine/env 为「本用例起点」；
+    teardown：
+    - 把全局三件**恢复回本用例起点**（不管用例有没有动过——恢复是幂等的，
+      且消除「restorer 恢复到错误值」的残留）；
+    - 若**起点本身**就缺核心表（BO-1 的同对象缺表形态），记入
+      ``_FACTORY_GAPS`` 显式报数，不静默换库、不回退 any-good。
+    """
     from backend import database as _dbmod
-    before = _dbmod.SessionLocal._factory
+    origin = snapshot_session_factory()
+    _CASE_ORIGIN.clear()
+    _CASE_ORIGIN.update(origin)
     yield
-    after = _dbmod.SessionLocal._factory
-    if after is before:
-        return
-    # factory 被本用例动过：若动完之后缺核心表，纠偏
-    global _LAST_GOOD_GLOBAL_FACTORY
-    with _GUARD_LOCK:
-        good = _LAST_GOOD_GLOBAL_FACTORY
-    if good is not None and after is not good \
-            and not _engine_has_core_tables(_factory_engine(after)):
-        _dbmod.SessionLocal._factory = good
+    restore_session_factory(origin)
+    _record_gap_if_origin_missing(origin["engine"])
+
+
+def _record_gap_if_origin_missing(engine) -> None:
+    """BO-1 对账口：起点 engine 缺核心表 → GAP 显式 +1（不静默换库）。"""
+    if not _case_origin_engine_has_core_tables(engine):
+        _FACTORY_GAPS.append({
+            "engine_url": str(getattr(engine, "url", None)),
+        })

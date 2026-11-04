@@ -52,14 +52,17 @@ def test_accidental_proxy_restore_falls_back_to_real():
 
 
 def test_snapshot_restore_round_trip():
-    """conftest helper：换绑→快照→再换绑→恢复，factory 精确回到快照值。"""
+    """conftest helper：换绑→快照→再换绑→恢复，factory 精确回到快照值。
+
+    v2：快照是 dict（factory/engine/DATABASE_URL 三件），restore 三件一起还原
+    （QA BO-3：只还原 factory 会把 engine/env 残留在他人 tmp 库）。"""
     base_token = snapshot_session_factory()
     engine_a, factory_a = _tmp_factory()
     engine_b, factory_b = _tmp_factory()
     try:
         dbmod.SessionLocal._factory = factory_a
         token_a = snapshot_session_factory()
-        assert token_a is factory_a
+        assert token_a["factory"] is factory_a
 
         dbmod.SessionLocal._factory = factory_b
         assert dbmod.SessionLocal._factory is factory_b
@@ -71,6 +74,37 @@ def test_snapshot_restore_round_trip():
         restore_session_factory(base_token)
         engine_a.dispose()
         engine_b.dispose()
+
+
+def test_snapshot_restore_covers_engine_and_env():
+    """BO-3 P2：victim 三件一起改（factory/engine/DATABASE_URL），快照/恢复
+    必须三件一起还原，engine 与 env 不得残留他人 tmp 库。"""
+    base_token = snapshot_session_factory()
+    engine_a, factory_a = _tmp_factory()
+    try:
+        dbmod.SessionLocal._factory = factory_a
+        dbmod.engine = engine_a
+        os.environ["DATABASE_URL"] = "sqlite:///T1-v2-probe-a.db"
+        token = snapshot_session_factory()
+
+        # 模拟另一个文件的三件改绑
+        engine_b, factory_b = _tmp_factory()
+        try:
+            dbmod.SessionLocal._factory = factory_b
+            dbmod.engine = engine_b
+            os.environ["DATABASE_URL"] = "sqlite:///T1-v2-probe-b.db"
+            assert dbmod.engine is engine_b
+
+            restore_session_factory(token)
+            assert dbmod.SessionLocal._factory is factory_a
+            assert dbmod.engine is engine_a, "engine 必须随快照一起还原"
+            assert os.environ["DATABASE_URL"] == "sqlite:///T1-v2-probe-a.db", \
+                "DATABASE_URL 必须随快照一起还原"
+        finally:
+            engine_b.dispose()
+    finally:
+        restore_session_factory(base_token)
+        engine_a.dispose()
 
 
 def test_restore_returns_to_global_session():
