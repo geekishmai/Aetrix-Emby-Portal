@@ -363,6 +363,9 @@ WELFARE_CONFIG_KEYS = {
     "bot_rain_interval_sec": "3",
     "bot_rain_daily_win_cap": "200",
     "bot_rain_schedule": "",
+    # 每周游戏榜（默认关）：周日 21:00 和观影周榜同时发主群海报。
+    # 只统计净赢，不发能量、不加称号。
+    "bot_gamerank_enabled": "false",
     # 注册后 TG 绑定引导页总开关
     # 求片 v2：总开关 / 附议 / 附议者入库通知（默认全开）
     # C2 积分转账：总开关默认开启，手续费/限额可配（0=不收/不限）

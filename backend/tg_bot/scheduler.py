@@ -101,6 +101,11 @@ def start_rankpush_scheduler() -> bool:
             actions = rankpush.run_scheduled_tick(db)
             if actions:
                 logger.info("rankpush 调度动作：%s", actions)
+            from backend.tg_bot import gamerank
+
+            game_actions = gamerank.run_scheduled_tick(db)
+            if game_actions:
+                logger.info("gamerank 调度动作：%s", game_actions)
         except Exception:
             logger.exception("rankpush 调度 tick 失败")
             try:
