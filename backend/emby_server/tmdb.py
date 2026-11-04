@@ -136,12 +136,16 @@ def language_fallback_chain(db=None) -> list[str]:
 # 所以**不要**把速率拉满；429 时下面的自适应会自己降下来。
 #
 # 环境变量（沿用旧名字，但语义已从「条目/秒」改为「请求/秒」）：
-#   ENRICH_TMDB_PER_SEC      请求上限（默认 2）
+#   ENRICH_TMDB_PER_SEC      请求上限（默认 4，按 key 独立成桶）
 #   ENRICH_TMDB_MIN_PER_SEC  429 自适应下降的下限（默认 1）
 #   TMDB_TIMEOUT             单次请求超时秒数（默认 10；带 append_to_response 的详情请求
 #                            在跨境链路上 8 秒偏紧）
 #   TMDB_NET_RETRIES         读超时/连接错误的重试次数（默认 2）
-TMDB_PER_SEC = env_float("ENRICH_TMDB_PER_SEC", 2.0, 1.0)
+# 默认 4 req/s/key：TMDB 2019-12 起没有 40/10s 硬限，非正式上限约 50 req/s/IP。
+# 按 key 独立成桶后，4 把 key × 4 = 16 req/s，就是下面 _KeyedLimiter 写明的
+# 安全区（再往上才接近 50/IP）。旧默认 2 在「未命中要 6~9 次搜索」时把
+# 吞吐卡在每分钟几十条。429 仍会把该 key 的桶乘性降到 MIN_PER_SEC。
+TMDB_PER_SEC = env_float("ENRICH_TMDB_PER_SEC", 4.0, 1.0)
 TMDB_MIN_PER_SEC = env_float("ENRICH_TMDB_MIN_PER_SEC", 1.0, 1.0)
 TMDB_TIMEOUT = env_float("TMDB_TIMEOUT", 10.0, 5.0)
 TMDB_NET_RETRIES = env_int("TMDB_NET_RETRIES", 2, 0, 4)
@@ -231,9 +235,10 @@ class _KeyedLimiter(_RequestLimiter):
 
     背景：4 把 key 共用 1 个 4 req/s 桶时，加 key 只分摊配额、不提速
     （生产实证：245 次调用四 key 均匀 61/61/61/62，吞吐 6→5 条/分未涨）。
-    每把 key 一个独立桶后，有效上限 = key 数 × TMDB_PER_SEC
-    （4 把 ≈ 16 req/s，远低于 TMDB 非正式上限 ~50 req/s/IP，安全区内，
-    不要再往上加）。
+    每把 key 一个独立桶后，有效上限 = key 数 × TMDB_PER_SEC。
+    默认每 key 4 req/s 时，4 把 key ≈ 16 req/s，低于非正式上限 ~50 req/s/IP。
+    不要再把默认值往上抬（key 数一多就会顶到 IP 限额）；要更快用环境变量
+    单独调，429 自适应会把被限的那把 key 降下来。
 
     429 语义：哪把 key 被 429，就只压低那把 key 的桶（note_throttled 走
     limiter_for(key)），不连累其他 key——配额本来就是按 key 算的。

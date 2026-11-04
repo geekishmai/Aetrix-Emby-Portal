@@ -15,7 +15,7 @@ worker 刷几千条探测失败、扫描队列堆积，前台「服务健康」�
 
 - ``ok``      一切正常
 - ``warn``   降级但还能用：磁盘吃紧、Redis 不可用（有本地回退）、探测/刮削失败率高
-- ``down``    核心不可用：数据库不通、补全队列堆积到处理不过来
+- ``down``    核心不可用：数据库不通、补全积压且最近窗口内没有任何完成
 
 **刻意不纳入**：单条条目的刮削失败不算 warn（TMDB 对中文剧集收录差是常态，
 几百条 failed 属于正常业务状态，报出来只会天天误警）。只统计**失败率**与
@@ -28,8 +28,10 @@ import threading
 import time
 from typing import Any
 
+from datetime import datetime, timedelta
+
 from sqlalchemy import func
-from backend.emby_server.env_util import env_float
+from backend.emby_server.env_util import env_float, env_int
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,11 @@ from backend.error_lexicon import translate as _translate_error
 WARN_DISK_FREE_PERCENT = 15.0
 WARN_PROBE_FAIL_RATIO = 0.30        # 探测失败率超过 30%
 WARN_ENRICH_FAIL_RATIO = 0.30       # 刮削失败率超过 30%
-DOWN_QUEUE_BACKLOG = 500            # 补全队列堆积超过这个数就是处理不过来了
+# 积压达到此数才进入堆积判定。有进展（见下）只降级，不报 down。
+DOWN_QUEUE_BACKLOG = env_int("HEALTH_ENRICH_BACKLOG_FLOOR", 500, 1)
+# 最近这么多分钟内有完成条目 = 有进展。分离部署时看库里的 last_scraped_at，
+# 不看本进程计数器（API 进程的计数器恒为 0）。
+HEALTH_ENRICH_PROGRESS_MIN = env_int("HEALTH_ENRICH_PROGRESS_MIN", 10, 1)
 
 
 def _count(db, item_type: str, status: str) -> int:
@@ -68,6 +74,26 @@ def _enrich_count(db, status: str) -> int:
             em.MediaItem.merged_into_id.is_(None)).scalar() or 0
     except Exception as exc:  # noqa: BLE001
         logger.debug("统计 enrich %s 失败: %s", status, exc)
+        return 0
+
+
+def _enrich_recent_completed(db, minutes: int) -> int:
+    """最近 ``minutes`` 分钟内完成的可见条目数（done 且 last_scraped_at 落在窗口内）。
+
+    与 ``_enrich_count`` 同口径：排除合并副本。软删由 ORM 钩子排除。
+    查询失败返回 0，调用方再看进程内计数器，不让健康检查自己抛。
+    """
+    from backend.emby_server import models as em
+    cutoff = datetime.now() - timedelta(minutes=max(1, int(minutes)))
+    try:
+        return db.query(func.count(em.MediaItem.id)).filter(
+            em.MediaItem.enrich_status == "done",
+            em.MediaItem.merged_into_id.is_(None),
+            em.MediaItem.last_scraped_at.isnot(None),
+            em.MediaItem.last_scraped_at >= cutoff,
+        ).scalar() or 0
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("统计近窗口完成数失败: %s", exc)
         return 0
 
 
@@ -257,23 +283,12 @@ def collect(db) -> dict:
                            "检查 TMDB Key 与网络"})
         backlog = epending + eenriching
         metrics["enrich_backlog"] = backlog
-        if backlog >= DOWN_QUEUE_BACKLOG:
-            _bump("down")
-            issues.append({
-                "level": "down", "key": "enrich_backlog",
-                "message": f"补全队列堆积 {backlog} 条，已经处理不过来"})
-
-        # v2.54.x: 把「堆积」「卡住」「刚启动」拆成三态 —— 处置完全不同：
-        # 堆积（enrich_backlog/down）：队列太长，等它跑（或加线程）；
-        # 卡住（enrich_stalled/down）：有动作但无成功，去查 worker 是不是死锁/崩溃；
-        # 刚启动（enrich_no_progress/warn）：本进程还没完成过任何条目，
-        #   不能把「刚起来」当故障报 down，先观察。
-        #
-        # 判定依据是 scan_progress.throughput()（进程内计数器）：
-        # 测试用 scan_progress.reset() 做隔离，确定性高；
-        # 生产上 /api/health 若与 worker 同进程部署时最准。
-        # 注意分离部署时 API 进程计数器恒为 0，此时只会报 warn（诚实），
-        # 不会误报 down —— 「没在跑」本来就该是 warn 级别。
+        # 堆积不再单独构成 down：存量大库会让 pending 长期超过阈值，
+        # 只要最近窗口里有完成条目，服务就在消化，报 degraded（warn）并带数字。
+        # 没进展且积压超过阈值才 down。进展有两个来源，任一即可：
+        #   - 库：last_scraped_at 落在 HEALTH_ENRICH_PROGRESS_MIN 内（跨进程）
+        #   - 本进程：scan_progress.throughput() 的 done_per_min > 0
+        # 分离部署时 API 进程计数器恒为 0，库内时间戳仍能证明 worker 在跑。
         try:
             from backend.emby_server import enrich_worker
             from backend.emby_server import scan_progress as progress
@@ -282,12 +297,36 @@ def collect(db) -> dict:
             done_per_min = tp["done_per_min"]
             metrics["enrich_done_per_min"] = done_per_min
             metrics["enrich_idle_sec"] = tp["idle_sec"]
+            window_min = HEALTH_ENRICH_PROGRESS_MIN
+            recent_done = _enrich_recent_completed(db, window_min)
+            metrics["enrich_recent_done"] = recent_done
+            metrics["enrich_progress_window_min"] = window_min
             try:
                 metrics["enrich_stages"] = progress.stage_stats()
             except Exception:  # noqa: BLE001 — 进程内统计拿不到就留空，不影响判定
                 metrics["enrich_stages"] = {}
-            # worker 被显式关掉（ENRICH_WORKER=0）时不报「没在跑」：那就是设计如此
-            if (enrich_worker.ENRICH_ENABLED
+            progressing = recent_done > 0 or done_per_min > 0
+            if backlog >= DOWN_QUEUE_BACKLOG:
+                if progressing:
+                    _bump("warn")
+                    issues.append({
+                        "level": "warn", "key": "enrich_backlog",
+                        "message": (
+                            f"补全队列堆积 {backlog} 条，近 {window_min} 分钟"
+                            f"完成 {recent_done} 条"
+                            f"（本进程 {done_per_min:.1f} 条/分），仍在消化")})
+                else:
+                    _bump("down")
+                    issues.append({
+                        "level": "down", "key": "enrich_backlog",
+                        "message": (
+                            f"补全队列堆积 {backlog} 条，近 {window_min} 分钟"
+                            f"没有完成条目，已经处理不过来")})
+            # 没进展时保留「卡住 / 刚启动」细分，方便和「根本没跑」区分。
+            # 有进展就不再报这两条，避免和上面的 warn 重复。
+            # worker 被显式关掉（ENRICH_WORKER=0）时不报「没在跑」：那就是设计如此。
+            if (not progressing
+                    and enrich_worker.ENRICH_ENABLED
                     and backlog >= DOWN_QUEUE_BACKLOG
                     and done_per_min <= 0):
                 total = tp["done_total"] + tp["retry_total"] + tp["failed_total"]
