@@ -683,9 +683,111 @@ def _collect_observability() -> dict:
 
 
 #: 公网反代（Caddy）给每个外部请求强制写上的标记头：客户端自带的同名头会被覆盖，
-#: 所以带它的请求一定来自公网。这类请求只回状态，内部指标（115 调用计数、版本、
-#: 体检明细）只给本机监控（127.0.0.1 直连，不经 Caddy）。空字符串 = 不区分。
+#: 所以带它的请求一定来自公网。空字符串 = 不区分。
 _HEALTH_PUBLIC_HEADER = os.getenv("HEALTH_PUBLIC_HEADER", "X-Aetrix-Public").strip()
+
+#: 完整健康内容的来源网段白名单（QA BC P1）：默认覆盖回环 + RFC1918 +
+#: 链路本地 + IPv6 ULA/链路本地（compose 默认网段 172.16/12 在内）。
+#: ``HEALTH_FULL_CIDRS`` 可覆盖（逗号分隔 CIDR）；部署的 docker 网关若不在
+#: 默认网段，把网关网段加进去即可，无需改代码。
+_DEFAULT_HEALTH_FULL_CIDRS = (
+    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
+)
+
+
+def _health_full_nets():
+    """解析白名单网段（env 覆盖默认；非法项忽略并告警）。"""
+    import ipaddress
+    raw = (os.getenv("HEALTH_FULL_CIDRS", "") or "").strip()
+    parts = raw.split(",") if raw else list(_DEFAULT_HEALTH_FULL_CIDRS)
+    nets = []
+    for part in parts:
+        text = (part or "").strip()
+        if not text:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(text, strict=False))
+        except ValueError:
+            logger.warning("HEALTH_FULL_CIDRS 忽略非法网段：%r", text)
+    return nets
+
+
+def _health_ip_trusted(host: str) -> bool:
+    """回环或白名单网段（默认含 compose 网段、IPv6 ULA/链路本地）。"""
+    if not host:
+        return False
+    if host.lower() in ("localhost",):
+        return True
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(ip in net for net in _health_full_nets() if net.version == ip.version)
+
+
+def _health_proxy_marked(request: Request) -> bool:
+    """请求是否带了反代标记（公网路径）。
+
+    - ``X-Aetrix-Public``：Caddy 对外部请求强制写入；客户端伪造同名头只会
+      让自己也拿到最小内容（fail-closed，不构成提权）。
+    - ``X-Forwarded-For``：任何代理链都会带；内网直连不应出现。
+    """
+    try:
+        if _HEALTH_PUBLIC_HEADER and (request.headers.get(_HEALTH_PUBLIC_HEADER) or "").strip():
+            return True
+        if (request.headers.get("x-forwarded-for") or "").strip():
+            return True
+    except Exception:  # noqa: BLE001 — 假请求缺字段按公网处理
+        return True
+    return False
+
+
+def _health_admin_ok(request: Request) -> bool:
+    """是否带有效管理员凭据（管理后台系统健康页经公网访问也要完整内容）。"""
+    auth = (request.headers.get("authorization") or "").strip()
+    if not auth.lower().startswith("bearer "):
+        return False
+    token = auth[7:].strip()
+    if not token:
+        return False
+    try:
+        from backend.security import decode_token, enforce_token_freshness
+        from backend.models import WebUser
+        payload = decode_token(token, expected_type="access")
+        if not payload:
+            return False
+        db = SessionLocal()
+        try:
+            uid = int(payload.get("sub"))
+            user = db.query(WebUser).filter(WebUser.id == uid).first()
+            if user is None or not getattr(user, "is_active", True):
+                return False
+            enforce_token_freshness(db, payload, user)
+            return bool(getattr(user, "is_staff", False))
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 — 鉴权解析失败一律按公网最小返回
+        return False
+
+
+def _health_full_access(request: Request) -> bool:
+    """完整健康内容的唯一判定（两端点同口径）。
+
+    顺序：有效管理员凭据 → 完整（公网管理后台需要）；否则带反代标记
+    （X-Aetrix-Public / X-Forwarded-For）→ 最小；否则白名单内网直连 →
+    完整；其余最小（fail-closed）。
+    """
+    if _health_admin_ok(request):
+        return True
+    if _health_proxy_marked(request):
+        return False
+    try:
+        host = (getattr(getattr(request, "client", None), "host", "") or "").strip()
+    except Exception:  # noqa: BLE001 — 假请求缺字段按非可信处理
+        host = ""
+    return _health_ip_trusted(host)
 
 
 @app.get("/api/health")
@@ -701,8 +803,10 @@ async def health_check(request: Request):
     """
     from starlette.concurrency import run_in_threadpool
     health = await run_in_threadpool(_collect_health)
-    if _HEALTH_PUBLIC_HEADER and request.headers.get(_HEALTH_PUBLIC_HEADER) == "1":
-        return {"status": health["status"], "timestamp": datetime.now().isoformat()}
+    # fail-closed：公网/反代路径只回状态与健康级别；内部指标（115 调用计数、
+    # 版本、体检明细、runtime/redis）只给白名单内网直连与管理员。
+    if not await run_in_threadpool(_health_full_access, request):
+        return {"status": health["status"], "health_level": health["level"]}
     # 可观测底座（v2.56.0）：开关默认关；开时返回各子系统健康探针 + API 指标
     try:
         from backend.emby_server import observability as _obs
@@ -764,8 +868,8 @@ def _runtime_report() -> dict:
 
 
 @app.get("/api/health/detailed")
-def detailed_health_check():
-    """详细健康检查"""
+def detailed_health_check(request: Request):
+    """详细健康检查（公网/反代路径同样只回状态与健康级别）"""
     health_status = {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -817,6 +921,10 @@ def detailed_health_check():
     if order.get(agg["status"], 0) > order.get(health_status["status"], 0):
         health_status["status"] = agg["status"]
 
+    # 同口径覆盖兄弟端点：detailed 也含内部指标（服务明细、online_users、metrics）。
+    if not _health_full_access(request):
+        return {"status": health_status["status"],
+                "health_level": health_status.get("level", "ok")}
     return health_status
 
 
