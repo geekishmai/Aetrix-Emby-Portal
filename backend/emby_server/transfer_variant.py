@@ -4308,7 +4308,7 @@ def _recent_job_exists(db, item_id, owner_scope="source", owner_ref=None,
 def _latest_job(db, item_id, owner_scope, owner_ref=None, statuses=None):
     """该条目该归属桶内最新的一行任务（或 None）。
 
-    statuses 为 None 时不限状态（首播门禁/next302/商店等调用方
+    statuses 为 None 时不限状态（首播门禁/商店等调用方
     依赖看到 failed 行做各自的分流，保持原行为）；传状态元组时
     只认这些有效状态——PA-039：找源确认的 already_queued 回落
     分支传 ("pending", "running", "done")，绝不指着死单。

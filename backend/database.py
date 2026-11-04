@@ -1210,6 +1210,63 @@ def _auto_migrate():
     _resurrect_soft_deleted(existing_tables)
     _ensure_default_realm()
     _hash_plain_emby_tokens(existing_tables)
+    _drop_retired_tmdb_dataset_tables()
+
+
+# PR #1414（b328185e）只新增了这两张本地 TMDB 数据集表，之后没有再改列。
+# 想看商店 / 求片复用 movie_requests，不在此列。
+_RETIRED_TMDB_DATASET_TABLES = (
+    "tmdb_dataset_items",
+    "tmdb_dataset_meta",
+)
+# 模型上显式声明的索引。DROP TABLE 会带走表上的索引；
+# 这里再按名 IF EXISTS 清一次，防止半截清理后留下同名索引。
+_RETIRED_TMDB_DATASET_INDEXES = (
+    "uq_tmdb_dataset_tmdb_type",
+    "idx_tmdb_dataset_title",
+    "idx_tmdb_dataset_type_year",
+    "ix_tmdb_dataset_items_tmdb_id",
+)
+# PostgreSQL 上整型主键的属主序列。DROP TABLE 会带走 OWNED BY 的序列；
+# 再按名 IF EXISTS 清一次，覆盖序列已脱离表的情况。SQLite 没有该语句。
+_RETIRED_TMDB_DATASET_SEQUENCES = (
+    "tmdb_dataset_items_id_seq",
+    "tmdb_dataset_meta_id_seq",
+)
+
+
+def _drop_retired_tmdb_dataset_tables(bind=None) -> None:
+    """删除 PR #1414 的本地 TMDB 数据集表（幂等，SQLite / PostgreSQL / MySQL）。
+
+    模型已从 ``emby_server.models`` 移除，``create_all`` 不会再建。
+    老库在启动迁移里删掉 ``tmdb_dataset_items`` 与 ``tmdb_dataset_meta``。
+    只删这两张，不碰 ``movie_requests`` 及其他表。
+
+    ``DROP TABLE IF EXISTS`` 连带去掉表上的索引和属主序列。SQLite 与
+    PostgreSQL 再 ``DROP INDEX IF EXISTS``；PostgreSQL 再
+    ``DROP SEQUENCE IF EXISTS``。MySQL 的索引随表删除，不另写
+    ``DROP INDEX``（该方言要求带表名）。表本来就不存在时同样执行，
+    重复跑不报错。
+    """
+    from sqlalchemy import inspect, text
+
+    target = engine if bind is None else bind
+    dialect = target.dialect.name
+    present = [name for name in _RETIRED_TMDB_DATASET_TABLES
+               if name in set(inspect(target).get_table_names())]
+    with target.begin() as conn:
+        for name in _RETIRED_TMDB_DATASET_TABLES:
+            conn.execute(text(f"DROP TABLE IF EXISTS {name}"))
+        # MySQL 的 DROP INDEX 必须带表名，且表删掉后索引已经没了。
+        # SQLite / PostgreSQL 用 IF EXISTS 再清一次可能残留的同名索引。
+        if dialect in ("sqlite", "postgresql"):
+            for name in _RETIRED_TMDB_DATASET_INDEXES:
+                conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
+        if dialect == "postgresql":
+            for name in _RETIRED_TMDB_DATASET_SEQUENCES:
+                conn.execute(text(f"DROP SEQUENCE IF EXISTS {name}"))
+    if present:
+        logger.info("  🔧 已删除退役表: %s", ", ".join(present))
 
 
 def _migrate_upstream_source_checks(existing_tables: set) -> None:

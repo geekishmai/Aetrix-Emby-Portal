@@ -78,7 +78,7 @@ def test_failed_only_latest_valid_is_none_but_default_unchanged():
     db = _tiny_db()
     _add(db, 42, "failed")
     assert tv._latest_job(db, 42, "user", "7", statuses=VALID) is None
-    # 默认不限状态：首播门禁/next302/商店仍能看到 failed 行做各自的分流
+    # 默认不限状态：首播门禁/商店仍能看到 failed 行做各自的分流
     assert tv._latest_job(db, 42, "user", "7").status == "failed"
 
 
