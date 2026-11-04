@@ -255,6 +255,29 @@ class SidecarMountProvider(MountProvider):
         headers["Cookie"] = self._cookie()
         return PlayTarget("url", url, headers)
 
+    # ---- 解析缓存脱凭据（与 Pan115Mount 同口径，2026-11-04 修复） ----
+    def cacheable_play_target(self, target: PlayTarget) -> Optional[PlayTarget]:
+        """进解析缓存前剥掉凭据头；不可安全缓存时返回 None。
+
+        背景（生产实证 2026-11-04）：本类原先没覆写本口，基类保守口径
+        「headers 含 Cookie 就不缓存」→ sidecar 路径的解析结果**永远进不了**
+        ``mounts._RESOLVE_CACHE``；播放器每个 Range 请求都重走
+        sidecar 换链 → 每次向 115 取一次直链（download_url 6→22 / 7 个
+        区间请求），既慢（play_target 700–5000ms）又在放大保号风险。
+        这里与 Pan115Mount 一致：Cookie 剥掉再存，命中后由宿主现取现贴；
+        ``X-Pickcode`` 保留作失效钥匙（中继 403 时连带清本缓存）。
+        """
+        headers = dict(target.headers or {})
+        headers.pop("Cookie", None)
+        headers.pop("Authorization", None)
+        return PlayTarget(target.kind, target.value, headers)
+
+    def reattach_play_target(self, stored: PlayTarget) -> PlayTarget:
+        """缓存命中后现挂本挂载当前 Cookie（缓存里的对象不外借）。"""
+        headers = dict(stored.headers or {})
+        headers["Cookie"] = self._cookie()
+        return PlayTarget(stored.kind, stored.value, headers)
+
     def open_range(self, rel: str, start: int, end: Optional[int] = None) -> bytes:
         # FMBY #23 门控：manifest 未含 open_range 时本提供者的
         # can_random_read 为 False（见 manifest_to_capabilities），
