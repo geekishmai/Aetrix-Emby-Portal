@@ -836,6 +836,8 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
 
         rain_ui.after_claim(db, getattr(packet, "rain_id", None))
         return
+    if chat.get("type") in ("group", "supergroup"):
+        _send_claim_feedback(db, chat_id, user, amount, packet.remaining_count)
     logger.info(
         "tg redpacket claimed: packet=%s user=%s amount=%s remaining=%s",
         packet_id,

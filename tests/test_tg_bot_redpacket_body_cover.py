@@ -262,6 +262,26 @@ def test_claim_on_legacy_text_body_edits_text(db, wires):
     assert "剩余 4 个" in wires["text_edits"][0][2]
 
 
+def test_group_claim_sends_claim_feedback_with_autodelete(db, wires):
+    """回归（#1831 误删）：群聊普通红包领取成功必须发群内领取反馈。
+
+    反馈走 sender.send_message_ex、文案走 claim_feedback_text 口径，
+    并按 bot_msg_delay 调度自毁；#1831 少刷屏改造误删了这条调用后，
+    领取只剩个人弹窗、群里静默无反馈。
+    """
+    packet, claimer = _setup_claimable(db)
+    callbacks.handle_callback(db, _claim_cq(packet.id, 700202, photo=True))
+    assert db.query(models.RedPacketClaim).count() == 1
+    claim = db.query(models.RedPacketClaim).first()
+    assert len(wires["ex"]) == 1
+    chat_id, text, _markup = wires["ex"][0]
+    assert chat_id == GROUP_CHAT
+    assert text == redpacket_common.claim_feedback_text(
+        "c_claim", int(claim.amount), 4)
+    # 反馈消息（fake_ex 返回 id 9001）已按默认 30 秒延时调度自毁
+    assert (GROUP_CHAT, 9001, 30) in wires["scheduled"]
+
+
 def test_claim_photo_caption_edit_failure_falls_back_to_text(db, wires, monkeypatch):
     packet, claimer = _setup_claimable(db)
     monkeypatch.setattr(sender, "edit_message_caption",
