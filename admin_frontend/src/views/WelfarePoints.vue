@@ -8,7 +8,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeftRight, Bot, CloudRain, Coins, Dices, Gift, KeyRound, RefreshCw, Save, Send, Settings2, Swords, Wallet } from 'lucide-vue-next'
+import { ArrowLeftRight, Bot, CloudRain, Coins, Dices, Gift, KeyRound, RefreshCw, Save, Send, Settings2, Swords, Trophy, Wallet } from 'lucide-vue-next'
 import { EmptyState, PageHeader, SectionCard } from '@/components/ui'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 import { fetchWelfareConfig, saveWelfareConfig } from '@/api/welfare'
@@ -91,6 +91,11 @@ const rainFields = [
   { key: 'bot_rain_daily_win_cap', label: '每日赢取上限', hint: '每人每天从红包雨拿到的能量上限，默认 200，填 0 不限', suffix: '能量/天' },
   { key: 'bot_rain_schedule', label: '每天开场', hint: '上海时间，如 21:05。留空则不定时，只能由管理员在群里发 /rain', suffix: '' },
 ]
+
+const gameRankEnabled = computed({
+  get: () => (form.value['bot_gamerank_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['bot_gamerank_enabled'] = v ? 'true' : 'false' },
+})
 
 const slotsFields = [
   { key: 'slots_bet_tiers', label: '注额档位', hint: '逗号分隔的能量数，默认 5,10,20', suffix: '能量' },
@@ -416,6 +421,19 @@ onMounted(load)
             <el-input v-model="form[f.key]" class="field-input" />
             <span class="field-suffix">{{ f.suffix }}</span>
             <span class="field-hint">{{ f.hint }}</span>
+          </el-form-item>
+        </el-form>
+      </SectionCard>
+
+      <SectionCard
+        title="每周游戏榜"
+        :icon="Trophy"
+        description="周日晚上和观影周榜同一时间，把本周游戏净赢前十发到主群"
+      >
+        <el-form :label-position="labelPosition" label-width="120px" class="config-form">
+          <el-form-item label="总开关">
+            <el-switch v-model="gameRankEnabled" />
+            <span class="field-hint">统计红包、老虎机、骰子对决、红包雨的净赢能量。只发海报，不发能量，也不加称号（现有称号不能设一周有效期）。默认关。主群用「启用群 ID」里的第一个群</span>
           </el-form-item>
         </el-form>
       </SectionCard>

@@ -238,6 +238,8 @@ WELFARE_CONFIG_SCHEMA: dict[str, tuple] = {
     "bot_rain_interval_sec": ("int", 0, 3600),
     "bot_rain_daily_win_cap": ("int", 0, _BIG),
     "bot_rain_schedule": ("str",),
+    # 每周游戏榜总开关，默认关。word 风格，读侧只认 "true"。
+    "bot_gamerank_enabled": ("bool",),
     # 2026-10-17 第 4 批 4-4：白名单里但此前无 spec 的群 id 列表键（端点现行按原文
     # 存字符串）。注册为 ("str",) 与今天逐字一致：原文直存，None/空串→删行
     # （读侧 _get_str_config 缺行/空行都回默认 ""，等价）。
