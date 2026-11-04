@@ -23,6 +23,7 @@ os.close(_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmppath}"
 
 from backend import database as _dbmod
+from conftest import restore_session_factory, snapshot_session_factory
 from sqlalchemy import create_engine as _ce
 from sqlalchemy.orm import sessionmaker as _sm
 
@@ -30,6 +31,10 @@ from sqlalchemy.orm import sessionmaker as _sm
 # 排在本文件之后的测试文件会跑在 parity 的临时库上（r50 的 PlaybackInfo
 # 因此在新库上撞 403 门禁）。先存原值，模块跑完由文末 fixture 原样还原。
 _orig_engine = _dbmod.engine
+# T1：还原必须恢复**代理内部指向**（configure(None) 会回退 _real_session_local
+# ——进程首库、通常 0 表——把本文件之后的所有全局 SessionLocal 文件打成
+# no such table；与 12 文件"保存代理再传回"同一事故族的另一形态）。
+_orig_factory = snapshot_session_factory()
 _orig_db_url = os.environ.get("DATABASE_URL")
 
 _dbmod.engine = _ce(os.environ["DATABASE_URL"])
@@ -74,7 +79,7 @@ def _restore_db_engine():
     # 单文件全过，极难定位；此前 #1287/#1289 同类泄漏即此形态）。
     yield
     _dbmod.engine = _orig_engine
-    _dbmod.configure_session_local(None)
+    restore_session_factory(_orig_factory)
     if _orig_db_url is None:
         os.environ.pop("DATABASE_URL", None)
     else:
