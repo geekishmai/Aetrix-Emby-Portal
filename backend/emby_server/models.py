@@ -1291,6 +1291,10 @@ class CmsGraftRepair(Base):
     # queued / running / verified / repaired（修完未验，不下发）/
     # skipped（不入选，reason 记因）/ failed / verify_failed
     status = Column(String(30), nullable=False, default="queued")
+    # 修复方法（2026-11-04 自帧线并列）：graft（借帧，存量默认）/
+    # self（自帧处理中）/ self_fill（均匀背景填充）/ self_blur
+    # （复杂画面强模糊）。下发只认 status=verified、与 method 无关。
+    method = Column(String(20), nullable=False, default="graft")
     # no_clean_sibling / band_too_long / watermark_or_overlong /
     # align_failed / gate_failed / codec_unsupported / fetch_failed /
     # sibling_dirty / probe_failed（短码，detail 里可带补充）
