@@ -181,7 +181,7 @@ def test_button_round_card_shows_count_and_join_button(db):
     assert "2 人" in card["text"]
     markup = str(card["reply_markup"])
     assert "lottery_join:" in markup
-    assert "2 人已参与" in markup  # 按钮带人数
+    assert "参加" in markup  # 按钮是动作；人数在正文里
 
 
 # ---------- 3. 公告卡人数编辑（节流） ----------

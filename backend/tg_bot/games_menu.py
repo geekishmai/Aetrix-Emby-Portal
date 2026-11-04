@@ -37,6 +37,9 @@ def enabled_entries(db) -> list[dict]:
 
 
 def any_enabled(db) -> bool:
+    # 没传数据库时按默认开关：老虎机、抽奖、红包是开的，入口要在。
+    if db is None:
+        return True
     return bool(enabled_entries(db))
 
 
