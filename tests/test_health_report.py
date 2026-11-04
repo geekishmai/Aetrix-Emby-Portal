@@ -28,6 +28,7 @@ from backend.database import init_db  # noqa: E402
 
 init_db()
 
+from conftest import restore_session_factory, snapshot_session_factory
 import pytest  # noqa: E402
 
 from backend import health_report  # noqa: E402
@@ -39,7 +40,7 @@ def db():
     """自建库 + 用完还原，不依赖测试执行顺序"""
     from backend import models as base_models
     engine = _ce("sqlite:///:memory:")
-    original = _dbmod.SessionLocal
+    original = snapshot_session_factory()
     _dbmod.configure_session_local(_sm(bind=engine))
     base_models.Base.metadata.create_all(bind=engine)
     em.Base.metadata.create_all(bind=engine)
@@ -48,7 +49,7 @@ def db():
         yield session
     finally:
         session.close()
-        _dbmod.configure_session_local(original)
+        restore_session_factory(original)
         engine.dispose()
 
 

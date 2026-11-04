@@ -21,6 +21,7 @@ _fd, _tmp = tempfile.mkstemp(suffix=".db")
 os.close(_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}"
 
+from conftest import restore_session_factory, snapshot_session_factory  # noqa: E402
 from backend import database as _dbmod  # noqa: E402
 from sqlalchemy import create_engine as _ce  # noqa: E402
 from sqlalchemy.orm import sessionmaker as _sm  # noqa: E402
@@ -93,7 +94,7 @@ def test_incomplete_scrape_recorded_as_none():
     # 也不能依赖 _real_session_local（其它测试文件可能改过它）——
     # 两者都会让本用例与测试文件的执行顺序耦合。
     own_engine = _ce("sqlite:///:memory:")
-    original = _dbmod.SessionLocal
+    original = snapshot_session_factory()
     _dbmod.configure_session_local(_sm(bind=own_engine))
     em.Base.metadata.create_all(bind=own_engine)
     db = _dbmod.SessionLocal()
@@ -115,5 +116,5 @@ def test_incomplete_scrape_recorded_as_none():
         assert it.metadata_source == "none", it.metadata_source
     finally:
         db.close()
-        _dbmod.configure_session_local(original)
+        restore_session_factory(original)
         own_engine.dispose()

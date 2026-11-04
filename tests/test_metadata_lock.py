@@ -28,6 +28,7 @@ init_db()
 
 import uuid  # noqa: E402
 
+from conftest import restore_session_factory, snapshot_session_factory
 import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
@@ -41,7 +42,7 @@ def own_db():
     """本用例自建内存库（create_all 会带上 metadata_locked 列），用完还原"""
     from backend import models as base_models
     engine = _ce("sqlite:///:memory:")
-    original = _dbmod.SessionLocal
+    original = snapshot_session_factory()
     _dbmod.configure_session_local(_sm(bind=engine))
     base_models.Base.metadata.create_all(bind=engine)
     em.Base.metadata.create_all(bind=engine)
@@ -53,7 +54,7 @@ def own_db():
         yield db, lib
     finally:
         db.close()
-        _dbmod.configure_session_local(original)
+        restore_session_factory(original)
         engine.dispose()
 
 
