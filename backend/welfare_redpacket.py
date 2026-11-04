@@ -98,6 +98,7 @@ def send_packet(
         sent = db.query(models.RedPacket).filter(
             models.RedPacket.sender_id == sender.id,
             models.RedPacket.created_at >= week_ago,
+            models.RedPacket.funding != "system",
         ).count()
         if sent >= send_limit:
             raise ValueError(f"7天内最多发送 {send_limit} 次红包")
@@ -179,9 +180,11 @@ def claim_packet(db: Session, user: models.WebUser, packet_id: int) -> dict:
     if not getattr(user, "is_active", True):
         raise ValueError("账号已被停用，无法抢红包")
 
-    # 领取频率检查（管理员发出的红包不计入）
+    system_funded = getattr(packet, "funding", "user") == "system"
+
+    # 领取频率检查（管理员发出的红包不计入；系统红包雨另有每日上限）
     recv_limit = _get_int_config(db, "redpacket_recv_limit_7d", 10)
-    if recv_limit > 0:
+    if recv_limit > 0 and not system_funded:
         # 锁领取方用户行后再计数（锁序：红包行 → 用户行），并发抢多个红包不能绕过上限
         economy.lock_user_row(db, user.id)
         week_ago = datetime.now() - timedelta(days=7)
@@ -204,10 +207,16 @@ def claim_packet(db: Session, user: models.WebUser, packet_id: int) -> dict:
         raise ValueError("红包已过期")
     if packet.remaining_count <= 0:
         raise ValueError("红包已被抢完")
+    if system_funded and packet.rain_id:
+        # 份数按时间放开。检查放在红包行锁里，绕过按钮直接打回调也拦得住。
+        from backend import rain as rain_svc
 
-    # 发送者不能抢自己发的红包（PA-017）：行锁内、过期/抢完校验后拦截，
-    # 否则“分给别人”的语义会被自抢大头掏空。
-    if user.id == packet.sender_id:
+        rain_svc.assert_share_available(db, packet, now=now)
+        rain_svc.assert_claimer(db, user)
+
+    # 发送者不能抢自己发的红包（PA-017）。系统红包雨挂在管理员名下
+    # 只是为了满足外键，钱不是他出的，允许他抢。
+    if user.id == packet.sender_id and not system_funded:
         raise ValueError("不能抢自己发的红包")
 
     # 防重复领取
@@ -225,12 +234,20 @@ def claim_packet(db: Session, user: models.WebUser, packet_id: int) -> dict:
         max_amount = packet.remaining_amount - packet.remaining_count + 1
         amount = random.randint(1, max_amount)
 
+    if system_funded:
+        from backend import rain as rain_svc
+
+        economy.lock_user_row(db, user.id)
+        rain_svc.assert_within_daily_cap(db, user.id, amount)
+
     # 更新红包
     packet.remaining_amount -= amount
     packet.remaining_count -= 1
 
-    # 给领取者加分
-    economy._add_points(db, user, amount, "redpacket", f"抢到红包 {amount} 能量")
+    # 给领取者加分。红包雨单独记账，方便周榜和用户红包分开统计。
+    ledger_type = "redpacket_rain" if system_funded else "redpacket"
+    ledger_text = f"抢到红包雨 {amount} 能量" if system_funded else f"抢到红包 {amount} 能量"
+    economy._add_points(db, user, amount, ledger_type, ledger_text)
 
     # 写领取记录（唯一约束 (packet_id, user_id) 兜底并发重复）
     db.add(models.RedPacketClaim(
@@ -274,6 +291,13 @@ def refund_expired(db: Session) -> int:
         # 锁后二次校验：锁等待期间可能已被抢完
         if packet.remaining_count <= 0 or packet.remaining_amount <= 0:
             db.rollback()
+            continue
+        # 系统出资的红包过期直接作废，不能退给挂名的管理员。
+        if getattr(packet, "funding", "user") == "system":
+            packet.remaining_amount = 0
+            packet.remaining_count = 0
+            db.commit()
+            count += 1
             continue
         sender = db.query(models.WebUser).filter(
             models.WebUser.id == packet.sender_id).first()

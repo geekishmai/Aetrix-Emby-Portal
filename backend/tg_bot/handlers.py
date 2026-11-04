@@ -857,6 +857,92 @@ def handle_redpacket(db, tg_user: dict, chat_id: int, args: str,
     return (text, redpacket_common.claim_markup(packet.id))
 
 
+def handle_duel(db, tg_user: dict, chat_id: int, args: str,
+                update_id: int | None = None, in_group: bool = False):
+    """群内骰子对决。成功时返回面板标记，由 router 发送并记下消息编号。
+
+    重放且面板已经发出时返回静默标记，避免再刷一条。
+    """
+    from backend import duel as duel_svc
+    from backend.tg_bot import duel_ui
+
+    if not in_group:
+        return duel_svc.reason_message("not_group")
+    if not duel_svc.is_enabled(db):
+        return duel_svc.reason_message("disabled")
+    user = resolve(db, int(tg_user.get("id") or 0))
+    if user is None:
+        return _bind_guide_text()
+    parts = args.split()
+    if len(parts) != 1:
+        return layout.card(
+            layout.title("骰子对决"),
+            [
+                layout.row("🎲", "使用方法", f"{_cmd('/duel')} <i>能量</i>"),
+                layout.row("💡", "对决示例", f"{_cmd('/duel 50')}（押 50，30 秒内等一人应战）"),
+            ],
+        )
+    try:
+        stake = int(parts[0])
+    except ValueError:
+        return duel_svc.reason_message("bad_amount")
+    idempotency_key = f"tg:{update_id}" if update_id is not None else None
+    try:
+        result = duel_svc.create_duel(
+            db, user, int(chat_id), stake, idempotency_key=idempotency_key)
+    except Exception:
+        logger.exception("duel create failed")
+        return "骰子对决发起失败，请稍后再试"
+    if not result.get("ok"):
+        extra = {k: v for k, v in result.items() if k not in ("ok", "reason")}
+        return duel_svc.reason_message(result.get("reason") or "", **extra)
+    row = result["duel"]
+    if result.get("duplicate") and (row.message_id or row.status != "open"):
+        return (duel_ui.SILENT,)
+    initiator_name = html.escape(str(user.username or "玩家"))
+    return (
+        duel_ui.PANEL,
+        duel_ui.open_text(row, initiator_name),
+        duel_ui.open_markup(row.id, row.stake),
+        row.id,
+    )
+
+
+def handle_rain(db, tg_user: dict, chat_id: int, args: str,
+                update_id: int | None = None, in_group: bool = False):
+    """管理员在群里立刻下一场红包雨。金额和份数读后台配置。"""
+    from backend import rain as rain_svc
+    from backend.tg_bot import rain_ui
+
+    if not in_group:
+        return rain_svc.reason_message("not_group")
+    if not rain_svc.is_enabled(db):
+        return rain_svc.reason_message("disabled")
+    user = resolve(db, int(tg_user.get("id") or 0))
+    if user is None:
+        return _bind_guide_text()
+    if not bool(getattr(user, "is_staff", False)):
+        return rain_svc.reason_message("not_staff")
+    idempotency_key = f"tg:{update_id}" if update_id is not None else None
+    try:
+        result = rain_svc.start_rain(
+            db, user, int(chat_id), idempotency_key=idempotency_key)
+    except Exception:
+        logger.exception("rain start failed")
+        return "红包雨发起失败，请稍后再试"
+    if not result.get("ok"):
+        return rain_svc.reason_message(result.get("reason") or "")
+    rain = result["rain"]
+    if result.get("duplicate") and (rain.message_id or rain.status != "running"):
+        return (rain_ui.SILENT,)
+    return (
+        rain_ui.PANEL,
+        rain_ui.open_text(db, rain),
+        rain_ui.open_markup(rain.id),
+        rain.id,
+    )
+
+
 def slots_markup(db) -> dict:
     """老虎机注额按钮（一行三档）＋回主界面行；陪玩与结果卡共用。"""
     from backend import slots as slots_svc

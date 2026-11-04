@@ -279,15 +279,15 @@ def test_menu_callback_account_renders_card_in_group(db, monkeypatch):
 # ---------- 注册表覆盖路由命令 ----------
 
 def test_bot_commands_cover_router_commands():
-    # 菜单简化后口径（2026-11-02）：BOT_COMMANDS 只收 27 条主命令；
-    # router 命令集另含 4 条手输别名（account/renew/chatpoints/level），
-    # 别名不在菜单但 router 照常认；菜单 ⊂ 路由命令全集。
+    # 菜单简化后口径（2026-11-02）：BOT_COMMANDS 当时 27 条主命令；
+    # 其后加了 /duel、/rain，现为 29 条。router 另含 4 条手输别名
+    # （account/renew/chatpoints/level），别名不在菜单但 router 照常认。
     registered = {cmd for cmd, _desc in poller.BOT_COMMANDS}
-    assert len(registered) == 27
+    assert len(registered) == 29
     router_commands = {
         "start", "help", "bind", "checkin", "points", "account", "me",
         "request", "myrequests", "rank", "requestboard", "rules",
-        "login", "renew", "redeem", "lottery", "redpacket", "slots",
+        "login", "renew", "redeem", "lottery", "redpacket", "slots", "duel", "rain",
         "bindings", "transfers", "whyplay", "wants", "chatpoints",
         "level", "report", "propose", "launch", "govlog",
         "reconcile", "rankpush", "whois",

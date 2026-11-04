@@ -211,7 +211,7 @@ _IDENTITY_COMMANDS = {
     "/start", "/bind", "/checkin", "/points", "/chatpoints",
     "/account", "/me", "/request", "/myrequests", "/login", "/renew",
     "/govlog", "/level", "/report", "/propose", "/launch",
-    "/redeem", "/lottery", "/redpacket",
+    "/redeem", "/lottery", "/redpacket", "/duel", "/rain",
     "/bindings", "/transfers", "/whyplay", "/wants", "/reconcile",
     "/rankpush",
     "/whois",
@@ -499,6 +499,8 @@ def dispatch(db, update: dict) -> None:
             "/lottery": handlers.handle_lottery,
             "/redpacket": handlers.handle_redpacket,
             "/slots": handlers.handle_slots_command,
+            "/duel": handlers.handle_duel,
+            "/rain": handlers.handle_rain,
             "/bindings": handlers.handle_bindings,
             "/transfers": handlers.handle_transfers,
             "/whyplay": handlers.handle_whyplay,
@@ -594,6 +596,14 @@ def dispatch(db, update: dict) -> None:
             # 开关口径与 menu:slots 面板入口一致），单独分发
             reply = handlers.handle_slots_command(
                 db, tg_user, chat_id, args, in_group=in_group)
+        elif cmd == "/duel":
+            reply = handlers.handle_duel(
+                db, tg_user, chat_id, args,
+                update_id=update.get("update_id"), in_group=in_group)
+        elif cmd == "/rain":
+            reply = handlers.handle_rain(
+                db, tg_user, chat_id, args,
+                update_id=update.get("update_id"), in_group=in_group)
         elif cmd == "/whois":
             # /whois 需要群聊上下文（私聊全卡 vs 群内管理员精简卡）
             # 与被回复消息的发送者（群内回复定位），通用签名拿不到，
@@ -605,7 +615,33 @@ def dispatch(db, update: dict) -> None:
                 in_group=in_group, reply_from=reply_from)
         else:
             reply = fn(db, tg_user, chat_id, args)
-        # handler 可返回 str 或 (text, reply_markup) 元组（一键登录按钮）
+        # handler 可返回 str 或 (text, reply_markup) 元组（一键登录按钮）。
+        # 对决面板由这里发出并记下消息编号，进行中不自毁；静默标记表示
+        # 重放已经发过，不再刷第二条。
+        if isinstance(reply, tuple) and reply and reply[0] == "__silent__":
+            return
+        if isinstance(reply, tuple) and reply and reply[0] == "__duel_panel__":
+            from backend import duel as duel_svc
+
+            _marker, text, markup, duel_id = reply
+            ok, err, mid = sender.send_message_ex(db, chat_id, text, markup)
+            if ok and mid:
+                duel_svc.attach_panel(db, duel_id, mid)
+            else:
+                logger.warning("duel panel send failed chat=%s err=%s", chat_id, err)
+                duel_svc.fail_unannounced(db, duel_id)
+            return
+        if isinstance(reply, tuple) and reply and reply[0] == "__rain_panel__":
+            from backend import rain as rain_svc
+
+            _marker, text, markup, rain_id = reply
+            ok, err, mid = sender.send_message_ex(db, chat_id, text, markup)
+            if ok and mid:
+                rain_svc.attach_panel(db, rain_id, mid)
+            else:
+                logger.warning("rain panel send failed chat=%s err=%s", chat_id, err)
+                rain_svc.fail_unannounced(db, rain_id)
+            return
         if isinstance(reply, tuple):
             text, markup = reply
         else:

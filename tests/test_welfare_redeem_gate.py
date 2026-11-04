@@ -115,7 +115,7 @@ def test_classification_spot_checks():
     for t in ("transfer_in", "invitee", "rebate", "promotion", "redpacket",
               "code_redeem", "exchange", "recharge", "refund", "admin_grant",
               "lottery_win", "slots_win", "slots_jackpot", "slots_refund",
-              "rankpush"):
+              "rankpush", "duel_win", "duel_refund", "redpacket_rain"):
         assert earned[t] is False, t
     # 未知来源 fail-closed：不算自挣
     assert points_mod.is_self_earned_point_type("some_future_type") is False
