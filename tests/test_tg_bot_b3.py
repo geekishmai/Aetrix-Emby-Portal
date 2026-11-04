@@ -104,13 +104,13 @@ def test_redpacket_success(db):
     assert len(keyboard) == 1
     assert len(keyboard[0]) == 1
     button = keyboard[0][0]
-    assert button["text"] == "🧧 抢红包"
+    assert button["text"] == "抢"
     callback_data = button["callback_data"]
     assert callback_data.startswith("redpacket_claim:")
     packet_id = int(callback_data.split(":", 1)[1])
     assert reply_markup == {
         "inline_keyboard": [
-            [{"text": "🧧 抢红包", "callback_data": f"redpacket_claim:{packet_id}"}]
+            [{"text": "抢", "callback_data": f"redpacket_claim:{packet_id}"}]
         ]
     }
     db.refresh(user)
@@ -220,7 +220,7 @@ def test_callback_claim_success(db, monkeypatch):
     assert "抢到" in answers[0][1]
     assert len(edits) == 1
     assert "剩余 4 个" in edits[0][2]
-    assert edits[0][3]["inline_keyboard"][0][0]["text"] == "🧧 抢红包"
+    assert edits[0][3]["inline_keyboard"][0][0]["text"] == "抢"
     assert db.query(models.RedPacketClaim).count() == 1
     db.refresh(claimer)
     assert claimer.points > 0
@@ -325,7 +325,7 @@ def test_router_dispatch_redpacket(db, monkeypatch):
     router.dispatch(db, update)
     assert len(sent) == 1
     assert "总额 100 能量" in sent[0][0]
-    assert sent[0][1]["inline_keyboard"][0][0]["text"] == "🧧 抢红包"
+    assert sent[0][1]["inline_keyboard"][0][0]["text"] == "抢"
 
 
 def test_rate_limit_redpacket():

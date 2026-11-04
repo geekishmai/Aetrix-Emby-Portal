@@ -296,6 +296,28 @@ def _render_menu(db, tg_user: dict, tg_id: int, chat_id: int, is_private: bool,
     elif action == "help":
         text = handlers.handle_help(db, tg_user, chat_id, "")
         markup = handlers.back_markup()
+    elif action == "games":
+        from backend.tg_bot import games_menu
+
+        text, markup = games_menu.render(db)
+    elif action == "duel":
+        text = layout.card(
+            layout.title("在群里发送 /duel 和押注"),
+            [
+                layout.row("🎲", "玩法说明", "两人各掷一次骰子，大的赢，平局各退"),
+                layout.row("💡", "对决示例", f"{handlers._cmd('/duel 50')}，30 秒内点应战"),
+            ],
+        )
+        markup = handlers.back_markup()
+    elif action == "rain":
+        text = layout.card(
+            layout.title("红包雨由管理员开场"),
+            [
+                layout.row("🌧", "玩法说明", "系统出钱，落下后点「抢」领一份"),
+                layout.row("👮", "谁能发起", "管理员在群里发送 /rain"),
+            ],
+        )
+        markup = handlers.back_markup()
     elif action == "redpacket":
         text = layout.card(
             layout.title("发红包"),
@@ -731,6 +753,34 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
     sender_user = db.query(models.WebUser).filter(models.WebUser.id == packet.sender_id).first()
     sender_name = html.escape(str(sender_user.username)) if sender_user and sender_user.username else "未知"
 
+    def _top_claim():
+        row = (
+            db.query(models.RedPacketClaim, models.WebUser)
+            .join(models.WebUser, models.WebUser.id == models.RedPacketClaim.user_id)
+            .filter(models.RedPacketClaim.packet_id == packet.id)
+            .order_by(models.RedPacketClaim.amount.desc(), models.RedPacketClaim.id.asc())
+            .first()
+        )
+        if row is None:
+            return None, None
+        claim, claimer = row
+        name = html.escape(str(claimer.username or "朋友"))
+        return name, int(claim.amount)
+
+    def _finish(reason: str) -> None:
+        top_name, top_amount = (None, None)
+        if reason == "empty":
+            top_name, top_amount = _top_claim()
+        _update_message(
+            redpacket_common.finished_text(
+                packet, sender_name, reason, top_name, top_amount),
+            {"inline_keyboard": []},
+        )
+        if chat.get("type") in ("group", "supergroup") and chat_id and message_id:
+            delay = ephemeral.bot_msg_delay_seconds(db)
+            if delay > 0:
+                ephemeral.schedule_delete(int(chat_id), int(message_id), delay)
+
     def _update_message(text: str, reply_markup: dict) -> None:
         if not chat_id or not message_id:
             logger.warning("tg redpacket message update skipped: chat_id=%s message_id=%s", chat_id, message_id)
@@ -752,12 +802,12 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
     now = datetime.now()
     if packet.expires_at and packet.expires_at < now:
         _answer("🧧 红包已过期")
-        _update_message(redpacket_common.finished_text(packet, sender_name, "expired"), {"inline_keyboard": []})
+        _finish("expired")
         return
 
     if packet.remaining_count <= 0:
         _answer("🧧 红包已被抢完")
-        _update_message(redpacket_common.finished_text(packet, sender_name, "empty"), {"inline_keyboard": []})
+        _finish("empty")
         return
 
     from backend import welfare_redpacket
@@ -769,9 +819,9 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
         logger.warning("tg redpacket claim rejected: packet=%s user=%s err=%s", packet_id, user.id, err)
         _answer(f"🧧 {err}")
         if "已被抢完" in err:
-            _update_message(redpacket_common.finished_text(packet, sender_name, "empty"), {"inline_keyboard": []})
+            _finish("empty")
         elif "已过期" in err:
-            _update_message(redpacket_common.finished_text(packet, sender_name, "expired"), {"inline_keyboard": []})
+            _finish("expired")
         return
     except Exception:
         logger.exception("tg redpacket claim failed: packet=%s user=%s", packet_id, user.id)
@@ -786,8 +836,6 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
 
         rain_ui.after_claim(db, getattr(packet, "rain_id", None))
         return
-    if chat.get("type") in ("group", "supergroup"):
-        _send_claim_feedback(db, chat_id, user, amount, packet.remaining_count)
     logger.info(
         "tg redpacket claimed: packet=%s user=%s amount=%s remaining=%s",
         packet_id,
@@ -795,9 +843,14 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
         amount,
         packet.remaining_count,
     )
-    if packet.remaining_count <= 0:
-        _update_message(redpacket_common.finished_text(packet, sender_name, "empty"), {"inline_keyboard": []})
+    fresh = db.query(models.RedPacket).filter(models.RedPacket.id == packet_id).first()
+    if fresh is not None and fresh.remaining_count <= 0:
+        packet.remaining_count = 0
+        _finish("empty")
     else:
+        if fresh is not None:
+            packet.remaining_count = fresh.remaining_count
+            packet.remaining_amount = fresh.remaining_amount
         _update_message(redpacket_common.packet_text(packet, sender_name), redpacket_common.claim_markup(packet_id))
 
 
@@ -852,19 +905,20 @@ def _handle_reconcile_callback(db, callback_query: dict) -> None:
                       has_photo=bool(msg.get("photo")))
 
 def _send_slots_group_result(db, chat_id, player_name: str, spin, dice_message_id) -> None:
-    """群老虎机结算后的公开播报（旁路：失败只记日志，绝不影响结算结果）。
+    """群老虎机：骰子动画按自毁时间删掉。普通输赢只弹给本人。
 
-    结果消息与本局骰子消息都按 bot_msg_autodelete_seconds（默认 30 秒）
-    自毁，与抢红包群反馈同口径；公共面板不编辑。player_name 在此转义。
+    公共面板是大家一起用的入口，收成一行会把别人的按钮拆掉，所以不改面板。
+    只有抱走头奖池时，群里再发一条一行播报，同样自毁。
     """
-    from . import handlers
-
     try:
         delay = ephemeral.bot_msg_delay_seconds(db)
         if dice_message_id and delay > 0:
             ephemeral.schedule_delete(chat_id, dice_message_id, delay)
-        text = handlers.slots_group_result_text(
-            db, spin, html.escape(str(player_name)))
+        if int(getattr(spin, "pool_payout", 0) or 0) <= 0:
+            return
+        total = int(spin.base_payout or 0) + int(spin.pool_payout or 0)
+        name = html.escape(str(player_name))
+        text = f"🎉 {name} 中了头奖，一共 +{total} 能量"
         ok, err, result_id = sender.send_message_ex(db, chat_id, text)
         if not ok:
             logger.warning(

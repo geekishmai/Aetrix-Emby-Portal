@@ -30,10 +30,10 @@ def parse_claim_data(data: str | None) -> int | None:
 
 
 def claim_markup(packet_id: int) -> dict:
-    """抢红包 inline 按钮的 reply_markup。"""
+    """抢红包 inline 按钮。按钮文字就是动作。"""
     return {
         "inline_keyboard": [
-            [{"text": "🧧 抢红包", "callback_data": f"{CALLBACK_PREFIX}{packet_id}"}]
+            [{"text": "抢", "callback_data": f"{CALLBACK_PREFIX}{packet_id}"}]
         ]
     }
 
@@ -45,8 +45,12 @@ def packet_text(packet, sender_name: str) -> str:
     值口径保留 "总额 X 能量 / 共 N 个 / 剩余 M 个"（测试与客户端展示依赖）；
     标签位已按用户 2026-10-30 要求与全站面板统一为恰好 4 个汉字。
     """
+    summary = (
+        f"点「抢」分 {packet.total_amount} 能量，"
+        f"共 {packet.total_count} 个，还剩 {packet.remaining_count} 个"
+    )
     return layout.card(
-        layout.title("幸运红包！", sender_name),
+        layout.title(summary),
         [
             layout.row("🧧", "红包主人", f"<b>{sender_name} 的幸运红包</b>"),
             layout.row("💰", "红包总额", f"<b>总额 {packet.total_amount} 能量</b> ｜ <b>共 {packet.total_count} 个</b>"),
@@ -73,26 +77,17 @@ def claim_feedback_text(claimer_name: str, amount: int, remaining_count: int) ->
     )
 
 
-def finished_text(packet, sender_name: str, reason: str) -> str:
-    """红包终态的按钮消息正文（卡片式）。
+def finished_text(packet, sender_name: str, reason: str,
+                   top_name: str | None = None, top_amount: int | None = None) -> str:
+    """红包终态：收成一行。进行中的卡片见 packet_text。
 
     reason: "empty"（已抢完）/ "expired"（已过期）。
     """
     if reason == "empty":
-        status_rows = [layout.row("🎉", "红包状态", "<b>红包已抢完</b>")]
-    else:
-        status_rows = [
-            layout.row("⌛", "红包状态", "<b>红包已过期</b>"),
-            layout.row("💸", "过期退款", "剩余能量已退回发送者"),
-        ]
-    return layout.card(
-        layout.title("红包！", sender_name),
-        [
-            layout.row("🧧", "红包主人", f"<b>{sender_name} 的红包</b>"),
-            layout.row("💰", "红包总额", f"总额 {packet.total_amount} 能量 ｜ 共 {packet.total_count} 个"),
-            *status_rows,
-        ],
-    )
+        if top_name and top_amount:
+            return f"🎉 红包已抢完：{top_name} 抢到最多 {int(top_amount)} 能量"
+        return f"🎉 {sender_name} 的红包已抢完"
+    return f"⌛ {sender_name} 的红包已过期，剩余能量已退回"
 
 
 def send_packet_message(db, chat_id: int, text: str,

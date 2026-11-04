@@ -241,19 +241,21 @@ def main_markup(db, web_user, is_private: bool) -> dict:
         if not is_private:
             # 群里未绑定：绑定/帮助之外加老虎机围观入口（公共面板
             # 人人可看；点注时未绑定按既有逻辑只回绑定引导、不扣款）。
-            return {"inline_keyboard": [
-                [{"text": "🔗 绑定账号", "callback_data": "menu:bind"}],
-                [
-                    {"text": "🎰 老虎机", "callback_data": "menu:slots"},
-                    {"text": "❓ 帮助", "callback_data": "menu:help"},
-                ],
-            ]}
+            from backend.tg_bot import games_menu
+
+            rows = [[{"text": "🔗 绑定账号", "callback_data": "menu:bind"}]]
+            second = []
+            if games_menu.any_enabled(db):
+                second.append({"text": "🎮 游戏", "callback_data": "menu:games"})
+            second.append({"text": "❓ 帮助", "callback_data": "menu:help"})
+            rows.append(second)
+            return {"inline_keyboard": rows}
         return {"inline_keyboard": [
             [{"text": "🔗 绑定账号", "callback_data": "menu:bind"}],
             [{"text": "❓ 帮助", "callback_data": "menu:help"}],
         ]}
     if not is_private:
-        return _group_menu_markup()
+        return _group_menu_markup(db)
     rows: list[list[dict]] = []
     url = login_token.build_login_url(db, web_user)
     if url:
@@ -268,27 +270,26 @@ def main_markup(db, web_user, is_private: bool) -> dict:
     return {"inline_keyboard": rows}
 
 
-def _group_menu_markup() -> dict:
-    """群聊主菜单（2026-10-30 定版）：无登录行、无私聊专属入口。
+def _group_menu_markup(db) -> dict:
+    """群聊主菜单：游戏收成一个入口，关掉的游戏不出现在里面。
 
-    老虎机进第一屏；个人查询（我的绑定/转存进度/为什么播不了/
-    我的想看）不进群菜单——点开会把点击者个人数据编辑进群里的
-    共享消息，与命令层私聊限定口径冲突，统一回私聊（callbacks
-    对这四项的群分支回「私聊使用」卡＋去私聊深链）。
+    个人查询不进群菜单。点开「游戏」才看到老虎机、抽奖、红包，
+    以及后台打开的对决、红包雨。
     """
+    from backend.tg_bot import games_menu
+
     rows: list[list[dict]] = [
         [
             {"text": "✅ 签到", "callback_data": "menu:checkin"},
             {"text": "✨ 能量", "callback_data": "menu:points"},
         ],
-        [
-            {"text": "🎰 老虎机", "callback_data": "menu:slots"},
-            {"text": "🎲 抽奖", "callback_data": "menu:lottery"},
-        ],
-        [
-            {"text": "🧧 发红包", "callback_data": "menu:redpacket"},
-            {"text": "🏆 能量榜", "callback_data": "menu:rank"},
-        ],
+    ]
+    play_row = []
+    if games_menu.any_enabled(db):
+        play_row.append({"text": "🎮 游戏", "callback_data": "menu:games"})
+    play_row.append({"text": "🏆 能量榜", "callback_data": "menu:rank"})
+    rows.append(play_row)
+    rows.extend([
         [
             {"text": "🔥 求片榜", "callback_data": "menu:requestboard"},
             {"text": "📜 群规", "callback_data": "menu:rules"},
@@ -297,7 +298,7 @@ def _group_menu_markup() -> dict:
             {"text": "👤 账号中心", "callback_data": "menu:account"},
             {"text": "❓ 帮助", "callback_data": "menu:help"},
         ],
-    ]
+    ])
     return {"inline_keyboard": rows}
 
 
@@ -757,7 +758,7 @@ def handle_lottery(db, tg_user: dict, chat_id: int, args: str, is_group: bool) -
         suffix = f"/{max_entries}" if max_entries else ""
 
         text = layout.card(
-            layout.title("群抽奖"),
+            layout.title(f"点「参加」，{draw_at_text} 开奖，已有 {entry_text}{suffix} 人"),
             [
                 layout.row("📌", "活动名称", f"<b>{title}</b>"),
                 layout.row("🎁", "活动奖品", prize),
@@ -768,7 +769,7 @@ def handle_lottery(db, tg_user: dict, chat_id: int, args: str, is_group: bool) -
         )
         reply_markup = {
             "inline_keyboard": [
-                [{"text": "🎲 参加抽奖", "callback_data": f"lottery_join:{round_id}"}]
+                [{"text": "参加", "callback_data": f"lottery_join:{round_id}"}]
             ]
         }
         return (text, reply_markup)
@@ -948,7 +949,7 @@ def slots_markup(db) -> dict:
     from backend import slots as slots_svc
 
     tier_row = [
-        {"text": f"🎰 {tier} 能量", "callback_data": f"slots_bet:{tier}"}
+        {"text": f"押 {tier}", "callback_data": f"slots_bet:{tier}"}
         for tier in slots_svc.bet_tiers(db)
     ]
     return {"inline_keyboard": [tier_row, layout.home_row()]}
@@ -966,11 +967,11 @@ def handle_slots(db, tg_user: dict, chat_id: int, args: str) -> str | tuple[str,
     pays = slots_svc.pay_table(db)
     tiers = " / ".join(str(t) for t in slots_svc.bet_tiers(db))
     text = layout.card(
-        layout.title("老虎机"),
+        layout.title(f"选一档下注（{tiers}），777 ×{pays['seven']}，另抱头奖池"),
         [
-            layout.row("🏆", "头奖池", f"<b>{slots_svc.pool_balance(db)} 能量</b>"),
+            layout.row("🏆", "当前奖池", f"<b>{slots_svc.pool_balance(db)} 能量</b>"),
             layout.row("✨", "我的能量", f"<b>{int(user.points or 0)}</b>"),
-            layout.row("🎯", "注额", f"{tiers} 能量三档，点下方按钮开摇"),
+            layout.row("🎯", "注额档位", f"{tiers} 能量，点「押 N」开摇"),
         ],
         [
             f"赔付：777 ×{pays['seven']} · BAR 三连 ×{pays['bar']} · "
@@ -995,11 +996,11 @@ def handle_slots_group(db, tg_user: dict, chat_id: int, args: str) -> str | tupl
     pays = slots_svc.pay_table(db)
     tiers = " / ".join(str(t) for t in slots_svc.bet_tiers(db))
     text = layout.card(
-        layout.title("老虎机"),
+        layout.title(f"选一档下注（{tiers}），777 ×{pays['seven']}，另抱头奖池"),
         [
-            layout.row("🏆", "头奖池", f"<b>{slots_svc.pool_balance(db)} 能量</b>"),
-            layout.row("🎯", "注额", f"{tiers} 能量三档，点下方按钮开摇"),
-            layout.row("👤", "下注", "扣点按钮的人自己的能量，中奖也归他"),
+            layout.row("🏆", "当前奖池", f"<b>{slots_svc.pool_balance(db)} 能量</b>"),
+            layout.row("🎯", "注额档位", f"{tiers} 能量，点「押 N」开摇"),
+            layout.row("👤", "下注规则", "扣点按钮的人自己的能量，中奖也归他"),
         ],
         [
             f"赔付：777 ×{pays['seven']} · BAR 三连 ×{pays['bar']} · "

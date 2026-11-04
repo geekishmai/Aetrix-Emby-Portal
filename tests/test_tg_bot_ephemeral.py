@@ -266,18 +266,10 @@ def test_claim_success_group_sends_feedback_and_schedules_delete(db, monkeypatch
 
     claim = db.query(models.RedPacketClaim).first()
     assert claim is not None
-    # toast 维持原样
+    # 个人结果只弹 toast，群里不再另发一条
     assert len(answers) == 1 and "抢到" in (answers[0][1] or "")
-    # 群里新发一条反馈：含用户名、金额、剩余数
-    assert len(sends) == 1
-    chat_id, text = sends[0]
-    assert chat_id == GROUP_CHAT_ID
-    assert "c_fb" in text
-    assert str(claim.amount) in text
-    assert "还剩" in text and "4" in text
-    # 反馈消息注册 30 秒自毁（默认延时）
-    assert schedules == [(GROUP_CHAT_ID, FEEDBACK_MESSAGE_ID, 30)]
-    # 红包消息编辑维持原样
+    assert sends == []
+    assert schedules == []
     assert len(edits) == 1 and "剩余 4 个" in edits[0][2]
 
 
@@ -321,5 +313,5 @@ def test_claim_feedback_delay_zero_no_schedule(db, monkeypatch):
     packet, _claimer = _setup_packet(db)
     cq = _claim_cq(packet.id, {"id": GROUP_CHAT_ID, "type": "supergroup"})
     callbacks.handle_callback(db, cq)
-    assert len(sends) == 1  # 反馈照发
-    assert schedules == []  # 延时 0 = 不调度自毁
+    assert sends == []  # 抢到只弹给本人
+    assert schedules == []

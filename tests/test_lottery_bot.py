@@ -128,7 +128,7 @@ def test_lottery_group_shows_active_round_with_button(db, fake_lottery):
     assert isinstance(res, tuple)
     text, markup = res
     assert "测试抽奖" in text and "月卡" in text
-    assert markup == {"inline_keyboard": [[{"text": "🎲 参加抽奖", "callback_data": "lottery_join:7"}]]}
+    assert markup == {"inline_keyboard": [[{"text": "参加", "callback_data": "lottery_join:7"}]]}
 
 
 def test_lottery_group_no_active_round(db, fake_lottery):

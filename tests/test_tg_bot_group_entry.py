@@ -73,18 +73,15 @@ def test_group_start_bound_returns_card_with_group_menu(db):
     # 正文是「私密操作入口」简短卡：不展示任何个人账号数据
     assert text == handlers.group_start_text()
     assert "能量余额" not in text and "用户编号" not in text
-    # 群菜单定版五行的 callback 序列
+    # 群菜单：游戏收成一个入口，老虎机/抽奖/红包在点开之后
     rows = markup["inline_keyboard"]
     assert [[b.get("callback_data") for b in row] for row in rows] == [
         ["menu:checkin", "menu:points"],
-        ["menu:slots", "menu:lottery"],
-        ["menu:redpacket", "menu:rank"],
+        ["menu:games", "menu:rank"],
         ["menu:requestboard", "menu:rules"],
         ["menu:account", "menu:help"],
     ]
-    # 老虎机钮文案在第一屏
-    slots_btn = rows[1][0]
-    assert "老虎机" in slots_btn["text"]
+    assert "游戏" in rows[1][0]["text"]
     # 四项个人查询与绑定钮不进群菜单
     for gone in ("menu:bindings", "menu:transfers", "menu:whyplay",
                  "menu:wants", "menu:bind"):
@@ -100,7 +97,7 @@ def test_group_start_unbound_has_slots_watch_button(db):
     datas = _callback_datas(markup)
     assert "menu:bind" in datas
     assert "menu:help" in datas
-    assert "menu:slots" in datas  # 围观入口
+    assert "menu:games" in datas  # 围观入口，点开才看到已开启的游戏
 
 
 def test_private_start_bound_unchanged(db):
@@ -124,7 +121,27 @@ def test_group_menu_main_callback_contains_slots(db):
     _user(db)
     text, markup = callbacks._render_menu(
         db, _tg(), TG, GROUP, False, "main")
-    assert "menu:slots" in _callback_datas(markup)
+    assert "menu:games" in _callback_datas(markup)
+
+
+def test_games_menu_lists_only_enabled(db):
+    from backend.tg_bot import games_menu
+
+    text, markup = games_menu.render(db)
+    datas = _callback_datas(markup)
+    assert "menu:slots" in datas
+    assert "menu:lottery" in datas
+    assert "menu:redpacket" in datas
+    assert "menu:duel" not in datas
+    assert "menu:rain" not in datas
+    assert "点一个游戏开始" in text
+    db.add(models.SystemConfig(key="bot_duel_enabled", value="true"))
+    db.add(models.SystemConfig(key="slots_enabled", value="false"))
+    db.commit()
+    text, markup = games_menu.render(db)
+    datas = _callback_datas(markup)
+    assert "menu:duel" in datas
+    assert "menu:slots" not in datas
 
 
 @pytest.mark.parametrize("action", PERSONAL_ACTIONS)
