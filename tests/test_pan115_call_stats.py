@@ -64,7 +64,7 @@ def test_errors_counted_and_reraised(fake_redis, monkeypatch):
     client = _client(monkeypatch, fail_urls=("downurl",))
     with pytest.raises(transfer115.Pan115Error):
         client._call("POST", f"{transfer115.PAN115_PROAPI_BASE}/app/chrome/downurl")
-    assert transfer115.call_stats() == {"download_url": 1, "total": 1, "errors": 1}
+    assert transfer115.call_stats() == {"download_url": 1, "total": 1, "errors": 1, "errors_download_url": 1}
 
 
 def test_redis_unavailable_does_not_break_calls(monkeypatch):

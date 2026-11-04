@@ -1353,6 +1353,8 @@ def _bump_call(kind: str, *, error: bool = False) -> None:
         pipe.hincrby(PAN115_CALL_STATS_KEY, "total", 1)
         if error:
             pipe.hincrby(PAN115_CALL_STATS_KEY, "errors", 1)
+            # 按类型拆开：列目录失败与取链失败的处置完全不同（扫库 vs 播放）
+            pipe.hincrby(PAN115_CALL_STATS_KEY, f"errors_{kind}", 1)
         pipe.execute()
 
     try:
