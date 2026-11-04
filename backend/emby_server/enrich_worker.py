@@ -3408,8 +3408,13 @@ def _claim_group_atomic(db, q, now) -> list:
         return []
     # bulk UPDATE 绕过了 identity map；逐出旧对象，保证查回的是赢到的行
     db.expire_all()
+    # 轻量化 P2：查回改主键直取。enrich_claim_token 无索引，旧写法每次
+    # 约 1 秒全表级扫描（26.1h 窗口 73,742 次 / 71,488 秒）；赢到的行必在
+    # 本批 cand_ids 内（上面的 UPDATE 作用域就是 cand_ids），加 id IN
+    # 后走主键，查回集合定义逐字不变。
     rows_by_id = {r.id: r for r in db.query(em.MediaItem)
-                  .filter(em.MediaItem.enrich_claim_token == token).all()}
+                  .filter(em.MediaItem.id.in_(cand_ids),
+                          em.MediaItem.enrich_claim_token == token).all()}
     return [rows_by_id[i] for i in cand_ids if i in rows_by_id]
 
 
@@ -3648,26 +3653,51 @@ def _claim_batch(db, limit: int, queue: Optional[str] = None) -> list:
                 # library_id 必须显式入组（PG 要求）：组键是全局 id，
                 # 同一组恒在同一库内，(group_key, library_id) 与 group_key 等价。
                 .group_by(group_key, em.MediaItem.library_id))
-    groups = _order_with_fairness(groups_q).limit(20).all()
-
+    # 轻量化 P3：组数递增取（20 → 100 → 400），直到装满批次或组耗尽。
+    # 旧实现恒 limit(20)：电影组每组只有 1 行，批次上限 200 永远装不满
+    # （生产实测约 54 行/批），认领轮次与候选 SELECT 被成倍放大。组间
+    # 排序规则逐字不变；已试过的组跳过（被别的 worker 抢空的组仍会在
+    # 重查结果里占位）。递增到 400 后仍没装满就收批——余下的组留给
+    # 下一轮 _claim_batch，不丢任务。
     claimed: list = []
-    for gid, _latest, _lib in groups:
-        if len(claimed) >= limit:
+    tried_gids: set = set()
+    fetch_size = 20
+    while len(claimed) < limit:
+        page = _order_with_fairness(groups_q).limit(fetch_size).all()
+        fresh = [g for g in page if g[0] not in tried_gids]
+        if not fresh:
             break
-        q = (db.query(em.MediaItem)
-             .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
-                     not_episode, not_merged, not_ban_backfill, queue_pred,
-                     parent_ready, group_key == gid)
-             .order_by(
-                 # 父级（剧/电影）先于子级：父级先落 done，子集才能纯继承
-                 _case((em.MediaItem.item_type.in_(["series", "movie"]), 0), else_=1),
-                 em.MediaItem.season_number,
-                 em.MediaItem.episode_number,
-                 em.MediaItem.date_added.desc())
-             .limit(limit - len(claimed)))
-        # 原子认领：赢到的行才进 batch（并发下同一行只被一个 worker 赢走）
-        rows = _claim_group_atomic(db, q, now)
-        claimed.extend(rows)
+        for gid, _latest, _lib in fresh:
+            tried_gids.add(gid)
+            if len(claimed) >= limit:
+                break
+            q = (db.query(em.MediaItem)
+                 .filter(em.MediaItem.enrich_status == "pending", due, unlocked,
+                         not_episode, not_merged, not_ban_backfill, queue_pred,
+                         parent_ready,
+                         # 轻量化 P1：组员谓词改索引直取，与 coalesce
+                         # (series_id, id) == gid 逐行等价（等价性已由生产
+                         # 只读断言验证，2026-11-04：series/movie 行
+                         # series_id 恒为 NULL、其余行的 series_id 恒指向
+                         # series 行）。父行走 id 主键、子行走 idx_item_series，
+                         # 不再对全部 pending 做表达式过滤扫描（旧均值
+                         # 1.2~1.6 秒/组）。其余谓词逐字不变（含 #1834 的
+                         # parent_ready：父级未终态的单集仍不进批次）。
+                         _or(em.MediaItem.series_id == gid,
+                             em.MediaItem.id == gid))
+                 .order_by(
+                     # 父级（剧/电影）先于子级：父级先落 done，子集才能纯继承
+                     _case((em.MediaItem.item_type.in_(["series", "movie"]), 0), else_=1),
+                     em.MediaItem.season_number,
+                     em.MediaItem.episode_number,
+                     em.MediaItem.date_added.desc())
+                 .limit(limit - len(claimed)))
+            # 原子认领：赢到的行才进 batch（并发下同一行只被一个 worker 赢走）
+            rows = _claim_group_atomic(db, q, now)
+            claimed.extend(rows)
+        if len(page) < fetch_size or fetch_size >= 400:
+            break
+        fetch_size = min(fetch_size * 5, 400)
     if claimed:
         db.commit()
         if ENRICH_LIBRARY_FAIRNESS:
