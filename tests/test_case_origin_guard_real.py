@@ -3,16 +3,17 @@
 
 Codex 复审要求（v2 未闭环两项）：
 1. 诊断对象必须是**起点 factory 实际绑定**（``factory.kw['bind']``），
-   与 ``dbmod.engine`` 分开报告；``factory.bind=A 缺表、dbmod.engine=B 有表``
-   不得报 GAP，反向不得漏报；无可检查 bind 显式 unknown；
+   与 ``dbmod.engine`` 分开报告：``factory.bind=A 缺表、dbmod.engine=B 有表``
+   → GAP +1（bind 才是 session 真正连的库）；反向 ``bind=D 有表、engine=C 空``
+   → GAP +0（不得按 engine 误报）；无可检查 bind 显式 unknown；
    GAP 证据不含 engine URL（凭据红线）。
-2. 回归必须经真实 autouse fixture 的 setup/teardown（用 ``__wrapped__``
-   直调三件套），不能手动调 helper 代替；两方向反例（bind 与 engine 不一致）
-   都要在禁用/错接时变红。
+2. 回归必须经真实 autouse fixture 的 setup/teardown（直驱原生成器函数），
+   不能手动调 helper 代替；bind 漂移在**禁用守卫**（只 setup 不 teardown）时
+   必须保持漂移（证明绿归因于守卫）。
 
-用 requestфикстure 的 ``_case_origin_factory_guard.__wrapped__`` 直接驱动
-fixture 体（pytest fixture 包装下 ``__wrapped__`` 是原函数）——
-setup = 前半段（到 yield），teardown = yield 之后段。用显式生成器驱动。
+驱动方式：``_case_origin_factory_guard.__wrapped__`` 是未被 pytest 包装的
+原生成器函数；``send(None)`` 跑 setup 段，再次 ``send``/``close`` 跑
+teardown 段。
 """
 import os
 
@@ -86,9 +87,9 @@ def _run_guarded(body):
 
 # ---------------- 1. BO-1 两方向：bind 与 engine 不一致 ----------------
 
-def test_bo1_bind_missing_but_engine_ok_no_gap(monkeypatch):
-    """factory.bind=A 被 DROP 表、dbmod.engine=B 有表 → 不得报 GAP（旧实现会误报
-    或查错对象）；且诊断对象是 bind 不是 engine。"""
+def test_bo1_bind_missing_but_engine_ok_gaps_plus_one(monkeypatch):
+    """factory.bind=A 被 DROP 核心表、dbmod.engine=B 有表 → GAP +1（bind 才是
+    session 真正连的库；v2 按 origin['engine'] 诊断时此处漏报）。"""
     engine_a, factory_a = _full_db()
     engine_b, _ = _full_db()
     base = snapshot_session_factory()
@@ -117,8 +118,8 @@ def test_bo1_bind_missing_but_engine_ok_no_gap(monkeypatch):
 
 
 def test_bo1_bind_ok_but_engine_empty_no_false_gap(monkeypatch):
-    """factory.bind=D 有表可读、dbmod.engine=C 空库 → 不得误报 GAP
-    （旧 v2 实现按 origin['engine'] 诊断，delta=1 误报——本用例钉死修正）。"""
+    """factory.bind=D 有表可读、dbmod.engine=C 空库 → GAP +0（诊断按 bind，
+    不按 engine——v2 按 origin['engine'] 诊断时此处误报）。"""
     engine_d, factory_d = _full_db()
     engine_c = create_engine("sqlite:///:memory:")
     base = snapshot_session_factory()
@@ -156,6 +157,40 @@ def test_origin_bind_unknown_reported_not_guessed():
 
 
 # ---------------- 2. BO-2 / 漂移：走真实 guard，禁用守卫必红 ----------------
+
+def test_none_bind_snapshot_restore_round_trip():
+    """合法 None bind（sessionmaker(bind=None)）快照→漂移→真实 guard teardown
+    → 恢复成 None：合法未绑定状态必须还原，不得当成"不必恢复"。
+
+    Codex 验收探针 root-t1v2-acceptance-1105.py 的 NONE_BIND_RESTORED 断言
+    正式化（10816a2f 上实测红：token.get('factory_bind') is not None 条件
+    跳过了 None 恢复）。"""
+    base = snapshot_session_factory()
+    unbound = sessionmaker()  # bind=None（合法形态）
+    other = create_engine("sqlite:///:memory:")
+    try:
+        dbmod.SessionLocal._factory = unbound
+        dbmod.engine = None
+        token = snapshot_session_factory()
+        assert token["factory"] is unbound
+        assert token["factory_bind"] is None
+
+        # 漂移：同对象 bind 被指到别的 engine
+        def body():
+            unbound.kw["bind"] = other
+
+        _run_guarded(body)
+
+        assert dbmod.SessionLocal._factory is unbound
+        assert unbound.kw["bind"] is None, (
+            "合法 None bind 必须恢复成 None（不是保持漂移、也不是换成别的库）")
+        # 恢复后可正常出 session（unknown 诊断口径：bind=None → unknown 显式）
+        s = dbmod.SessionLocal()
+        s.close()
+    finally:
+        restore_session_factory(base)
+        other.dispose()
+
 
 def test_bo2_real_guard_restores_origin_after_empty_end(full_db=None):
     """A→错误空 C：真实 guard teardown 恢复 A（哨兵数据是 A 的）；

@@ -124,8 +124,11 @@ def restore_session_factory(token) -> None:
     if isinstance(token, dict):
         factory = token["factory"]
         # BO 同对象漂移：sessionmaker 对象没换、kw['bind'] 被外部改写 →
-        # 恢复时把 bind 重指回快照 engine（对象身份与指向都还原）。
-        if factory is not None and token.get("factory_bind") is not None:
+        # 恢复时把 bind 重指回快照原值（对象身份与指向都还原）。
+        # 合法 None bind（sessionmaker(bind=None)）也必须恢复成 None——
+        # "快照原值是 None"与"没快照到"是两回事，用 key 存在性区分，
+        # 不把合法未绑定状态当成不必恢复。
+        if factory is not None and "factory_bind" in token:
             try:
                 factory.kw["bind"] = token["factory_bind"]
             except (AttributeError, KeyError, TypeError):

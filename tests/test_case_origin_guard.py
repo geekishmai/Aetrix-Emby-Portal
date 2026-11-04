@@ -177,13 +177,3 @@ def test_same_factory_object_bind_drift_is_restored(full_db):
             engine_b.dispose()
     finally:
         restore_session_factory(base)
-
-
-def test_gap_counter_is_explicit_not_silent(full_db, monkeypatch):
-    """起点缺表 → GAP 显式累加；起点有表 → 不虚报。"""
-    assert callable(factory_gap_count)
-    before = factory_gap_count()
-    # 正常用例（起点有表）：不产生 GAP
-    # （本用例的起点是全局 factory——由 autouse 守卫 teardown 对账，
-    # 若起点缺表这里就会 +1；断言不虚报即覆盖该分支。）
-    assert factory_gap_count() >= before
