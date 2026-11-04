@@ -109,6 +109,27 @@ def _library_is_cms(db: Session, library_id) -> bool:
     return bool(_cms_lib.parse_upstream_source_ids(library))
 
 
+#: 绑定门禁兜底开关（SystemConfig 键 + env 缺省），2026-11-04 R2 合并
+#: 机械补回：上游 #1797 版本没有这个开关，而 fork 的 ensure_binding_playback_allowed
+#: 与 mount_routes 仍引用它（服务器统一供片模式的逃生舱）。
+KEY_PLAYBACK_REQUIRE_USER_BINDING = "playback_require_user_binding"
+ENV_PLAYBACK_REQUIRE_USER_BINDING = "EMBY_PLAYBACK_REQUIRE_USER_BINDING"
+
+
+def binding_gate_enabled(db: Session) -> bool:
+    """绑定门是否启用（默认开；SystemConfig 显式值优先于 env）。"""
+    from backend.emby_server.env_util import env_int
+    from backend.integrations import store
+
+    default = "1" if env_int(ENV_PLAYBACK_REQUIRE_USER_BINDING, 1, 0, 1) else "0"
+    try:
+        raw = (store.get_value(
+            db, KEY_PLAYBACK_REQUIRE_USER_BINDING, default) or "").strip().lower()
+    except Exception:  # noqa: BLE001 — 读不到按默认（默认开）
+        return default == "1"
+    return raw not in ("0", "false", "no", "off")
+
+
 def binding_required_for_item(db: Session, item) -> bool:
     """该条目的播放是否需要过绑定门禁（按条目判定的单一入口）。
 

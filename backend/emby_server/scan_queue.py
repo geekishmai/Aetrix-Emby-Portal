@@ -1159,14 +1159,15 @@ def _run_task(task: ScanTask) -> None:
                 try:
                     from backend.emby_server import new_media_notify  # 延迟导入，见模块 docstring
 
-                new_media_notify.maybe_notify_new_media(
-                    library_id=task.library_id,
-                    library_name=task.name,
-                    started_at=task.started_at,
-                    added_count=(scan_stats or {}).get("added", 0),
-                )
-            except Exception:  # noqa: BLE001 — 通知入口本身异常也不能影响扫描
-                logger.warning("新片入库通知入口异常（库 id=%s）", task.library_id, exc_info=True)
+                    new_media_notify.maybe_notify_new_media(
+                        library_id=task.library_id,
+                        library_name=task.name,
+                        started_at=task.started_at,
+                        added_count=(scan_stats or {}).get("added", 0),
+                    )
+                except Exception:  # noqa: BLE001 — 通知入口本身异常也不能影响扫描
+                    logger.warning("新片入库通知入口异常（库 id=%s）",
+                                   task.library_id, exc_info=True)
             # 求片到货私聊：对上库的处理中求片标完成并入队。开关关时函数
             # 自己返回，不写已推记录；线程和异常都不拖扫描收尾。
             try:

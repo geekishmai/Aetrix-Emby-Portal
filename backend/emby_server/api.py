@@ -744,7 +744,7 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
             from backend.emby_server import playback_gate as _gate_mod
             _detail_url, _, _ = _signed_local_stream_url(
                 item, base, user_id, db, api_key,
-                with_sign=_gate_mod.can_issue_play_sign(db, user_id, item))
+                with_sign=_gate_mod.sign_allowed_for_item(db, user_id, item))
             dto["MediaSources"][0]["DirectPlayUrl"] = _detail_url
             dto["MediaSources"][0]["DirectStreamUrl"] = _detail_url
         # 详情页「上游」线路（U-02）：有可展示的上游映射时，
