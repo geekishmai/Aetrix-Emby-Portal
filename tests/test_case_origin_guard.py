@@ -30,6 +30,7 @@ from backend import models as base_models
 from backend.emby_server import models as em
 from conftest import (
     _FACTORY_GAPS,
+    _record_gap_if_origin_missing,
     factory_gap_count,
     restore_session_factory,
     snapshot_session_factory,

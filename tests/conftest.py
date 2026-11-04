@@ -168,7 +168,25 @@ def factory_gap_count() -> int:
     return len(_FACTORY_GAPS)
 
 
+def pytest_sessionfinish(session, exitstatus):
+    """会话末尾汇总 GAP 计数：unknown / 缺表不能只存在无人消费的内部列表。"""
+    if _FACTORY_GAPS:
+        states = {}
+        for g in _FACTORY_GAPS:
+            states[g.get("state")] = states.get(g.get("state"), 0) + 1
+        session.config.pluginmanager.get_plugin("terminalreporter") and \
+            getattr(session.config.pluginmanager.get_plugin("terminalreporter"),
+                    "write_line", lambda *a: None)(
+            f"[test-db-isolation] factory 起点诊断 GAP 共 {len(_FACTORY_GAPS)} 条 "
+            f"（按 state 汇总：{states}；详情只含 nodeid/reason/state，不含 URL）")
+
+
 def _case_origin_engine_has_core_tables(engine) -> bool:
+    """兼容口（旧调用方）：engine 视角的核心表检查。
+
+    注意：守卫对账（_record_gap_if_origin_missing）用的是 **factory.bind**，
+    不再是 dbmod.engine——两者可能不一致（QA 主会话反例），分开诊断。
+    """
     if engine is None:
         return False
     try:
@@ -196,12 +214,43 @@ def _case_origin_factory_guard():
     _CASE_ORIGIN.update(origin)
     yield
     restore_session_factory(origin)
-    _record_gap_if_origin_missing(origin["engine"])
+    _record_gap_if_origin_missing(origin)
 
 
-def _record_gap_if_origin_missing(engine) -> None:
-    """BO-1 对账口：起点 engine 缺核心表 → GAP 显式 +1（不静默换库）。"""
-    if not _case_origin_engine_has_core_tables(engine):
-        _FACTORY_GAPS.append({
-            "engine_url": str(getattr(engine, "url", None)),
-        })
+def _factory_bind(factory):
+    """取 factory 实际出 session 用的 engine（诊断按它，不按 dbmod.engine）。"""
+    kw = getattr(factory, "kw", None) or {}
+    return kw.get("bind")
+
+
+def _bind_state(bind):
+    """bind 的可诊断状态：ok / missing-tables / unknown。
+
+    - ok：有核心表；
+    - missing-tables：engine 可 inspect 但缺核心表；
+    - unknown：无 bind / inspect 不可用（显式报 unknown，不猜别的有表库）。
+    """
+    if bind is None:
+        return "unknown"
+    try:
+        from sqlalchemy import inspect
+        names = set(inspect(bind).get_table_names())
+    except Exception:  # noqa: BLE001 — 探测失败按 unknown（不猜）
+        return "unknown"
+    return "ok" if all(t in names for t in _GUARD_CORE_TABLES) else "missing-tables"
+
+
+def _record_gap_if_origin_missing(origin) -> None:
+    """BO-1 对账口：按**起点 factory 实际绑定**诊断缺表 → GAP 显式 +1。
+
+    - 诊断对象 = ``factory.kw['bind']``（SessionLocal() 真正连的库），
+      与 ``dbmod.engine`` 属性无关——两者可能不一致，分开报告；
+    - 无可检查 bind → state=``unknown``（显式，不猜别的有表库）；
+    - GAP 证据只存 nodeid / 固定 reason / state，**绝不存 engine URL**
+      （SQLite file URL 可能含路径甚至凭据形态的查询串）。
+    """
+    factory = origin.get("factory") if isinstance(origin, dict) else origin
+    bind = _factory_bind(factory)
+    state = _bind_state(bind)
+    if state != "ok":
+        _FACTORY_GAPS.append({"state": state, "reason": "origin-bind-not-ok"})
