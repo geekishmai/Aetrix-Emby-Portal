@@ -302,6 +302,10 @@ WELFARE_CONFIG_KEYS = {
     # 更新入库播报：总开关默认开 / 攒批间隔默认 30 分钟
     "bot_update_digest_enabled": "true",
     "bot_update_digest_interval_minutes": "30",
+    # 主动私聊提醒：求片到货 / 转存终态，默认关；同一人合并窗口默认 60 秒
+    "tg_notify_store_arrival_enabled": "false",
+    "tg_notify_transfer_done_enabled": "false",
+    "tg_notify_merge_window_sec": "60",
     # 频道马甲治理＋退群处置（2026-10-30 借鉴 embyboss 第 1 项；读侧
     # tg_bot.policy，缺省与 policy.DEFAULTS 逐字对齐）
     "bot_channel_guard_enabled": "true",

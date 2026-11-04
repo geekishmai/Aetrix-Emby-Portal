@@ -1140,6 +1140,14 @@ def _run_task(task: ScanTask) -> None:
                 )
             except Exception:  # noqa: BLE001 — 通知入口本身异常也不能影响扫描
                 logger.warning("新片入库通知入口异常（库 id=%s）", task.library_id, exc_info=True)
+            # 求片到货私聊：对上库的处理中求片标完成并入队。开关关时函数
+            # 自己返回，不写已推记录；线程和异常都不拖扫描收尾。
+            try:
+                from backend.tg_bot.proactive import maybe_sync_store_arrivals
+
+                maybe_sync_store_arrivals(db)
+            except Exception:  # noqa: BLE001
+                logger.warning("求片到货提醒入口异常（库 id=%s）", task.library_id, exc_info=True)
     except Exception as exc:  # noqa: BLE001 — 后台线程的异常必须落到队列状态里
         # 诊断字段：线程名 + Session id，用于定位 Session 跨线程问题
         # （logger.exception 自带 traceback，级别为 error）

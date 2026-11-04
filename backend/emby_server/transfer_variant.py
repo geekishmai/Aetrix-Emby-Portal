@@ -5863,6 +5863,7 @@ def _schedule_retry(db, job, exc):
         job.error_kind = "retriable"
         job.error_detail = str(exc)[:500]
         job.next_retry_at = None
+        _note_proactive_terminal(db, job)
         db.commit()
         return "failed"
     delay = RETRY_BASE_SEC * (2 ** (job.attempts - 1))
@@ -5874,11 +5875,23 @@ def _schedule_retry(db, job, exc):
     return "retried"
 
 
+def _note_proactive_terminal(db, job):
+    """终态私聊入队。任何异常都吞掉，不许拖垮转存提交。"""
+    try:
+        from backend.tg_bot.proactive import note_transfer_terminal
+        note_transfer_terminal(db, job)
+    except Exception:
+        logger.warning(
+            "转存完成提醒入队失败 job=%s",
+            getattr(job, "id", None), exc_info=True)
+
+
 def _fail_job(db, job, kind, detail):
     """任务置 failed 并提交（工人各执行器共用）。"""
     job.status = "failed"
     job.error_kind = kind
     job.error_detail = (detail or "")[:500]
+    _note_proactive_terminal(db, job)
     db.commit()
     return {"job_id": job.id, "outcome": "failed", "error_kind": kind}
 
@@ -5905,6 +5918,7 @@ def _register_ready_variant(db, job, item, variant_fid, variant_drive_id,
     job.error_kind = None
     job.error_detail = None
     job.next_retry_at = None
+    _note_proactive_terminal(db, job)
     db.commit()
     # 登记 ready 后预填存在性正缓存（只对 Drive 副本；115 副本的
     # variant_file_id 不是 Drive fid，不进 Drive 存在性命名空间）。
@@ -6745,6 +6759,7 @@ def run_transfer_job_once(db, job, drive_api):
         job.status = "failed"
         job.error_kind = "item_gone"
         job.error_detail = "条目不存在或无 drive_file_id"
+        _note_proactive_terminal(db, job)
         db.commit()
         return {"job_id": job.id, "outcome": "failed", "error_kind": "item_gone"}
     # 按 provider + 归属分发（2026-10-26 用户盘口径 + 跨 provider）：
@@ -6765,6 +6780,7 @@ def run_transfer_job_once(db, job, drive_api):
         job.error_detail = (
             f"不支持的任务组合 provider={provider} "
             f"owner_scope={owner_scope}（不重试）")
+        _note_proactive_terminal(db, job)
         db.commit()
         return {"job_id": job.id, "outcome": "failed",
                 "error_kind": "unsupported"}
@@ -6772,6 +6788,7 @@ def run_transfer_job_once(db, job, drive_api):
         job.status = "failed"
         job.error_kind = "no_drive"
         job.error_detail = "任务无 drive_id"
+        _note_proactive_terminal(db, job)
         db.commit()
         return {"job_id": job.id, "outcome": "failed", "error_kind": "no_drive"}
     # 调度合并（换代线 step 4，接管生效时）：同 content_key 已
@@ -6849,6 +6866,7 @@ def run_transfer_job_once(db, job, drive_api):
         job.status = "failed"
         job.error_kind = "dead"
         job.error_detail = str(exc)[:500]
+        _note_proactive_terminal(db, job)
         db.commit()
         return {"job_id": job.id, "outcome": "failed", "error_kind": "dead"}
     except Exception as exc:
@@ -6874,6 +6892,7 @@ def run_transfer_job_once(db, job, drive_api):
         job.status = "failed"
         job.error_kind = "orphan"
         job.error_detail = str(exc)[:500]
+        _note_proactive_terminal(db, job)
         db.commit()
         return {"job_id": job.id, "outcome": "failed", "error_kind": "orphan"}
     # 成功：同 scope 旧 ready 行先 released，保证一物一生效源。
@@ -6889,6 +6908,7 @@ def run_transfer_job_once(db, job, drive_api):
     job.error_kind = None
     job.error_detail = None
     job.next_retry_at = None
+    _note_proactive_terminal(db, job)
     db.commit()
     return {"job_id": job.id, "outcome": "done", "variant_id": row.id}
 
@@ -7979,6 +7999,14 @@ def _daemon_main_loop(stop, state, session_factory, drive_api_factory):
     或 60 秒兜底扫；闲置 TTL 每小时独立一轮；每日巡检不在本
     循环（_patrol_loop 独立线程，2026-11-02 解耦）；
     异常只记 warning 不炸线程。"""
+    # 工人进程没有 Bot 轮询线程时，也要能把已经入队的私聊发出去。
+    # 放在循环里而不是 start_transfer_daemon：测试会把本函数换成空转。
+    try:
+        from backend.tg_bot.proactive import wake_flusher
+
+        wake_flusher()
+    except Exception:
+        logger.warning("转存完成提醒调度启动失败", exc_info=True)
     while not stop.is_set():
         try:
             if master_enabled():

@@ -94,7 +94,18 @@ const botFields = [
   { key: 'bot_rate_limit_seconds', label: '命令限流', hint: '每用户每命令最小间隔，默认 3', suffix: '秒' },
   { key: 'bot_group_rate_limit', label: '群限流', hint: '每群每分钟最多处理消息数，超限静默丢弃，默认 20', suffix: '条/分' },
   { key: 'bot_channel_whitelist', label: '频道白名单', hint: '逗号分隔的频道 id，名单内频道可在群里以频道身份发言，空=都不放行', suffix: '' },
+  { key: 'tg_notify_merge_window_sec', label: '提醒合并窗口', hint: '同一人这段时间内的到货/转存提醒合并成一条，默认 60，填 0 则到点就发', suffix: '秒' },
 ]
+
+// 主动私聊提醒：word 风格 true/false，默认关
+const storeArrivalNotify = computed({
+  get: () => (form.value['tg_notify_store_arrival_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['tg_notify_store_arrival_enabled'] = v ? 'true' : 'false' },
+})
+const transferDoneNotify = computed({
+  get: () => (form.value['tg_notify_transfer_done_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['tg_notify_transfer_done_enabled'] = v ? 'true' : 'false' },
+})
 
 // 频道马甲治理总开关：word 风格 true/false（读侧 tg_bot.policy 只认 'true'）
 const channelGuardEnabled = computed({
@@ -392,6 +403,14 @@ onMounted(load)
           <el-form-item label="退群取消资格">
             <el-switch v-model="leaveCancelEnabled" />
             <span class="field-hint">开启后已绑定用户退群／被踢自动只取消公益资格（账号、能量、查看凭证不动）；关闭则退群不做处理，默认开</span>
+          </el-form-item>
+          <el-form-item label="求片到货提醒">
+            <el-switch v-model="storeArrivalNotify" />
+            <span class="field-hint">开启后，你求的片入库时私聊求片人和附议人一句「到了」，不带播放按钮。默认关</span>
+          </el-form-item>
+          <el-form-item label="转存完成提醒">
+            <el-switch v-model="transferDoneNotify" />
+            <span class="field-hint">开启后，你自己发起的转存完成或最终失败时私聊你。成功只发文字；失败说明原因，并给「为什么播不了」。默认关</span>
           </el-form-item>
         </el-form>
       </SectionCard>

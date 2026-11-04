@@ -5,11 +5,17 @@
   先于鉴权，未登录也不会先露 401），与商店同款。
 - 登记与我的列表限会员（``require_store_member``，与商店 B2 同款）。
 
-入库联动是“读时同步”，不是后台任务：
+入库联动：
 - 读我的列表 / 榜单 / 管理端榜单时，对处理中（pending/approved）
-  且 tmdb 对得上库内的行，当场标为 completed（只翻状态，不建
-  转存任务、不发通知）。入库后用户下一次打开列表/榜单即看到
-  已入库，随后可走正常想看流程（POST /want 的 R0 路）。
+  且 tmdb 对得上库内的行，当场标为 completed（不建转存任务、
+  不写 emby_item_id）。这步不看私聊开关。
+- 扫描对上库时，只有到货私聊开关开着才做同样的翻转并入队；
+  关着时扫描不改求片行。读时翻转和扫描侧共用同一条到货入队，
+  已推记录保证不重复发。
+- 到货私聊走 ``tg_bot.proactive``，开关默认关；关时不发、不写
+  已推记录。开时私聊求片人和附议人纯文字，不带播放按钮。
+- 入库后用户下一次打开列表/榜单即看到已入库，随后可走正常想看
+  流程（POST /want 的 R0 路）。
 - emby_item_id 的 guid 记录仍归既有管理端“标记已入库”入口，
   本模块不同步写它，免得两处口径打架。
 
@@ -139,8 +145,9 @@ def _recount_votes(db: Session, request_id: int) -> int:
 def _sync_row(db: Session, row: models.MovieRequest) -> bool:
     """读时入库联动：处理中的行若 tmdb 已对上库内，当场标 completed。
 
-    只翻状态：不建转存任务、不发通知、不写 emby_item_id（guid 记录
-    归既有管理端“标记已入库”入口）。返回是否翻了状态。
+    只翻状态：不建转存任务、不写 emby_item_id（guid 记录归既有
+    管理端“标记已入库”入口）。开关开着时顺手入队到货私聊，
+    入队失败不影响翻转。返回是否翻了状态。
     """
     if row.status not in media_seek.ACTIVE_STATUSES:
         return False
@@ -149,6 +156,14 @@ def _sync_row(db: Session, row: models.MovieRequest) -> bool:
     if find_library_item(db, row.tmdb_id) is None:
         return False
     row.status = "completed"
+    try:
+        from backend.tg_bot.proactive import note_store_request_completed
+        note_store_request_completed(db, row)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "求片到货提醒入队失败 request=%s", getattr(row, "id", None),
+            exc_info=True)
     return True
 
 
