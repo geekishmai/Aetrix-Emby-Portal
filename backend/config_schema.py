@@ -230,6 +230,14 @@ WELFARE_CONFIG_SCHEMA: dict[str, tuple] = {
     "bot_duel_max": ("int", 1, _BIG),
     "bot_duel_rake_pct": ("int", 0, 100),
     "bot_duel_daily_win_cap": ("int", 0, _BIG),
+    # 红包雨：总开关默认关；总额至少 1；份数 1-100（与用户红包个数上限一致）；
+    # 间隔 0 表示一开始全部落下；每日上限 0=不限；定时是原文，读侧校验钟点。
+    "bot_rain_enabled": ("bool",),
+    "bot_rain_total": ("int", 1, _BIG),
+    "bot_rain_count": ("int", 1, 100),
+    "bot_rain_interval_sec": ("int", 0, 3600),
+    "bot_rain_daily_win_cap": ("int", 0, _BIG),
+    "bot_rain_schedule": ("str",),
     # 2026-10-17 第 4 批 4-4：白名单里但此前无 spec 的群 id 列表键（端点现行按原文
     # 存字符串）。注册为 ("str",) 与今天逐字一致：原文直存，None/空串→删行
     # （读侧 _get_str_config 缺行/空行都回默认 ""，等价）。

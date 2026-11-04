@@ -236,7 +236,7 @@ _PRIVATE_ONLY_FACT = {
 # 群内可执行但仅管理员、且刻意不进群菜单 scope 的命令（2026-11-01）：
 # /whois 群里出管理员精简卡——GROUP_COMMANDS 是给全群看的菜单，
 # 管理员命令不进；标签仍按「群里能用」的事实记 [群/私聊]。
-_GROUP_ADMIN_FACT = {"whois"}
+_GROUP_ADMIN_FACT = {"whois", "rain"}
 
 
 def test_scene_tags_match_scope_facts():

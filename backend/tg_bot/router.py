@@ -211,7 +211,7 @@ _IDENTITY_COMMANDS = {
     "/start", "/bind", "/checkin", "/points", "/chatpoints",
     "/account", "/me", "/request", "/myrequests", "/login", "/renew",
     "/govlog", "/level", "/report", "/propose", "/launch",
-    "/redeem", "/lottery", "/redpacket", "/duel",
+    "/redeem", "/lottery", "/redpacket", "/duel", "/rain",
     "/bindings", "/transfers", "/whyplay", "/wants", "/reconcile",
     "/rankpush",
     "/whois",
@@ -500,6 +500,7 @@ def dispatch(db, update: dict) -> None:
             "/redpacket": handlers.handle_redpacket,
             "/slots": handlers.handle_slots_command,
             "/duel": handlers.handle_duel,
+            "/rain": handlers.handle_rain,
             "/bindings": handlers.handle_bindings,
             "/transfers": handlers.handle_transfers,
             "/whyplay": handlers.handle_whyplay,
@@ -599,6 +600,10 @@ def dispatch(db, update: dict) -> None:
             reply = handlers.handle_duel(
                 db, tg_user, chat_id, args,
                 update_id=update.get("update_id"), in_group=in_group)
+        elif cmd == "/rain":
+            reply = handlers.handle_rain(
+                db, tg_user, chat_id, args,
+                update_id=update.get("update_id"), in_group=in_group)
         elif cmd == "/whois":
             # /whois 需要群聊上下文（私聊全卡 vs 群内管理员精简卡）
             # 与被回复消息的发送者（群内回复定位），通用签名拿不到，
@@ -625,6 +630,17 @@ def dispatch(db, update: dict) -> None:
             else:
                 logger.warning("duel panel send failed chat=%s err=%s", chat_id, err)
                 duel_svc.fail_unannounced(db, duel_id)
+            return
+        if isinstance(reply, tuple) and reply and reply[0] == "__rain_panel__":
+            from backend import rain as rain_svc
+
+            _marker, text, markup, rain_id = reply
+            ok, err, mid = sender.send_message_ex(db, chat_id, text, markup)
+            if ok and mid:
+                rain_svc.attach_panel(db, rain_id, mid)
+            else:
+                logger.warning("rain panel send failed chat=%s err=%s", chat_id, err)
+                rain_svc.fail_unannounced(db, rain_id)
             return
         if isinstance(reply, tuple):
             text, markup = reply

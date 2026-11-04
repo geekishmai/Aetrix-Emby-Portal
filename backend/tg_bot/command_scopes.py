@@ -41,6 +41,7 @@ ADMIN_ONLY_COMMANDS: frozenset[str] = frozenset({
     "whois",
     "reconcile",
     "rankpush",
+    "rain",
 })
 
 # 群内可执行命令（不带斜杠）：逐条对 router.dispatch 的现行群内拦截口径——

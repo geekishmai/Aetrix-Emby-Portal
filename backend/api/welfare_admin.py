@@ -355,6 +355,14 @@ WELFARE_CONFIG_KEYS = {
     "bot_duel_max": "200",
     "bot_duel_rake_pct": "5",
     "bot_duel_daily_win_cap": "500",
+    # 红包雨（默认关）：系统出资，不扣管理员。定时为空表示不定时，
+    # 只能由管理员在群里发 /rain。钟点按上海时间，如 21:05。
+    "bot_rain_enabled": "false",
+    "bot_rain_total": "100",
+    "bot_rain_count": "10",
+    "bot_rain_interval_sec": "3",
+    "bot_rain_daily_win_cap": "200",
+    "bot_rain_schedule": "",
     # 注册后 TG 绑定引导页总开关
     # 求片 v2：总开关 / 附议 / 附议者入库通知（默认全开）
     # C2 积分转账：总开关默认开启，手续费/限额可配（0=不收/不限）

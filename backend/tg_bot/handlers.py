@@ -908,6 +908,41 @@ def handle_duel(db, tg_user: dict, chat_id: int, args: str,
     )
 
 
+def handle_rain(db, tg_user: dict, chat_id: int, args: str,
+                update_id: int | None = None, in_group: bool = False):
+    """管理员在群里立刻下一场红包雨。金额和份数读后台配置。"""
+    from backend import rain as rain_svc
+    from backend.tg_bot import rain_ui
+
+    if not in_group:
+        return rain_svc.reason_message("not_group")
+    if not rain_svc.is_enabled(db):
+        return rain_svc.reason_message("disabled")
+    user = resolve(db, int(tg_user.get("id") or 0))
+    if user is None:
+        return _bind_guide_text()
+    if not bool(getattr(user, "is_staff", False)):
+        return rain_svc.reason_message("not_staff")
+    idempotency_key = f"tg:{update_id}" if update_id is not None else None
+    try:
+        result = rain_svc.start_rain(
+            db, user, int(chat_id), idempotency_key=idempotency_key)
+    except Exception:
+        logger.exception("rain start failed")
+        return "红包雨发起失败，请稍后再试"
+    if not result.get("ok"):
+        return rain_svc.reason_message(result.get("reason") or "")
+    rain = result["rain"]
+    if result.get("duplicate") and (rain.message_id or rain.status != "running"):
+        return (rain_ui.SILENT,)
+    return (
+        rain_ui.PANEL,
+        rain_ui.open_text(db, rain),
+        rain_ui.open_markup(rain.id),
+        rain.id,
+    )
+
+
 def slots_markup(db) -> dict:
     """老虎机注额按钮（一行三档）＋回主界面行；陪玩与结果卡共用。"""
     from backend import slots as slots_svc

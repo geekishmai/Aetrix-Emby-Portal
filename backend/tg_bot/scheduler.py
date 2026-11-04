@@ -70,6 +70,10 @@ def start_tg_bot_poller() -> bool:
         start_duel_scheduler()
     except Exception:
         logger.exception("duel 调度启动失败（可忽略）")
+    try:
+        start_rain_scheduler()
+    except Exception:
+        logger.exception("rain 调度启动失败（可忽略）")
     return True
 
 
@@ -202,4 +206,47 @@ def start_duel_scheduler() -> bool:
 
     threading.Thread(target=_loop, daemon=True, name="tg-duel").start()
     logger.info("TG 骰子对决调度已启动（每 %s 秒巡检超时与倒计时）", interval)
+    return True
+
+
+# ---------------- 红包雨调度（定时任务区） ----------------
+# 份数按间隔落下，分钟级巡检会把间隔吃掉。这里每 2 秒看一次。
+
+_rain_started = False
+
+
+def start_rain_scheduler() -> bool:
+    """启动红包雨调度线程（进程内只起一次）。"""
+    global _rain_started
+    if _rain_started:
+        return False
+    _rain_started = True
+    interval = 2
+
+    def _tick() -> None:
+        from backend.database import SessionLocal
+        from backend.tg_bot import rain_ui
+
+        db = SessionLocal()
+        try:
+            actions = rain_ui.tick(db)
+            if actions:
+                logger.info("rain 调度动作：%s", actions)
+        except Exception:
+            logger.exception("rain 调度 tick 失败")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    def _loop() -> None:
+        waiter = threading.Event()
+        while True:
+            waiter.wait(interval)
+            _tick()
+
+    threading.Thread(target=_loop, daemon=True, name="tg-rain").start()
+    logger.info("TG 红包雨调度已启动（每 %s 秒巡检落下与定时开场）", interval)
     return True

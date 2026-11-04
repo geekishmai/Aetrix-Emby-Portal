@@ -1828,6 +1828,10 @@ class RedPacket(Base):
     created_at = Column(DateTime, default=datetime.now)
     # 幂等键（如 tg:<update_id>）；非 TG 渠道调用时可为空
     idempotency_key = Column(String(64), nullable=True)
+    # user=用户出资（默认，老包升级后也是这个）；system=红包雨系统出资
+    funding = Column(String(16), nullable=False, default='user', server_default='user')
+    # 红包雨场次；普通红包为空。不设外键，避免和红包雨表互相引用。
+    rain_id = Column(Integer, nullable=True)
 
     sender = relationship("WebUser")
 
@@ -1894,6 +1898,45 @@ class SlotsSpin(Base):
     status = Column(String(16), nullable=False, default='pending')  # pending/settled/failed
     created_at = Column(DateTime, default=datetime.now)
     settled_at = Column(DateTime, nullable=True)
+
+
+class RedPacketRain(Base):
+    """一场红包雨。系统出钱，不扣管理员。
+
+    底下挂一个普通红包（packet_id），份数按间隔放开，抢包仍走
+    welfare_redpacket.claim_packet。一个群同时只一场，靠
+    red_packet_rain_live 的主键挡住并发。
+    """
+    __tablename__ = 'red_packet_rains'
+
+    __table_args__ = (
+        UniqueConstraint('idempotency_key', name='uq_rain_idempotency'),
+        Index('idx_rain_chat_status', 'chat_id', 'status'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, nullable=False)
+    message_id = Column(BigInteger, nullable=True)
+    packet_id = Column(Integer, ForeignKey('red_packets.id'), nullable=False)
+    total_amount = Column(Integer, nullable=False)
+    packet_count = Column(Integer, nullable=False)
+    interval_sec = Column(Integer, nullable=False, default=3)
+    status = Column(String(16), nullable=False, default='running')
+    idempotency_key = Column(String(64), nullable=True)
+    created_by = Column(Integer, ForeignKey('web_users.id'), nullable=True)
+    panel_finalized = Column(Boolean, nullable=False, default=False, server_default='0')
+    shown_released = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.now)
+    started_at = Column(DateTime, default=datetime.now)
+    last_panel_edit_at = Column(DateTime, nullable=True)
+
+
+class RedPacketRainLive(Base):
+    """一个群同时只一场进行中的红包雨。"""
+    __tablename__ = 'red_packet_rain_live'
+
+    chat_id = Column(BigInteger, primary_key=True)
+    rain_id = Column(Integer, ForeignKey('red_packet_rains.id'), nullable=False)
 
 
 class Duel(Base):

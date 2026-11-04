@@ -39,6 +39,9 @@ def handle_callback(db, callback_query: dict, redpacket_enabled: bool | None = N
     if data.startswith("duel_accept:"):
         _handle_duel_accept(db, callback_query)
         return
+    if data.startswith("rain_grab:"):
+        _handle_rain_grab(db, callback_query)
+        return
 
 
 def _handle_menu(db, callback_query: dict) -> None:
@@ -777,6 +780,12 @@ def _handle_redpacket_claim(db, callback_query: dict, redpacket_enabled: bool | 
 
     amount = result["amount"]
     _answer(f"🧧 恭喜抢到 {amount} 能量！")
+    if getattr(packet, "funding", "user") == "system":
+        # 红包雨不按普通红包那样每抢一次刷一条群消息，只改原面板。
+        from backend.tg_bot import rain_ui
+
+        rain_ui.after_claim(db, getattr(packet, "rain_id", None))
+        return
     if chat.get("type") in ("group", "supergroup"):
         _send_claim_feedback(db, chat_id, user, amount, packet.remaining_count)
     logger.info(
@@ -865,6 +874,63 @@ def _send_slots_group_result(db, chat_id, player_name: str, spin, dice_message_i
             ephemeral.schedule_delete(chat_id, result_id, delay)
     except Exception:
         logger.warning("tg slots group result failed: chat=%s", chat_id, exc_info=True)
+
+
+def _handle_rain_grab(db, callback_query: dict) -> None:
+    """红包雨「抢」。个人结果只弹 toast，面板原地改剩余份数。"""
+    from backend import rain as rain_svc
+    from backend import welfare_redpacket
+    from backend.tg_bot import rain_ui
+
+    cb_id = callback_query.get("id")
+    data = callback_query.get("data") or ""
+    from_user = callback_query.get("from") or {}
+    tg_id = from_user.get("id")
+    msg = callback_query.get("message") or {}
+    chat = msg.get("chat") or {}
+
+    def _answer(text: str, show_alert: bool = False) -> None:
+        if cb_id:
+            sender.answer_callback_query(db, cb_id, text=text, show_alert=show_alert)
+
+    if not cb_id or not tg_id:
+        _answer("请求无效，请重新点击")
+        return
+    try:
+        rain_id = int(data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        _answer("这场面已失效")
+        return
+    from backend.tg_bot import router as bot_router
+
+    if int(tg_id) == bot_router.GROUP_ANONYMOUS_BOT_ID:
+        _answer(bot_router.ANON_ADMIN_TEXT, show_alert=True)
+        return
+    user = resolve(db, int(tg_id))
+    if user is None:
+        _answer(rain_svc.reason_message("unbound"), show_alert=True)
+        return
+    rain = db.query(models.RedPacketRain).filter(models.RedPacketRain.id == rain_id).first()
+    if rain is None or rain.status != "running":
+        _answer(rain_svc.reason_message("closed"))
+        if rain is not None:
+            rain_ui.publish_terminal(db, rain)
+        return
+    if not rain_svc.is_enabled(db):
+        # 已经开着的这场仍允许抢完，避免系统的钱卡在面板上。
+        pass
+    try:
+        result = welfare_redpacket.claim_packet(db, user, int(rain.packet_id))
+    except ValueError as exc:
+        _answer(str(exc), show_alert=True)
+        return
+    except Exception:
+        logger.exception("rain grab failed id=%s", rain_id)
+        db.rollback()
+        _answer("系统繁忙，请稍后再试", show_alert=True)
+        return
+    _answer(f"抢到 {int(result['amount'])} 能量")
+    rain_ui.after_claim(db, rain_id)
 
 
 def _handle_duel_accept(db, callback_query: dict) -> None:

@@ -8,7 +8,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeftRight, Bot, Coins, Dices, Gift, KeyRound, RefreshCw, Save, Send, Settings2, Swords, Wallet } from 'lucide-vue-next'
+import { ArrowLeftRight, Bot, CloudRain, Coins, Dices, Gift, KeyRound, RefreshCw, Save, Send, Settings2, Swords, Wallet } from 'lucide-vue-next'
 import { EmptyState, PageHeader, SectionCard } from '@/components/ui'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 import { fetchWelfareConfig, saveWelfareConfig } from '@/api/welfare'
@@ -77,6 +77,19 @@ const duelFields = [
   { key: 'bot_duel_max', label: '单注上限', hint: '发起时最多押多少能量，默认 200', suffix: '能量' },
   { key: 'bot_duel_rake_pct', label: '系统抽成', hint: '从双方奖池里抽走的比例，默认 5，填 0 不抽。零头留给胜者', suffix: '%' },
   { key: 'bot_duel_daily_win_cap', label: '每日赢取上限', hint: '每人每天从对决拿到的奖金上限，默认 500，填 0 不限', suffix: '能量/天' },
+]
+
+const rainEnabled = computed({
+  get: () => (form.value['bot_rain_enabled'] ?? 'false') === 'true',
+  set: (v: boolean) => { form.value['bot_rain_enabled'] = v ? 'true' : 'false' },
+})
+
+const rainFields = [
+  { key: 'bot_rain_total', label: '总额', hint: '一场红包雨一共多少能量，默认 100。由系统出，不扣管理员', suffix: '能量' },
+  { key: 'bot_rain_count', label: '份数', hint: '拆成几份，默认 10，最多 100。总额不能小于份数', suffix: '份' },
+  { key: 'bot_rain_interval_sec', label: '落下间隔', hint: '开场先落 1 份，之后每隔这么多秒再落 1 份。默认 3，填 0 表示一开始全部落下', suffix: '秒' },
+  { key: 'bot_rain_daily_win_cap', label: '每日赢取上限', hint: '每人每天从红包雨拿到的能量上限，默认 200，填 0 不限', suffix: '能量/天' },
+  { key: 'bot_rain_schedule', label: '每天开场', hint: '上海时间，如 21:05。留空则不定时，只能由管理员在群里发 /rain', suffix: '' },
 ]
 
 const slotsFields = [
@@ -382,6 +395,24 @@ onMounted(load)
             <span class="field-hint">关闭后群里不能新开对决；已经押上的一局仍会结算或退回。默认关</span>
           </el-form-item>
           <el-form-item v-for="f in duelFields" :key="f.key" :label="f.label">
+            <el-input v-model="form[f.key]" class="field-input" />
+            <span class="field-suffix">{{ f.suffix }}</span>
+            <span class="field-hint">{{ f.hint }}</span>
+          </el-form-item>
+        </el-form>
+      </SectionCard>
+
+      <SectionCard
+        title="红包雨"
+        :icon="CloudRain"
+        description="管理员在群里下一场系统出钱的红包。默认关。一个群同时只一场"
+      >
+        <el-form :label-position="labelPosition" label-width="120px" class="config-form">
+          <el-form-item label="总开关">
+            <el-switch v-model="rainEnabled" />
+            <span class="field-hint">关闭后不能新开红包雨。已经落下的那场仍可以抢完。默认关</span>
+          </el-form-item>
+          <el-form-item v-for="f in rainFields" :key="f.key" :label="f.label">
             <el-input v-model="form[f.key]" class="field-input" />
             <span class="field-suffix">{{ f.suffix }}</span>
             <span class="field-hint">{{ f.hint }}</span>

@@ -978,6 +978,12 @@ def _auto_migrate():
         ("red_packets", [
             ("idempotency_key", "VARCHAR(64)", "NULL"),
         ]),
+        # 红包雨：系统出资的包不走用户扣款。老包补列后 funding=user，
+        # 行为和升级前一致；rain_id 为空表示不是红包雨。
+        ("red_packets", [
+            ("funding", "VARCHAR(16)", "'user'"),
+            ("rain_id", "INTEGER", "NULL"),
+        ]),
         # 系统告警（事件型规则）：AlertRule 表扩展事件类型/接收人/冷却列。
         # 老库补列后 event_type/recipients 为 NULL（= legacy 指标型规则，行为不变），
         # cooldown_sec 默认 3600（与模型 default 一致）。
