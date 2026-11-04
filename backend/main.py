@@ -686,13 +686,13 @@ def _collect_observability() -> dict:
 #: 所以带它的请求一定来自公网。空字符串 = 不区分。
 _HEALTH_PUBLIC_HEADER = os.getenv("HEALTH_PUBLIC_HEADER", "X-Aetrix-Public").strip()
 
-#: 完整健康内容的来源网段白名单（QA BC P1）：默认覆盖回环 + RFC1918 +
-#: 链路本地 + IPv6 ULA/链路本地（compose 默认网段 172.16/12 在内）。
-#: ``HEALTH_FULL_CIDRS`` 可覆盖（逗号分隔 CIDR）；部署的 docker 网关若不在
-#: 默认网段，把网关网段加进去即可，无需改代码。
+#: 完整健康内容的可信来源网段（2026-11-04 服务器实测后收紧）：默认只放
+#: 回环 + 生产 compose 子网 172.21.0.0/16（nginx→api 的容器网段）。
+#: ``HEALTH_FULL_CIDRS`` 可整体覆盖（逗号分隔 CIDR）。
+#: 判定看「整条来源链」：直连对端 IP + X-Forwarded-For 的每一跳，
+#: 全部落在白名单内才给完整内容；任何一跳是公网 IP 就只回状态。
 _DEFAULT_HEALTH_FULL_CIDRS = (
-    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-    "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
+    "127.0.0.0/8", "::1/128", "172.21.0.0/16",
 )
 
 
@@ -728,20 +728,48 @@ def _health_ip_trusted(host: str) -> bool:
 
 
 def _health_proxy_marked(request: Request) -> bool:
-    """请求是否带了反代标记（公网路径）。
+    """请求是否带 Caddy 的公网标记头 ``X-Aetrix-Public``。
 
-    - ``X-Aetrix-Public``：Caddy 对外部请求强制写入；客户端伪造同名头只会
-      让自己也拿到最小内容（fail-closed，不构成提权）。
-    - ``X-Forwarded-For``：任何代理链都会带；内网直连不应出现。
+    客户端伪造同名头只会让自己也拿到最小内容（fail-closed，不构成提权）。
     """
     try:
         if _HEALTH_PUBLIC_HEADER and (request.headers.get(_HEALTH_PUBLIC_HEADER) or "").strip():
             return True
-        if (request.headers.get("x-forwarded-for") or "").strip():
-            return True
     except Exception:  # noqa: BLE001 — 假请求缺字段按公网处理
         return True
     return False
+
+
+def _health_source_chain(request: Request) -> list:
+    """来源链：直连对端 IP + X-Forwarded-For 的每一跳（按出现顺序）。
+
+    生产实测（2026-11-04）：127.0.0.1:18000 映射的是 aetrix-web 的 nginx，
+    nginx 对 /api/ 一律追加 ``X-Forwarded-For: $proxy_add_x_forwarded_for`` →
+    本机监控经 18000 访问时 api 看到的对端是 web 容器（compose 子网），
+    XFF 里是真实客户端地址。因此判定必须看整条链，而不是「有没有 XFF」。
+    """
+    chain = []
+    try:
+        host = (getattr(getattr(request, "client", None), "host", "") or "").strip()
+    except Exception:  # noqa: BLE001 — 假请求缺字段按不可信处理
+        host = ""
+    if host:
+        chain.append(host)
+    try:
+        raw = (request.headers.get("x-forwarded-for") or "").strip()
+    except Exception:  # noqa: BLE001
+        raw = ""
+    for part in raw.split(","):
+        text = part.strip()
+        if not text:
+            continue
+        # 去掉 IPv6 的方括号与端口（1.2.3.4:5678 形态）
+        if text.startswith("["):
+            text = text[1:].split("]", 1)[0]
+        elif text.count(":") == 1 and "." in text:
+            text = text.split(":", 1)[0]
+        chain.append(text)
+    return chain
 
 
 def _health_admin_ok(request: Request) -> bool:
@@ -775,19 +803,21 @@ def _health_admin_ok(request: Request) -> bool:
 def _health_full_access(request: Request) -> bool:
     """完整健康内容的唯一判定（两端点同口径）。
 
-    顺序：有效管理员凭据 → 完整（公网管理后台需要）；否则带反代标记
-    （X-Aetrix-Public / X-Forwarded-For）→ 最小；否则白名单内网直连 →
-    完整；其余最小（fail-closed）。
+    顺序：
+    1. 有效管理员凭据 → 完整（公网管理后台的系统健康页需要）；
+    2. 带 Caddy 公网标记头 ``X-Aetrix-Public`` → 只回状态；
+    3. 否则看来源链（直连对端 + XFF 每一跳）：全部落在可信网段
+       （默认 127.0.0.0/8、::1、compose 子网 172.21.0.0/16，可用
+       ``HEALTH_FULL_CIDRS`` 覆盖）→ 完整；任何一跳是公网 IP → 只回状态。
     """
     if _health_admin_ok(request):
         return True
     if _health_proxy_marked(request):
         return False
-    try:
-        host = (getattr(getattr(request, "client", None), "host", "") or "").strip()
-    except Exception:  # noqa: BLE001 — 假请求缺字段按非可信处理
-        host = ""
-    return _health_ip_trusted(host)
+    chain = _health_source_chain(request)
+    if not chain:
+        return False
+    return all(_health_ip_trusted(ip) for ip in chain)
 
 
 @app.get("/api/health")
