@@ -7056,12 +7056,18 @@ def _wake_subscriber_loop(stop_event):
     订阅正常时行为逐字不变。"""
     while not stop_event.is_set():
         pubsub = None
+        client = None
+        dedicated = False
         try:
-            # 用模块级共享客户端（上游契约）：每轮只新建 pubsub 并在
-            # finally 里 close，连接随之归还池子；不再每轮新建 client，
-            # 避免独立连接池反复创建/泄漏（QA AF-②）。
-            from backend.database import get_redis
-            client = get_redis()
+            # 优先独立订阅客户端（fork 2026-11-03：不参与熔断、socket_timeout=None、
+            # 独立小池，避免 pubsub 阻塞读拖垮主链路）；独立客户端不可用
+            # （如测试环境 REDIS_ENABLED=false）时回落到共享 get_redis，
+            # 与上游契约一致，断连唤醒逻辑对两者相同。
+            from backend.database import get_redis, make_redis_subscriber_client
+            client = make_redis_subscriber_client()
+            dedicated = client is not None
+            if client is None:
+                client = get_redis()
             if client is None:
                 stop_event.wait(30)
                 continue
@@ -7085,6 +7091,12 @@ def _wake_subscriber_loop(stop_event):
             if pubsub is not None:
                 try:
                     pubsub.close()
+                except Exception:  # noqa: BLE001 — 关闭失败不影响重连
+                    pass
+            # 独立客户端连同它的连接池每轮关掉；共享客户端不能关（主链路在用）
+            if dedicated and client is not None:
+                try:
+                    client.close()
                 except Exception:  # noqa: BLE001 — 关闭失败不影响重连
                     pass
 
