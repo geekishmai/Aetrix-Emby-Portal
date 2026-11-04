@@ -190,7 +190,7 @@ def _stub_stream(monkeypatch, item, switch=None):
     monkeypatch.setattr(api, "ensure_playback_allowed", lambda db_, u_: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db_, u_, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(play_sign, "check_referer", lambda request, db_: None)
     monkeypatch.setattr(api, "_enforce_stream_limit",
                         lambda db_, req, u_, it, iid: None)
@@ -374,7 +374,7 @@ def _pi(monkeypatch, db, switch=None):
     monkeypatch.setattr(api, "ensure_playback_allowed", lambda db_, u_: None)
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db_, u_, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(probe_worker, "maybe_enqueue", lambda db_, it: None)
     monkeypatch.setattr(stream_accel, "rewrite_playback_urls_unified",
                         lambda db_, s, base: (s, None))

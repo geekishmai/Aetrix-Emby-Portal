@@ -129,7 +129,7 @@ def _stub_gates(monkeypatch, item):
     # 播放门禁桩（与付费墙桩同口径；本文件测变体逻辑，不测门禁）。
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db_, u_, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(play_sign, "check_referer",
                         lambda request, db_: None)
     monkeypatch.setattr(api, "_enforce_stream_limit",

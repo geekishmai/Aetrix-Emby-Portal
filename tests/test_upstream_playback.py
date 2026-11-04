@@ -309,7 +309,7 @@ def _stub_route_auth(monkeypatch):
     # 播放门禁桩（与付费墙桩同口径；本文件测上游路由，不测门禁）。
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, user, r=None: None)
+        lambda *a, **k: None)
 
     async def fake_run_db(fn, *args, **kwargs):
         return fn(*args, **kwargs)

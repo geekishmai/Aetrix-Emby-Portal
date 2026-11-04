@@ -46,7 +46,7 @@ def _stub_common(monkeypatch, item, target):
     # 门禁行为见 tests/test_playback_gate.py）。
     monkeypatch.setattr(
         "backend.emby_server.playback_gate.ensure_binding_playback_allowed",
-        lambda db, u, r=None: None)
+        lambda *a, **k: None)
     monkeypatch.setattr(api, "_play_target", lambda db, it: target)
     # 通用中继已删（2026-10-17 用户拍板全删）：serve_remote_async 不复存在；
     # 未命中直链时 video_stream 直接 410——mount:// 的远程挂载条目除外，
