@@ -383,6 +383,9 @@ export interface DriveOAuthStartResponse {
 // 前端“我的网盘”按这份名单渲染对应块，名单里没有的块整个不渲染。
 export interface StorageBindingProvidersResponse {
   providers: string[]
+  /** 绑定入口总开关（后端 user_storage_binding_enabled）。false = 模式 B：
+   *  用户端「我的网盘」整段不渲染、新绑定被拒，已有绑定行保留。 */
+  enabled: boolean
 }
 
 export const storageBindingApi = {

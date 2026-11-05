@@ -138,6 +138,30 @@ def binding_limit_per_user() -> int:
     return env_int(BINDING_LIMIT_ENV, BINDING_LIMIT_DEFAULT, lo=1)
 
 
+#: 用户自备盘绑定入口总开关（默认开）。模式 B（服务端统一供片）下关掉：
+#: 用户端「我的网盘」整段不渲染、新绑定被拒绝、已有绑定行保留不动。
+KEY_USER_STORAGE_BINDING_ENABLED = "user_storage_binding_enabled"
+
+
+def user_storage_binding_enabled(db: Session) -> bool:
+    """绑定入口总开关（默认开，读失败回默认开）。
+
+    与 ``quark_bind_enabled`` 同款热读 + fail-safe：开关是入口控制不是
+    安全门禁，读不到配置时不该悄悄关掉入口。关闭时：
+    - ``list_binding_providers`` 返回空列表（前端整段「我的网盘」不渲染）；
+    - ``create_binding`` 与 Drive OAuth 新绑定被拒绝并给出明确提示；
+    - 已有绑定行不删除、不改状态（历史数据与重绑入口保留）。
+    """
+    try:
+        raw = (store.get_value(
+            db, KEY_USER_STORAGE_BINDING_ENABLED, "true") or "").strip().lower()
+    except Exception:  # noqa: BLE001 - 测试桩/异常 DB 场景下保默认
+        logger.warning(
+            "user_storage_binding_enabled 读取失败，回默认开", exc_info=True)
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
 #: provider 专属文案覆盖（只覆盖与 provider 强相关的句子，如
 #: expired 里点名了 115 的那句；其余档位各 provider 共用
 #: BINDING_ERROR_MESSAGES，不另编新档位）。
@@ -192,7 +216,10 @@ def list_binding_providers(db: Session) -> list[str]:
 
     只返回映射后的 provider 名，不返回挂载路径、凭据、账号等任何敏感字段；
     只有 is_enabled 的挂载行才计入（NULL 按列默认值启用计）。
+    绑定入口总开关关闭时返回空列表（前端据此整段不渲染「我的网盘」）。
     """
+    if not user_storage_binding_enabled(db):
+        return []
     rows = (
         db.query(em.StorageMount.mount_type)
         .filter(em.StorageMount.is_enabled.isnot(False))
@@ -379,6 +406,10 @@ def create_binding(db: Session, user_id: int, provider: str,
     - 一过性失败：不落行（已插的行回滚），抛 transient。
     返回绑定行（调用方提交后 status 即最终态）。
     """
+    if not user_storage_binding_enabled(db):
+        raise BindingError(
+            "unsupported",
+            "网盘绑定已关闭：本站由服务器统一提供片源，无需绑定自己的网盘。")
     provider = (provider or "").strip()
     if provider not in em.USER_STORAGE_PROVIDERS:
         raise BindingError("validation", f"不支持的 provider：{provider}")

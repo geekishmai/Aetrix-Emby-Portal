@@ -57,7 +57,7 @@
       </section>
 
       <!-- 我的网盘：行式列表，一行一家，展开即该家原绑定卡全部内容（providers 名单驱动） -->
-      <section v-if="providersError || (providersLoaded && hasProvider('drive'))" id="my-drive" class="v4-sec" aria-label="我的网盘">
+      <section v-if="providersEnabled && (providersError || (providersLoaded && hasProvider('drive')))" id="my-drive" class="v4-sec" aria-label="我的网盘">
         <div class="acct-title-row">
           <div class="v4-sec-title">我的网盘</div>
           <button type="button" class="v4-mini-btn" title="刷新" :disabled="driveLoading" :aria-busy="driveLoading" @click="loadDriveBindings">
@@ -461,6 +461,7 @@ import ProfileSubscriptions from '@/components/profile/ProfileSubscriptions.vue'
 import { facilityStamp } from '@/config/game'
 import { authApi, subscriptionApi, embyApi, isExpiringSoon, type MySubscription, type AccountCard, type LoginHistoryItem } from '@/api'
 import { deviceApi, storageBindingApi, seriesFollowApi, welfareApi, memberApi, checkinApi, type MyDevice, type MyDevicesResponse, type StorageBinding, type SeriesFollow } from '@/api/economy'
+import { resolveBindingUiState } from '@/utils/bindingUi'
 import { tgApi } from '@/api/tg'
 import { useUserStore } from '@/stores/user'
 import { useToast } from '@/composables/useToast'
@@ -819,6 +820,9 @@ function deviceAgo(iso?: string | null, isBlocked = false) {
 const availableProviders = ref<string[]>([])
 const providersLoaded = ref(false)
 const providersError = ref('')
+// 绑定入口总开关（后端 user_storage_binding_enabled）：false = 模式 B，
+// 「我的网盘」整段不渲染（含错误态），也不展示任何“未绑定不能点播”文案。
+const providersEnabled = ref(true)
 
 function hasProvider(provider: string) {
   return availableProviders.value.includes(provider)
@@ -877,8 +881,9 @@ function providerMeta(provider: string) {
 async function loadProviders() {
   providersError.value = ''
   try {
-    const res = await storageBindingApi.providers()
-    availableProviders.value = res.providers || []
+    const ui = resolveBindingUiState(await storageBindingApi.providers())
+    availableProviders.value = ui.providers
+    providersEnabled.value = ui.enabled
     providersLoaded.value = true
   } catch (e) {
     // 名单拿不到就没法按规则渲染，留错误态给用户重试，不猜、不 fallback 到全显
@@ -1123,7 +1128,11 @@ function followStateText(state: string, queueReason: string | null): string {
   if (state === 'running') return '转存进行中'
   if (state === 'done') return '转存完成'
   if (state === 'failed') return '转存失败'
-  if (queueReason === 'no_binding') return '未绑定网盘，绑定后下一轮自动转存'
+  if (queueReason === 'no_binding') {
+    return providersEnabled.value
+      ? '未绑定网盘，绑定后下一轮自动转存'
+      : '服务器统一供片，无需转存到个人盘'
+  }
   if (queueReason === 'unsupported_provider_115') return '115 已下线，不支持追剧转存'
   if (queueReason === 'unknown_provider') return '来源不明，暂不转存'
   return '等待下一轮扫集'

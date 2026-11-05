@@ -40,8 +40,13 @@
           >{{ s.name }}</button>
         </div>
         <p v-if="!loading && !needsBinding && schemes.length > 0" class="psp-tip">
-          首播说明：没转存过的片子，首播会先转存到你自己的盘，不走共享池。
-          播放器里转圈、报 409（转存还没完成）或 503（转存失败）时，关掉播放器回到这里再点一次就是重试，不用重绑。
+          <template v-if="bindingEnabled">
+            首播说明：没转存过的片子，首播会先转存到你自己的盘，不走共享池。
+            播放器里转圈、报 409（转存还没完成）或 503（转存失败）时，关掉播放器回到这里再点一次就是重试，不用重绑。
+          </template>
+          <template v-else>
+            本服统一提供片源，点播放器后直接在播放器里打开即可，无需绑定网盘。
+          </template>
         </p>
         <button
           v-if="title && !loading && !needsBinding"
@@ -61,6 +66,10 @@ import { RouterLink } from 'vue-router'
 import { useToast } from '@/composables/useToast'
 import { storageBindingApi } from '@/api/economy'
 import {
+  resolveBindingUiState,
+  shouldShowBindingGuide,
+} from '@/utils/bindingUi'
+import {
   assignImportScheme,
   loadImportSchemes,
   type PlayerScheme,
@@ -75,6 +84,8 @@ const loading = ref(false)
 // 播放门禁引导：名下无 active 绑定时为 true， sheet 只展示绑定引导，
 // 不直接跳播放器（跳过去也会在播放器里被服务端 403）。
 const needsBinding = ref(false)
+// 绑定入口总开关：false（模式 B）时不做绑定引导，也不说“转存到自己的盘”。
+const bindingEnabled = ref(true)
 const panelEl = ref<HTMLElement | null>(null)
 let jumpTimer = 0
 
@@ -87,15 +98,22 @@ watch(open, (now) => {
 async function refresh() {
   loading.value = true
   try {
-    const [schemesResult, bindingsResult] = await Promise.allSettled([
-      loadImportSchemes(),
-      storageBindingApi.list(),
-    ])
+    const [schemesResult, bindingsResult, providersResult] =
+      await Promise.allSettled([
+        loadImportSchemes(),
+        storageBindingApi.list(),
+        storageBindingApi.providers(),
+      ])
     if (schemesResult.status === 'fulfilled') schemes.value = schemesResult.value
+    // 总开关关（模式 B）时整段绑定引导都不出现；拿不到开关状态按开处理。
+    const ui = resolveBindingUiState(
+      providersResult.status === 'fulfilled' ? providersResult.value : undefined)
+    bindingEnabled.value = ui.enabled
     // 绑定列表拉取失败时保持旧行为（服务端门禁仍会拦截），引导只是尽力而为。
     if (bindingsResult.status === 'fulfilled') {
       const bindings = bindingsResult.value?.bindings ?? []
-      needsBinding.value = !bindings.some((b) => b.status === 'active')
+      needsBinding.value = shouldShowBindingGuide(
+        ui.enabled, bindings.some((b) => b.status === 'active'))
     } else {
       needsBinding.value = false
     }

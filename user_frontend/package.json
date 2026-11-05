@@ -10,6 +10,7 @@
     "dev": "vite",
     "build": "vite build",
     "build:strict": "run-p type-check \"build-only {@}\" --",
+    "test:unit": "node --experimental-strip-types --test tests/bindingUi.test.ts",
     "preview": "vite preview",
     "build-only": "vite build",
     "type-check": "vue-tsc --build --noEmit",

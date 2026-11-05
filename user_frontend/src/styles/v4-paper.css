@@ -569,6 +569,14 @@ html[data-theme='light'] {
   .d3-mid { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
   .d3-right { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
   .d3-band { grid-column: 1 / -1; margin-top: 8px; min-width: 0; }
+  /* 媒体库速览带已移出三栏网格（sticky 左栏会压住同容器后一行）：
+     与网格容器同宽同内边距，视觉位置不变 */
+  .v4-scope > .d3-band {
+    max-width: min(1440px, 94vw);
+    margin: 8px auto 0;
+    padding: 0 24px 48px;
+    box-sizing: border-box;
+  }
 
   .m-only { display: none !important; }
 
