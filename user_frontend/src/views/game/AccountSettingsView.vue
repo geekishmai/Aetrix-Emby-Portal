@@ -5,7 +5,7 @@
       <div class="v4-loghead">
         <div class="acct-stamp-row">
           <span class="v4-stamp">{{ facilityStamp('account') }}</span>
-          <a class="acct-drive-link" href="#my-drive" @click.prevent="goToMyDrive">去我的网盘绑定 →</a>
+          <a v-if="providersEnabled" class="acct-drive-link" href="#my-drive" @click.prevent="goToMyDrive">去我的网盘绑定 →</a>
         </div>
         <div class="acct-head">
           <span class="acct-avatar" aria-hidden="true">{{ avatarInitial }}</span>
