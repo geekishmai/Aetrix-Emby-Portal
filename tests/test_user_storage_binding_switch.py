@@ -94,16 +94,17 @@ def test_store_read_failure_defaults_on(db, monkeypatch):
 def test_switch_off_providers_empty_even_with_mounts(db):
     _mount(db, "m-115", "115")
     _mount(db, "m-drive", "drive")
-    assert ub.list_binding_providers(db) == ["drive", "pan115"]
+    # R2 已将 pan115 列入 REMOVED_PROVIDERS，开启时仅返回 drive
+    assert ub.list_binding_providers(db) == ["drive"]
     _set_switch(db, "false")
     assert ub.list_binding_providers(db) == []
 
 
 def test_providers_endpoint_reports_enabled_flag(db):
-    _mount(db, "m-115", "115")
+    _mount(db, "m-drive", "drive")
     user = _user()
     body = portal.list_storage_binding_providers(request_user=user, db=db)
-    assert body == {"providers": ["pan115"], "enabled": True}
+    assert body == {"providers": ["drive"], "enabled": True}
     _set_switch(db, "false")
     body = portal.list_storage_binding_providers(request_user=user, db=db)
     assert body == {"providers": [], "enabled": False}
