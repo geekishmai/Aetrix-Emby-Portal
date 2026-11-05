@@ -258,3 +258,66 @@ def test_frodo_switch_off_returns_empty(db, monkeypatch):
     monkeypatch.setattr(ts, "IDENTIFY_FRODO_FILL_ENABLED", 0)
     item = _make_item(db, imdb_id="tt0903747")
     assert ts.fill_from_frodo(item) == {}
+
+
+# ---------- ⑤ 补资料段：建演员行（emby_people） ----------
+
+def test_fill_creates_cast_rows_idempotently():
+    """两段式补资料段必须先调 _apply_cast 建 emby_people 行（幂等）。
+
+    线上事故根因：IDENTIFY_STAGE_ENABLED=1 + FILL_STAGE_ENABLED=1 时只走
+    apply_fill，而 _apply_people_fill 只补已有行从不新建行 → 全库
+    emby_people 为 0 行。模拟生产 SessionLocal(autoflush=False)。
+    """
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    base_models.Base.metadata.create_all(engine)
+    em.Base.metadata.create_all(engine)
+    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    session = factory()
+    try:
+        item = _make_item(session, tmdb_id="60300")
+        session.commit()
+        fetched = _fetched()
+        fetched["tmdb_details"]["credits"] = {
+            "cast": [
+                {"id": 101, "name": "布莱恩·科兰斯顿", "character": "沃尔特·怀特",
+                 "profile_path": "/walt.jpg"},
+                {"id": 102, "name": "亚伦·保尔", "character": "杰西·平克曼",
+                 "profile_path": None},
+            ]
+        }
+
+        ts.apply_fill(session, item, fetched)
+        session.commit()
+
+        rows = (session.query(em.EmbyPerson)
+                .filter(em.EmbyPerson.item_id == item.id)
+                .order_by(em.EmbyPerson.sort_order.asc())
+                .all())
+        assert [(r.name, r.role, r.person_tmdb_id) for r in rows] == [
+            ("布莱恩·科兰斯顿", "沃尔特·怀特", "101"),
+            ("亚伦·保尔", "杰西·平克曼", "102"),
+        ]
+        assert rows[0].image.endswith("/w185/walt.jpg")
+        assert rows[1].image == ""
+
+        # 重复跑补资料段必须幂等，不产生重复演员行
+        ts.apply_fill(session, item, fetched)
+        session.commit()
+        assert session.query(em.EmbyPerson).filter(
+            em.EmbyPerson.item_id == item.id).count() == 2
+    finally:
+        session.close()
+
+
+def test_fill_cast_exception_does_not_abort_fill(db, monkeypatch):
+    """_apply_cast 抛异常时不得拖垮补资料段其余字段与段记录落库。"""
+    monkeypatch.setattr(
+        enrich_worker, "_apply_cast",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("cast boom")))
+    item = _make_item(db, tmdb_id="60300", overview=None)
+    filled = ts.apply_fill(db, item, _fetched())
+    assert "overview" in filled
+    assert item.overview == "详情简介"
+    assert _stage_record(db, item.id).stage == "filled"

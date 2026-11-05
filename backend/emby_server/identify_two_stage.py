@@ -1132,9 +1132,9 @@ def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
     Frodo 只补缺口，不覆盖已填。Frodo 之后仍缺的字段再问中文聚合
     通道（聚合开关关时它返回空，行为与本批之前逐字一致；聚合开时
     它按源优先级逐字段补缺，Frodo 腿在聚合里不受独立 Frodo 开关
-    管辖——见 zh_aggregate 模块头注）。最后跑人物补缺（接线批）：
-    只填本条目已有人物行的 role / image / person_tmdb_id 空缺，
-    永不覆盖、不新建行；开关关时不问源。返回实际填上的字段名列表。
+    管辖——见 zh_aggregate 模块头注）。最后先经 ``_apply_cast`` 幂等建
+    演员行，再跑人物补缺（只填本条目人物行的 role / image /
+    person_tmdb_id 空缺，永不覆盖；开关关时不问源）。返回实际填上的字段名列表。
     """
     from backend.emby_server import identity_gate
 
@@ -1204,6 +1204,14 @@ def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
             else:
                 setattr(item, field, agg_candidates[field])
                 filled.append(field)
+    try:
+        from backend.emby_server.enrich_worker import _apply_cast
+
+        _apply_cast(db, item, fetched.get("tmdb_details"))
+        if getattr(db, "new", None):
+            db.flush()
+    except Exception as exc:  # noqa: BLE001 — 演员落库绝不拖垮补资料段
+        logger.warning("补资料段演员落库失败，跳过 id=%s: %s", item.id, exc)
     try:
         _apply_people_fill(db, item, fetched, people_fetcher)
     except Exception as exc:  # noqa: BLE001 — 人物补缺绝不拖垮补资料段
