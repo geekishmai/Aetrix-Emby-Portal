@@ -17,6 +17,7 @@ from backend.emby_server.playback_tune import RANGE_LIMITER
 from urllib.parse import parse_qsl, urljoin, urlsplit
 
 from backend.emby_server.mounts import MOUNT_UA, MountError
+from backend.emby_server.env_util import env_float
 
 if TYPE_CHECKING:
     # httpx 运行时是延迟导入（各函数内按需 import，保持模块导入轻量）；
@@ -476,6 +477,9 @@ async def resolve_drive_final_url(
 _MOUNT_RELAY_TIMEOUT_CONNECT = 10.0
 _MOUNT_RELAY_TIMEOUT_READ = 30.0
 _MOUNT_RELAY_STALL_DEFAULT = 300.0
+# httpx 0.28 默认 keepalive_expiry=5s：用户拖动间隔常 >5s，空闲连接被回收后每次重做
+# 跨境 TCP+TLS（netcup→115 CDN 0.6–1.6s），放宽到 60s 复用长连接。
+_MOUNT_RELAY_KEEPALIVE_SEC = env_float("MOUNT_RELAY_KEEPALIVE_SEC", 60.0, lo=0.0)
 
 
 def _mount_relay_stall_timeout() -> float:
@@ -579,8 +583,11 @@ def _mount_relay_client() -> "httpx.AsyncClient":
     client = httpx.AsyncClient(
         transport=PinnedAsyncHTTPTransport(
             _PINNING_CACHE.lookup,
-            limits=httpx.Limits(max_connections=32,
-                                max_keepalive_connections=16),
+            limits=httpx.Limits(
+                max_connections=32,
+                max_keepalive_connections=16,
+                keepalive_expiry=_MOUNT_RELAY_KEEPALIVE_SEC,
+            ),
         ),
         timeout=httpx.Timeout(
             connect=_MOUNT_RELAY_TIMEOUT_CONNECT,
