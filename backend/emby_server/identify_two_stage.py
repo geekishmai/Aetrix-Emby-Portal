@@ -827,12 +827,20 @@ def fill_candidates_from_fetched(fetched: dict) -> dict:
 
     只取白名单字段；空值直接丢掉——空候选不算“填上了”，也不覆盖。
     """
+    from backend.emby_server.tmdb import (
+        pick_logo_path,
+        pick_textless_backdrop_path,
+        pick_thumb_path,
+    )
+
     fetched = fetched or {}
     details = fetched.get("tmdb_details") or {}
     candidates = {
         "overview": details.get("overview") or "",
         "poster_path": fetched.get("poster") or details.get("poster_path") or "",
-        "backdrop_path": fetched.get("fanart") or details.get("backdrop_path") or "",
+        "backdrop_path": fetched.get("fanart") or pick_textless_backdrop_path(details) or "",
+        "logo_path": pick_logo_path(details) or "",
+        "thumb_path": pick_thumb_path(details) or "",
         "community_rating": details.get("vote_average"),
         "genres": _genres_candidate(fetched, details),
     }
@@ -877,6 +885,8 @@ def _genres_candidate(fetched: dict, details: dict) -> str:
 _IMAGE_FIELDS = {
     "poster_path": ("primary_image_url", "Primary"),
     "backdrop_path": ("backdrop_image_url", "Backdrop"),
+    "logo_path": ("logo_image_url", "Logo"),
+    "thumb_path": ("thumb_image_url", "Thumb"),
 }
 
 
@@ -909,7 +919,7 @@ def _land_remote_image(item, field, value) -> list:
             url.startswith("http://") or url.startswith("https://"))):
         from backend.emby_server.tmdb import image_base
 
-        size = "w500" if kind == "Primary" else "w1280"
+        size = {"Primary": "w500", "Backdrop": "w1280", "Logo": "w500", "Thumb": "w780"}.get(kind, "w1280")
         rel = str(value)
         url = f"{image_base()}/{size}{rel if rel.startswith('/') else '/' + rel}"
     from backend.emby_server.tmdb import _set_image
@@ -1169,9 +1179,13 @@ def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
         if fetched.get("fanart"):
             item.backdrop_path = fetched["fanart"]
             filled.append("backdrop_path")
-        elif details.get("backdrop_path"):
+        elif candidates.get("backdrop_path"):
             filled += _land_remote_image(
-                item, "backdrop_path", details["backdrop_path"])
+                item, "backdrop_path", candidates["backdrop_path"])
+    if _image_missing(item, "logo_path") and candidates.get("logo_path"):
+        filled += _land_remote_image(item, "logo_path", candidates["logo_path"])
+    if _image_missing(item, "thumb_path") and candidates.get("thumb_path"):
+        filled += _land_remote_image(item, "thumb_path", candidates["thumb_path"])
     still_missing = [
         f for f in FRODO_FILL_FIELDS if _fill_still_missing(item, f)
     ]
@@ -1216,6 +1230,14 @@ def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
         _apply_people_fill(db, item, fetched, people_fetcher)
     except Exception as exc:  # noqa: BLE001 — 人物补缺绝不拖垮补资料段
         logger.warning("补资料段人物补缺失败，跳过 id=%s: %s", item.id, exc)
+    season_posters = fetched.get("season_posters") or {}
+    if (getattr(item, "item_type", "") or "") == "series" and season_posters:
+        try:
+            from backend.emby_server.enrich_worker import _apply_season_posters
+
+            _apply_season_posters(db, season_posters)
+        except Exception as exc:  # noqa: BLE001 — 季海报落库绝不拖垮补资料段
+            logger.warning("补资料段季海报落库失败，跳过 id=%s: %s", item.id, exc)
     binding = None
     # strip 归一（完美审查第三轮）：裸 or 会让空白 tmdb 压住真实 imdb，
     # 补资料段记录 upsert 成 provider=tmdb / external_id="  " 的脏证据。

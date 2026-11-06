@@ -55,6 +55,10 @@ def _remember_local_image(db: Session, item: em.MediaItem, kind: str, path: str)
     try:
         if kind == "Primary":
             item.poster_path = path
+        elif kind == "Logo":
+            item.logo_path = path
+        elif kind == "Thumb":
+            item.thumb_path = path
         else:
             item.backdrop_path = path
         db.commit()
@@ -383,7 +387,15 @@ def item_image(item_id: str, image_type: str, request: Request,
         _anon_image_gate(db, request, image_type, item)
     if image_type not in ("Primary", "Backdrop", "Art", "Thumb", "Logo"):
         raise HTTPException(status_code=404, detail="Image not found")
-    kind = "Primary" if image_type == "Primary" else "Backdrop"
+    if image_type == "Primary":
+        kind = "Primary"
+    elif image_type == "Logo":
+        # Logo 必须返回透明 PNG ClearLogo，无 Logo 时严禁回退 Backdrop，直接 404
+        kind = "Logo"
+    elif image_type == "Thumb":
+        kind = "Thumb" if _first_image(item, "Thumb", db) else "Backdrop"
+    else:
+        kind = "Backdrop"
 
     src = _first_image(item, kind, db)
     if not src:
@@ -395,7 +407,8 @@ def item_image(item_id: str, image_type: str, request: Request,
         cached = image_store.localize(src)
         if cached:
             _remember_local_image(db, item, kind, cached)
-            return _serve_sized(cached, ew, eh)
+            # 透明 PNG Logo 不经 RGB JPEG 缩略图管线，保持原始透明通道
+            return serve_image(cached) if kind == "Logo" else _serve_sized(cached, ew, eh)
         # 仅允许代理 http(s) 远程图片。注意：scheme 校验本身不是 SSRF 防护，
         # 真正的私网/回环拦截在 _proxy_remote_image 的逐跳 verify_outbound_url。
         # 共享客户端复用连接：海报墙穿透时不用每次建连
@@ -426,7 +439,7 @@ def item_image(item_id: str, image_type: str, request: Request,
         logger.warning("本地图片文件缺失，已排队修复：%s", src)
         _queue_image_repair(db, item, src)
         raise HTTPException(status_code=404, detail="Image not found")
-    return _serve_sized(src, ew, eh)
+    return serve_image(src) if kind == "Logo" else _serve_sized(src, ew, eh)
 
 
 @emby_router.get("/emby/Items/{item_id}/Images/{image_type}/{index}")

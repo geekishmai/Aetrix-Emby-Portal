@@ -171,6 +171,10 @@ def _image_chain(item: em.MediaItem, kind: str, db: Session) -> list[str]:
     def srcs(it: em.MediaItem) -> list[str]:
         if kind == "Primary":
             remote, local = it.primary_image_url or "", it.poster_path or ""
+        elif kind == "Logo":
+            remote, local = getattr(it, "logo_image_url", None) or "", getattr(it, "logo_path", None) or ""
+        elif kind == "Thumb":
+            remote, local = getattr(it, "thumb_image_url", None) or "", getattr(it, "thumb_path", None) or ""
         else:
             remote, local = it.backdrop_image_url or "", it.backdrop_path or ""
         # 刮削图片本地化的那份缓存（在我们自己的图片目录里）优先走本地，且必须真在磁盘上：
@@ -259,6 +263,12 @@ def _queue_image_repair(db: Session, item: em.MediaItem, stale_src: str) -> None
             if item.backdrop_path == stale_src:
                 item.backdrop_path = None
                 changed = True
+            if getattr(item, "logo_path", None) == stale_src:
+                item.logo_path = None
+                changed = True
+            if getattr(item, "thumb_path", None) == stale_src:
+                item.thumb_path = None
+                changed = True
         if item.repair_requested_at is None:
             item.repair_requested_at = datetime.now()
             changed = True
@@ -272,6 +282,10 @@ def _queue_image_repair(db: Session, item: em.MediaItem, stale_src: str) -> None
 def _image_url(base: str, item: em.MediaItem, kind: str = "Primary") -> str | None:
     if kind == "Primary":
         src = item.primary_image_url or item.poster_path
+    elif kind == "Logo":
+        src = getattr(item, "logo_image_url", None) or getattr(item, "logo_path", None)
+    elif kind == "Thumb":
+        src = getattr(item, "thumb_image_url", None) or getattr(item, "thumb_path", None)
     else:
         src = item.backdrop_image_url or item.backdrop_path
     if not src:
@@ -615,25 +629,58 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
         # 集/季通常不单独存 TMDB 图片；图片接口会按「自身 → 季 → 剧」回退。
         # 这里的 ImageTags 也必须反映这条回退链，否则客户端根本不会发图片请求，
         # 详情页就会显示灰色占位图（数据库明明已有剧集海报）。
-        "ImageTags": {
-            "Primary": "1"
-        } if (item.poster_path or item.primary_image_url
-               or (item.item_type in ("episode", "season")
-                   and _first_image(item, "Primary", db))) else {},
+        "ImageTags": {},
         # 官方 AttachBasicFields 无条件置空字典（有模糊图时才填）；三方客户端裸读
         "ImageBlurHashes": {},
         "ProviderIds": _provider_ids(item),
         "UserData": _user_data_dto(umd, item.guid, _run_time_ticks(item)),
         "MediaSources": [],
-        # 三方客户端 Fields 参数常要的字段
-        "PrimaryImageAspectRatio": 0.6666667,
+        # 三方客户端 Fields 参数常要的字段：单集有自有剧照（16:9 still）时报 1.7777778
+        "PrimaryImageAspectRatio": (
+            1.7777778
+            if (item.item_type == "episode" and (item.poster_path or item.primary_image_url))
+            else 0.6666667
+        ),
         "SyncStatus": "Synced",
     }
+    image_tags: dict[str, str] = {}
+    if (
+        item.poster_path
+        or item.primary_image_url
+        or (item.item_type in ("episode", "season") and _first_image(item, "Primary", db))
+    ):
+        image_tags["Primary"] = "1"
+    if getattr(item, "logo_path", None) or getattr(item, "logo_image_url", None):
+        image_tags["Logo"] = "1"
+    if getattr(item, "thumb_path", None) or getattr(item, "thumb_image_url", None):
+        image_tags["Thumb"] = "1"
+    if item.item_type in ("episode", "season"):
+        ancestors: list[em.MediaItem] = []
+        if getattr(item, "parent", None) is not None and _visible_in_session(item.parent):
+            ancestors.append(item.parent)
+        elif item.parent_id:
+            p_row = db.get(em.MediaItem, item.parent_id)
+            if p_row is not None and _visible_in_session(p_row):
+                ancestors.append(p_row)
+        if item.series is not None and item.series not in ancestors and _visible_in_session(item.series):
+            ancestors.append(item.series)
+        if "Logo" not in image_tags:
+            for anc in ancestors:
+                if getattr(anc, "logo_path", None) or getattr(anc, "logo_image_url", None):
+                    dto["ParentLogoImageTag"] = "1"
+                    dto["ParentLogoItemId"] = anc.guid
+                    break
+        if "Thumb" not in image_tags:
+            for anc in ancestors:
+                if getattr(anc, "thumb_path", None) or getattr(anc, "thumb_image_url", None):
+                    dto["ParentThumbImageTag"] = "1"
+                    dto["ParentThumbItemId"] = anc.guid
+                    break
+    dto["ImageTags"] = image_tags
     # 真实 Emby 的 Status 是剧集专属字段（SeriesStatus）；电影/季/集不发（null 省略）。
     # 以前全类型硬编码 "Continuing"，与官方口径对齐：只给 series 发。
     if item.item_type == "series":
         dto["Status"] = "Continuing"
-    # 可选字段：有值才加
     if item.production_year:
         dto["ProductionYear"] = item.production_year
     if item.community_rating:
@@ -2499,7 +2546,8 @@ def user_views(user_id: str, user: models.WebUser = Depends(get_emby_user),
         # 真实库与已有显式封面的库逻辑逐字不动（primary_aspect 对真实库
         # 恒等于旧的 cover_path 条件）。
         cover_path = getattr(lib, "cover_path", None)
-        primary_aspect = 0.6666667 if cover_path else None
+        # 媒体库显式封面（1920x1080 渲染/直传）统一为 16:9 横图
+        primary_aspect = 1.7777778 if cover_path else None
         _is_cms = library_covers.is_applecms_library(lib)
         if not cover_path and (is_virtual or _is_cms):
             _derived = (

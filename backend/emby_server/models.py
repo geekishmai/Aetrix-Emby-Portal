@@ -319,6 +319,10 @@ class MediaItem(Base):
     backdrop_path = Column(String(1024))
     primary_image_url = Column(String(1024))  # TMDB 刮削到的远程图
     backdrop_image_url = Column(String(1024))
+    logo_path = Column(String(1024))      # 本地化透明 PNG ClearLogo
+    logo_image_url = Column(String(1024)) # TMDB 刮削到的远程透明 PNG Logo
+    thumb_path = Column(String(1024))     # 本地化 16:9 带片名横版缩略图
+    thumb_image_url = Column(String(1024))
 
     # 状态
     last_probed_at = Column(DateTime)  # 上次 ffprobe 时间，供刮削策略判断是否重探
