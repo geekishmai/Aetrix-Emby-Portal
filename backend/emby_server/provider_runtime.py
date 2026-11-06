@@ -350,10 +350,13 @@ class ProviderRuntimeClient:
         return self.call("open_range", params)  # type: ignore[return-value]
 
     def resolve_play_target(self, session_id: str, path: str,
-                            *, pickcode: str | None = None) -> dict:
+                            *, pickcode: str | None = None,
+                            file_size: int | None = None) -> dict:
         params: dict = {"session_id": session_id, "path": path}
         if pickcode:
             params["pickcode"] = pickcode
+        if file_size is not None and int(file_size) > 0:
+            params["file_size"] = int(file_size)
         return self.call("resolve_play_target", params)  # type: ignore[return-value]
 
     def resolve_display_asset(self, session_id: str, path: str,
@@ -506,6 +509,9 @@ class ProviderRuntimeServer:
                 _pc = params.get("pickcode")
                 if _pc and _handler_accepts_param(handler, method, fn, "pickcode"):
                     _kw = {**_kw, "pickcode": _pc}
+                _fsz = params.get("file_size")
+                if _fsz is not None and _handler_accepts_param(handler, method, fn, "file_size"):
+                    _kw = {**_kw, "file_size": _fsz}
                 return fn(session, params.get("path") or "/", **_kw)
             if method == "health":
                 return fn(session)

@@ -392,9 +392,9 @@ def test_redis_outage_degrades_cleanly_to_memory(monkeypatch):
 
 
 def test_host_singleflight_wait_covers_cold_walk_and_sidecar_deduplicates_inflight():
-    """复现线上 12:04Z 场景：大文件 web 通道返 50028 回落 app 通道（单次逻辑取链 = 2 次 API），
-    当预取与播放并发打进 sidecar 时，在途单飞将 list_dir 与 download_url 严格合并为 1 轮
-    （API 调用从 4 次降为 2 次；小文件从 2 次降为 1 次），且结束后 inflight 表为空。
+    """复现线上 12:04Z 场景：8GB 大文件超 190MiB 阈值直接走 app 通道（省掉必败 web 50028），
+    且当预取与播放并发打进 sidecar 时，在途单飞将 list_dir 与 download_url 严格合并为 1 次
+    （原 download_url +4 直接降至 +1），结束后 inflight 表为空。
     """
     assert mnt._RESOLVE_SINGLE_FLIGHT_WAIT_SEC >= 15.0
 
@@ -418,12 +418,12 @@ def test_host_singleflight_wait_covers_cold_walk_and_sidecar_deduplicates_inflig
 
         def _download_url_web(self, pickcode, deadline=None):
             counts["web_dl"] += 1
-            dl_entered.set()
-            release_dl.wait(2.0)
             raise transfer115.Pan115ChannelLimitError("文件大小超出限制 (50028)")
 
         def _download_url_app(self, pickcode, deadline=None):
             counts["app_dl"] += 1
+            dl_entered.set()
+            release_dl.wait(2.0)
             return f"https://cdnfhnfile.115cdn.net/{pickcode}.mkv?t={int(time.time() + 7200)}"
 
     handler = P115SidecarHandler(client_factory=_LargeFileClient)
@@ -458,8 +458,141 @@ def test_host_singleflight_wait_covers_cold_walk_and_sidecar_deduplicates_inflig
     assert errors == []
     assert len(results) == 2 and results[0] == results[1]
     assert counts["list"] == 1, f"并发冷定位只能列目录 1 次，实际 {counts['list']}"
-    assert counts["web_dl"] == 1 and counts["app_dl"] == 1, (
-        f"并发预取+播放不得重复取链（原 +4 降为单轮 web+app = +2），实际 {counts}"
+    assert counts["web_dl"] == 0 and counts["app_dl"] == 1, (
+        f"8GB 大文件并发预取+播放应直走 app 通道且合并为 1 次（原 +4 降至 +1），实际 {counts}"
     )
     assert handler._list_inflight == {}
     assert handler._dl_inflight == {}
+
+
+# ---------------- 4. 按文件大小选通道（200MiB 上限留 5% = 190MiB 默认阈值） ----------------
+
+
+def test_download_url_size_threshold_routes_large_to_app_and_small_to_web(monkeypatch):
+    assert transfer115.PAN115_WEB_DOWNLOAD_LIMIT_BYTES == 200 * 1024 * 1024
+    assert transfer115.PAN115_WEB_DOWNLOAD_MAX_BYTES == 190 * 1024 * 1024
+
+    seen = {"web": 0, "app": 0}
+
+    class _StubClient(transfer115.Pan115Client):
+        def __init__(self):
+            self.cookie = "UID=1_A1_1;CID=x;SEID=y"
+            self.ua = "UA"
+
+        def _download_url_web(self, pickcode, deadline=None):
+            seen["web"] += 1
+            if pickcode == "pc-unknown-big":
+                raise transfer115.Pan115ChannelLimitError("50028")
+            return f"https://web.example/{pickcode}"
+
+        def _download_url_app(self, pickcode, deadline=None):
+            seen["app"] += 1
+            return f"https://app.example/{pickcode}"
+
+    c = _StubClient()
+    # 1) 小文件（157 MiB <= 190 MiB）与恰等于阈值（190 MiB）：维持走 webapi
+    assert c.download_url("pc-157m", file_size=157 * 1024 * 1024) == "https://web.example/pc-157m"
+    assert c.download_url("pc-190m", file_size=190 * 1024 * 1024) == "https://web.example/pc-190m"
+    assert seen == {"web": 2, "app": 0}
+
+    # 2) 超过阈值（190 MiB + 1B / 843 MiB）：直接走 app 通道，0 次 webapi
+    assert c.download_url("pc-190m-plus", file_size=190 * 1024 * 1024 + 1) == "https://app.example/pc-190m-plus"
+    assert c.download_url("pc-843m", file_size=843_844_273) == "https://app.example/pc-843m"
+    assert seen == {"web": 2, "app": 2}
+
+    # 3) 未知大小（file_size=None）：保持原行为（先试 web，撞 50028 回落 app）
+    assert c.download_url("pc-unknown-big", file_size=None) == "https://app.example/pc-unknown-big"
+    assert seen == {"web": 3, "app": 3}
+
+    # 4) 阈值可配：调低至 50 MiB 后，60 MiB 文件直走 app 通道
+    monkeypatch.setattr(transfer115, "PAN115_WEB_DOWNLOAD_MAX_BYTES", 50 * 1024 * 1024)
+    assert c.download_url("pc-60m", file_size=60 * 1024 * 1024) == "https://app.example/pc-60m"
+    assert seen == {"web": 3, "app": 4}
+
+
+def test_redis_persists_file_size_so_post_restart_large_file_still_skips_web(
+    monkeypatch, fake_redis
+):
+    """端到端验证：冷播大文件时直走 app（+1），大小随 pickcode 一并落入 Redis；
+    容器重启后命中 Redis 跳过 list_dir 且仍带回 file_size 直走 app（+1）；小文件仍走 web（+1）。
+    """
+    calls = {"list": 0, "web": 0, "app": 0}
+
+    class _Client(transfer115.Pan115Client):
+        def __init__(self, cookie, ua=""):
+            self.cookie = cookie
+            self.ua = ua
+
+        def list_dir(self, cid="0", limit=1000, deadline=None):
+            calls["list"] += 1
+            return [
+                {"cid": "1", "name": "feature.mkv", "is_dir": False,
+                 "pickcode": "pc-big", "size": 4_500_000_000},
+                {"cid": "2", "name": "trailer.mp4", "is_dir": False,
+                 "pickcode": "pc-small", "size": 40 * 1024 * 1024},
+            ]
+
+        def _download_url_web(self, pickcode, deadline=None):
+            calls["web"] += 1
+            return f"https://cdnfhnfile.115cdn.net/{pickcode}.mp4?t={int(time.time() + 7200)}&ch=web"
+
+        def _download_url_app(self, pickcode, deadline=None):
+            calls["app"] += 1
+            return f"https://cdnfhnfile.115cdn.net/{pickcode}.mkv?t={int(time.time() + 7200)}&ch=app"
+
+    handler = P115SidecarHandler(client_factory=_Client)
+
+    class _Bridge:
+        def handshake(self, required_extensions=None):
+            return {
+                "protocol": "external-provider-runtime-v1",
+                "provider": "p115",
+                "capabilities": ["list_page", "open_range", "resolve_play_target"],
+                "extensions": list(handler.extensions),
+            }
+
+        def session_upsert(self, session_id, data):
+            handler.session_upsert(session_id, data)
+            return {"ok": True}
+
+        def resolve_play_target(self, session_id: str, path: str,
+                                *, pickcode: str | None = None,
+                                file_size: int | None = None) -> dict:
+            return handler.resolve_play_target(
+                RuntimeSession(session_id=session_id, data={}),
+                path,
+                pickcode=pickcode,
+                file_size=file_size,
+            )
+
+        def close(self):
+            pass
+
+    mount = _mount(mount_id=2, config={"cid": "0"})
+    bridge = _Bridge()
+    monkeypatch.setattr(mnt, "load_mount", lambda db, mid: mount)
+    monkeypatch.setattr(
+        mnt, "build_provider",
+        lambda m, db, library=None: P115SidecarMount(m, db, library, client=bridge, cookie_override="ck"),
+    )
+
+    # 1) 冷播 4.5GB 正片 + 40MiB 预告片：大文件直走 app(+1)，小文件走 web(+1)
+    u_big_1 = mnt.resolve_play_target("mount://2/feature.mkv", None)
+    u_small_1 = mnt.resolve_play_target("mount://2/trailer.mp4", None)
+    assert "ch=app" in u_big_1.value
+    assert "ch=web" in u_small_1.value
+    assert calls == {"list": 1, "web": 1, "app": 1}
+
+    # 2) 模拟容器重启清空全部进程内缓存，仅留 Redis
+    with mnt._RESOLVE_CACHE_LOCK:
+        mnt._RESOLVE_CACHE.clear()
+        mnt._PATH_ID_CACHE.clear()
+    handler._dir_cache.clear()
+    handler._cid_cache.clear()
+
+    # 3) 重启后再次播放：list 零增长，且 4.5GB 正片凭 Redis 里持久化的 sz 仍直走 app(+1)
+    u_big_2 = mnt.resolve_play_target("mount://2/feature.mkv", None)
+    u_small_2 = mnt.resolve_play_target("mount://2/trailer.mp4", None)
+    assert "ch=app" in u_big_2.value
+    assert "ch=web" in u_small_2.value
+    assert calls == {"list": 1, "web": 2, "app": 2}
