@@ -94,10 +94,12 @@ def portal_poster_url(item, db) -> str | None:
 
 
 def _serialize_cursor_item(item, db) -> dict:
+    from backend.emby_server.portal_title import preferred_media_title
+
     return {
         "id": item.id,
         "guid": item.guid,
-        "name": item.name,
+        "name": preferred_media_title(item) or item.name,
         "item_type": item.item_type,
         "production_year": item.production_year,
         "poster_url": portal_poster_url(item, db),

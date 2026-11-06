@@ -104,12 +104,15 @@ def read_feed(db, realm_id, limit: int = 12) -> list:
             .order_by(_models.PanelActivity.id.desc())
             .limit(limit).all())
     items = []
+    from backend.emby_server.portal_title import build_feed_title_map, clean_feed_display_text
+
+    title_map = build_feed_title_map(db, [r.text or "" for r in rows])
     for r in rows:
         at = getattr(r, "created_at", None)
         items.append({
             "at": at.isoformat() if at else None,
             "type": (getattr(r, "event_type", None) or FEED_TYPE_SYSTEM),
-            "text": r.text,
+            "text": clean_feed_display_text(r.text, title_map=title_map),
             "library": getattr(r, "library", None),
         })
     return items

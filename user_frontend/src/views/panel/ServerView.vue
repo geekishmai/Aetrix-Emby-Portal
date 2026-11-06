@@ -1,6 +1,6 @@
 <template>
   <div class="v4-scope">
-    <div class="v4-page">
+    <div class="v4-page v4-server-page">
       <header class="v4-loghead">
         <span class="v4-stamp">服务器状态</span>
         <h1>服务器</h1>
@@ -12,7 +12,7 @@
         <div class="v4-err" role="alert">{{ server.error }}<br><button class="v4-retry" :disabled="server.loading" @click="retryServer">{{ server.loading ? '正在重连…' : '重试' }}</button></div>
       </div>
 
-      <div v-if="!server.error">
+      <div v-if="!server.error" class="v4-server-grid">
       <!-- 连接状态（可视化仍是 LifeOrb） -->
       <section class="v4-sec">
         <div class="v4-sec-title">服务器状态</div>

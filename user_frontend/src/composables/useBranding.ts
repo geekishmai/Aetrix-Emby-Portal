@@ -13,7 +13,7 @@
 import { reactive } from 'vue'
 import { brandingApi, type Branding } from '@/api'
 
-export const DEFAULT_SITE_NAME = 'Aetrix'
+export const DEFAULT_SITE_NAME = '帆桥影院'
 export const DEFAULT_THEME_COLOR = '#e8a84a'
 
 /**
@@ -93,11 +93,10 @@ function setMeta(name: string, content: string) {
 export function applyBranding() {
   applyBrandingTokens()
 
-  // 标题策略：路由守卫已经写过「页面名 - 旧站名」，这里只把站名那段换掉，
-  // 不能直接覆盖成 SEO 标题——否则刚打开 /media 时标题里的「媒体库」会丢。
-  const suffix = ` - ${DEFAULT_SITE_NAME}`
-  if (document.title.endsWith(suffix)) {
-    document.title = `${document.title.slice(0, -suffix.length)} - ${branding.site_name}`
+  // 标题策略：若当前标题含「页面名 - 旧站名」，仅替换尾部站名，保留当前页面名
+  const sepIdx = document.title.lastIndexOf(' - ')
+  if (sepIdx > 0) {
+    document.title = `${document.title.slice(0, sepIdx)} - ${branding.site_name}`
   } else {
     document.title = pageTitle()
   }
@@ -173,8 +172,12 @@ export async function initBranding(): Promise<void> {
   initialized = true
   try {
     const info = await brandingApi.get()
-    Object.assign(branding, info)
+    const rawName = (info.site_name || '').trim()
+    const normalizedName =
+      !rawName || rawName === 'Aetrix' || rawName === '帆桥' ? DEFAULT_SITE_NAME : rawName
+    Object.assign(branding, info, { site_name: normalizedName })
   } catch {
+    applyBranding()
     return
   }
   applyBranding()

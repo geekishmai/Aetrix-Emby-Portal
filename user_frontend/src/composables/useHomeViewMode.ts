@@ -1,7 +1,7 @@
 // user_frontend/src/composables/useHomeViewMode.ts
 // 用户端首页桌面形态偏好：'world'（探险世界地图式首页）| 'classic'（现有列表式首页）
 // 存储键：aetrix:home-view:v1（登录用户追加 :u{userId} 后缀），存 JSON { mode }
-// 默认 'world'。世界首页只替换桌面（≥1024）发现页。
+// 默认 'classic'（第 1 期 UI 专项：首页默认展示置顶海报墙与片库入口；用户仍可手动切换至探险世界或访问 /game）。
 // 手机发现页永远是经典内容；世界地图在 /game，避免两个 Tab 变成同一页。
 import { ref, watch, computed } from 'vue'
 import { useUserStore } from '@/stores/user'
@@ -9,7 +9,7 @@ import { useUserStore } from '@/stores/user'
 export type HomeViewMode = 'world' | 'classic'
 const STORAGE_PREFIX = 'aetrix:home-view:v1'
 interface HomeViewPrefs { mode: HomeViewMode }
-const DEFAULT_MODE: HomeViewMode = 'world'
+const DEFAULT_MODE: HomeViewMode = 'classic'
 const mode = ref<HomeViewMode>(DEFAULT_MODE)
 let prefsLoadedFor: number | null | undefined | '@@unloaded' = '@@unloaded'
 function storageKey(userId: number | null | undefined): string {

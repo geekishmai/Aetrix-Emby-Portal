@@ -1163,6 +1163,34 @@ def apply_fill(db, item, fetched: dict, people_fetcher=None) -> list:
             filled.append(field)
     if _rename_from_bound_details(item, fetched.get("tmdb_details") or {}):
         filled.append("name")
+    _det_for_alias = fetched.get("tmdb_details") or {}
+    if _det_for_alias:
+        _alt_block = _det_for_alias.get("alternative_titles") or {}
+        _alt_list = [
+            t.get("title")
+            for t in ((_alt_block.get("titles") or []) + (_alt_block.get("results") or []))
+            if isinstance(t, dict) and t.get("title")
+        ]
+        _cand_names = [
+            str(n).strip()
+            for n in (
+                [_det_for_alias.get("title"), _det_for_alias.get("name"),
+                 _det_for_alias.get("original_title"), _det_for_alias.get("original_name")]
+                + _alt_list
+            )
+            if n and str(n).strip()
+        ]
+        if _cand_names:
+            _exist_aliases = [
+                a.strip() for a in (getattr(item, "aliases", None) or "").split(",") if a.strip()
+            ]
+            _merged_aliases = list(dict.fromkeys(_exist_aliases + _cand_names))[:12]
+            _joined_aliases = ",".join(_merged_aliases)
+            if _joined_aliases and _joined_aliases != (getattr(item, "aliases", None) or ""):
+                item.aliases = _joined_aliases
+        _orig_t = str(_det_for_alias.get("original_title") or _det_for_alias.get("original_name") or "").strip()
+        if _orig_t and _empty(getattr(item, "original_title", None)):
+            item.original_title = _orig_t
     # 图片字段：side 本地图是本地文件路径，直落本地字段；TMDB 详情的
     # 相对路径原值走 _land_remote_image 落远程 URL（见 _IMAGE_FIELDS
     # 注释的事故成因）。缺图判定是双字段口径：已有远程 URL 的条目

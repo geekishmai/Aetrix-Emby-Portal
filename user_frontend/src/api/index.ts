@@ -33,11 +33,23 @@ export const tokenStore = {
 
 // ==================== 请求拦截器 ====================
 
+export function isEmbyProtocolUrl(url?: string): boolean {
+  if (!url || url.startsWith('/api/')) return false
+  if (url.startsWith('/emby/')) return true
+  try {
+    return new URL(url, 'http://localhost').pathname.startsWith('/emby/')
+  } catch {
+    return false
+  }
+}
 api.interceptors.request.use(
   (config) => {
-    const token = tokenStore.access
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`
+    // /emby/* 走专用 X-Emby-Token 鉴权（见 api/emby.ts），不附门户 Bearer JWT
+    if (!isEmbyProtocolUrl(config.url)) {
+      const token = tokenStore.access
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`
+      }
     }
     return config
   },
@@ -112,10 +124,11 @@ api.interceptors.response.use(
         originalRequest?.url?.includes('/api/user/auth/register') ||
         originalRequest?.url?.includes('/api/user/auth/refresh') ||
         originalRequest?.url?.includes('/api/user/auth/sso-session')
-      if (isAuthRequest) {
+
+      // CO2-P1：/emby/* 的 401 属于 Emby web token 轮换或未开通权限，严禁触发门户 refresh_token 轮换或强制登出
+      if (isAuthRequest || isEmbyProtocolUrl(originalRequest?.url)) {
         return Promise.reject(error)
       }
-
       const refreshToken = tokenStore.refresh
       if (!refreshToken) {
         forceLogout()

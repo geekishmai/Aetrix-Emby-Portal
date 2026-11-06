@@ -85,15 +85,19 @@ def _note_play_feed(db: Session, item: em.MediaItem, started: bool,
     try:
         from backend.panel_feed import note_feed
 
-        name = (getattr(item, "name", "") or "").strip() or "未知影片"
+        from backend.emby_server.portal_title import preferred_media_title as _pref_title
+
+        name = _pref_title(item) or (getattr(item, "name", "") or "").strip() or "未知影片"
         ep = getattr(item, "episode_number", None)
         series_id = getattr(item, "series_id", None)
         if getattr(item, "item_type", "") == "episode" and series_id:
             try:
-                sname = db.query(em.MediaItem.name).filter(
-                    em.MediaItem.id == series_id).scalar()
-                if sname:
-                    name = sname
+                s_item = db.query(em.MediaItem).filter(
+                    em.MediaItem.id == series_id).first()
+                if s_item is not None:
+                    sname = _pref_title(s_item) or (s_item.name or "").strip()
+                    if sname:
+                        name = sname
             except Exception:  # noqa: BLE001 — 剧名查不到就用条目名
                 pass
         if ep:

@@ -920,23 +920,31 @@ def _note_enrich_batch_feed(db, batch: list) -> None:
         batch_ids = [i for i in batch_ids if i]
         if not batch_ids:
             return
-        # 只统计本轮从 pending → done 的条目（_claim_batch 只认领待补全条目）
-        done_rows = (db.query(_em.MediaItem.id, _em.MediaItem.name,
-                             _em.MediaItem.library_id)
-                     .filter(_em.MediaItem.id.in_(batch_ids),
-                             _em.MediaItem.enrich_status == "done")
-                     .all())
-        if not done_rows:
+        from sqlalchemy import or_ as _or
+        from backend.emby_server.portal_title import preferred_media_title as _pref_title
+
+        # 只统计真正补全成功的条目（排除未命中落 metadata_source='none' 的行，且展示优先取中文名/TMDB 名）
+        done_items = (
+            db.query(_em.MediaItem)
+            .filter(
+                _em.MediaItem.id.in_(batch_ids),
+                _em.MediaItem.enrich_status == "done",
+                _or(_em.MediaItem.metadata_source.is_(None), _em.MediaItem.metadata_source != "none"),
+            )
+            .all()
+        )
+        if not done_items:
             # SELECT 已打开事务：无补全条目可写时回滚，避免连接以
             # idle-in-transaction 状态占着池位等到下一轮 _claim_batch 才被收掉。
             db.rollback()
             return
-        first = done_rows[0]
-        lib_id = first[2]
-        if len(done_rows) == 1:
-            text = f"刮削更新 · 《{first[1] or '未知'}》资料已补全"
+        first_item = done_items[0]
+        lib_id = first_item.library_id
+        first_title = _pref_title(first_item) or "未知"
+        if len(done_items) == 1:
+            text = f"刮削更新 · 《{first_title}》资料已补全"
         else:
-            text = f"刮削更新 · 《{first[1] or '未知'}》等 {len(done_rows)} 部资料已补全"
+            text = f"刮削更新 · 《{first_title}》等 {len(done_items)} 部资料已补全"
         note_feed(db, text, event_type="enrich", library_id=lib_id)
     except Exception:  # noqa: BLE001 — 埋点失败绝不能影响补全循环
         logger.warning("刮削 feed 埋点失败", exc_info=True)

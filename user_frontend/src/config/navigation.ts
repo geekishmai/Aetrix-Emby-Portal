@@ -38,7 +38,7 @@
 
 import type { Component } from 'vue'
 import {
-  Clapperboard, Globe, Server, ShoppingBag, User,
+  Clapperboard, Film, Globe, Server, ShoppingBag, User,
 } from 'lucide-vue-next'
 
 export interface NavItem {
@@ -59,6 +59,7 @@ export interface NavItem {
  *  不在主导航占位 */
 export const primaryNav: NavItem[] = [
   { name: '发现', path: '/', icon: Clapperboard },
+  { name: '片库', path: '/library', icon: Film },
   { name: '世界', path: '/game', icon: Globe },
   { name: '服务器', path: '/server', icon: Server },
   { name: '补给站', path: '/shop', icon: ShoppingBag },

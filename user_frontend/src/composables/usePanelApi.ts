@@ -46,6 +46,8 @@ export interface BoardData {
 
 export interface ParcelItem {
   id: string | number
+  guid?: string
+  poster_url?: string | null
   title?: string
   name?: string
   media_type?: string

@@ -352,6 +352,7 @@ def test_unseal_idempotent(db, user):
         item = em.MediaItem(
             guid="test-guid-1", library_id=1, item_type="movie",
             name="测试电影", date_added=datetime.now(),
+            enrich_status="done", metadata_source="tmdb", poster_path="/p.jpg",
         )
         db.add(item)
         db.commit()
@@ -513,6 +514,7 @@ def test_today_unsealed_count_contract(db, user):
     item = em.MediaItem(
         guid="contract-today-1", library_id=1, item_type="movie",
         name="契约电影", date_added=datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None),
+        enrich_status="done", metadata_source="tmdb", poster_path="/p.jpg",
     )
     db.add(item)
     db.commit()
@@ -574,6 +576,10 @@ def _mk_media(db, item_type, name, date_added, **kw):
     from backend.emby_server import models as em
     kw.setdefault("guid", f"guid-{name}-{item_type}")
     kw.setdefault("library_id", 1)
+    if item_type in ("movie", "series"):
+        kw.setdefault("enrich_status", "done")
+        kw.setdefault("metadata_source", "tmdb")
+        kw.setdefault("poster_path", "/poster.jpg")
     item = em.MediaItem(item_type=item_type, name=name, date_added=date_added, **kw)
     db.add(item)
     db.commit()
@@ -666,6 +672,35 @@ def test_today_parcel_count_same_caliber_as_parcels(db, user):
     assert today["parcel_count"] == len(parcels) >= 1
     assert {p["id"] for p in parcels} == {series.id}
 
+
+
+def test_parcels_filters_unscraped_posterless_and_non_chinese_items(db, user):
+    """UI 专项第 1 期：今日封存只取已刮削 + 有海报 + 有中文名的条目，并优先展示中文译名。"""
+    start_utc = panel_api._today_start_utc_naive()
+    # 1) 未刮削（enrich_status='pending'）-> 排除
+    _mk_media(db, "movie", "未刮削电影", start_utc + timedelta(hours=1),
+              enrich_status="pending", metadata_source=None, poster_path="/a.jpg")
+    # 2) 刮削失败（metadata_source='none'）-> 排除
+    _mk_media(db, "movie", "Part Time Girlfriend 10bit ALT", start_utc + timedelta(hours=2),
+              enrich_status="done", metadata_source="none", poster_path="/b.jpg")
+    # 3) 无海报 -> 排除
+    _mk_media(db, "movie", "无海报中文片", start_utc + timedelta(hours=3),
+              enrich_status="done", metadata_source="tmdb", poster_path=None, primary_image_url=None)
+    # 4) 纯英文且无中文别名/目录名 -> 排除
+    _mk_media(db, "movie", "Untranslated Indie Film", start_utc + timedelta(hours=4),
+              enrich_status="done", metadata_source="tmdb", poster_path="/c.jpg")
+    # 5) 合格条目（英文原名 + aliases 含 TMDB 中文译名 + 有海报 + 已刮削）-> 入选且展示中文名
+    ok_movie = _mk_media(
+        db, "movie", "The Intern 10bit MiniHD", start_utc + timedelta(hours=5),
+        aliases="实习生,The Intern", enrich_status="done", metadata_source="tmdb",
+        poster_path="/intern.jpg",
+    )
+    app = _make_app(db, user)
+    client = TestClient(app)
+    parcels = client.get("/api/panel/parcels").json()["data"]["parcels"]
+    assert [p["id"] for p in parcels] == [ok_movie.id]
+    assert parcels[0]["name"] == "实习生"
+    assert parcels[0]["poster_url"] == f"/emby/Items/{ok_movie.guid}/Images/Primary"
 
 # ==================== 8. GET /api/panel/feed（发现页实时动态流）====================
 
@@ -769,3 +804,111 @@ def test_play_feed_text_anonymized(db, user):
         assert "张三" not in t
         assert "panel_test" not in t
         assert str(user.id) not in t
+
+
+def test_parcels_filters_unscraped_posterless_and_non_chinese(db, user):
+    """UI 专项第 1 期：今日封存只取已刮削、有海报、有中文名（或中文别名）的条目。"""
+    start_utc = panel_api._today_start_utc_naive()
+    # 1) 未刮削：应排除
+    _mk_media(db, "movie", "未刮削电影", start_utc + timedelta(hours=1),
+              enrich_status="pending", poster_path="/p1.jpg")
+    # 2) 无海报：应排除
+    _mk_media(db, "movie", "无海报电影", start_utc + timedelta(hours=2),
+              enrich_status="done", poster_path="")
+    # 3) 纯英文 PT 名且无中文别名：应排除
+    _mk_media(db, "movie", "Eight.and.a.Half.1963.1080p.10bit.MiniHD-FRDS",
+              start_utc + timedelta(hours=3), enrich_status="done", poster_path="/p3.jpg")
+    # 4) 英文名但 aliases 含中文名：应保留且展示中文名
+    aliased = _mk_media(
+        db, "movie", "Inception.2010.1080p.2Audio.MiniHD",
+        start_utc + timedelta(hours=4), enrich_status="done", poster_path="/p4.jpg",
+        aliases="盗梦空间,Inception",
+    )
+    # 5) 正常中文已刮削带海报条目：应保留
+    direct_cn = _mk_media(
+        db, "movie", "霸王别姬", start_utc + timedelta(hours=5),
+        enrich_status="done", poster_path="/p5.jpg",
+    )
+
+    client = TestClient(_make_app(db, user))
+    parcels = client.get("/api/panel/parcels").json()["data"]["parcels"]
+    assert [p["id"] for p in parcels] == [direct_cn.id, aliased.id]
+    assert [p["name"] for p in parcels] == ["霸王别姬", "盗梦空间"]
+
+
+def test_feed_cleans_pt_titles_and_prefers_chinese_alias(db, user):
+    """UI 专项第 1 期：动态流遇到残留英文 PT 名时优先反查中文别名，否则清洗压制参数尾巴。"""
+    _mk_media(
+        db, "movie", "Eight.and.a.Half.1963.1080p.10bit.MiniHD-FRDS",
+        datetime.now(), aliases="八部半,8½",
+    )
+    _push_feed(
+        db,
+        "刮削更新 · 《Eight.and.a.Half.1963.1080p.10bit.MiniHD-FRDS》等 25 部资料已补全",
+        "enrich",
+    )
+    _push_feed(
+        db,
+        "一位影迷开始看《Sherlock.Holmes.A.Game.of.Shadows.2011.BluRay.1080p.DTS-HD.MA.5.1.x264-beAst》",
+        "play",
+    )
+    client = TestClient(_make_app(db, user))
+    texts = [i["text"] for i in client.get("/api/panel/feed").json()["data"]["items"]]
+    assert "刮削更新 · 《八部半》等 25 部资料已补全" in texts
+    assert any("Sherlock Holmes A Game of Shadows" in t and "beAst" not in t and "1080p" not in t for t in texts)
+
+
+def test_clean_pt_title_preserves_roman_sequel_and_decimal_version():
+    """CO2-P2 回归：双语切分不得截断续集罗马数字（教父 II、天之杯 II），不得拆散 梅根2.0。"""
+    from backend.emby_server.portal_title import clean_pt_title
+
+    assert clean_pt_title("教父 II") == "教父 II"
+    assert clean_pt_title("教父 III") == "教父 III"
+    assert clean_pt_title("教父 II The Godfather Part II 1974 1080p BluRay") == "教父 II"
+    assert clean_pt_title("天之杯 II") == "天之杯 II"
+    assert clean_pt_title("命运之夜——天之杯 II ：迷失之蝶") == "命运之夜——天之杯 II ：迷失之蝶"
+    assert clean_pt_title("命运之夜——天之杯 II：迷失之蝶 Heaven Feel II 2019 1080p BluRay") == "命运之夜——天之杯 II：迷失之蝶"
+    assert clean_pt_title("梅根2.0") == "梅根2.0"
+    assert clean_pt_title("梅根2.0.M3GAN.2.0.2025.2160p.WEB-DL.DDP5.1.H265") == "梅根2.0"
+    assert clean_pt_title("哥斯拉-1.0") == "哥斯拉-1.0"
+    assert clean_pt_title("赤壁（下） Red Cliff II H 265 10 bit HD") == "赤壁（下）"
+
+
+def test_emby_routes_require_x_emby_token_and_return_clean_titles(db, user, monkeypatch):
+    """CO2-P0 真实路由联调：/emby/* 拒绝纯门户 JWT（401），携带 rotate_web_portal_token 签发的 X-Emby-Token 返回 200 与 DisplayTitle。"""
+    monkeypatch.setenv("SECRET_KEY", "test-secret-for-portal-ui-p1-check")
+    from backend.security import create_access_token
+    from backend.emby_server import api as emby_api_mod
+    from backend.emby_server.auth import get_db as emby_auth_get_db, rotate_web_portal_token
+    from backend.emby_server import models as em
+
+    lib = em.Library(guid="lib-guid-p1", name="外语电影", collection_type="movies")
+    db.add(lib)
+    db.commit()
+    db.refresh(lib)
+    item = _mk_media(
+        db, "movie", "Eight.and.a.Half.1963.1080p.10bit.MiniHD-FRDS",
+        datetime.now(), library_id=lib.id, aliases="八部半,8½",
+    )
+
+    app = FastAPI()
+    app.include_router(emby_api_mod.emby_router)
+    app.dependency_overrides[emby_api_mod.get_db] = lambda: (yield db)
+    app.dependency_overrides[emby_auth_get_db] = lambda: (yield db)
+    client = TestClient(app)
+
+    portal_jwt = create_access_token(user.id, {"username": user.username})
+    # 1) 纯门户 JWT 请求 /emby/* 必须 401（锁定 get_emby_user 安全边界）
+    for url in ("/emby/Users/me/Views", "/emby/Users/me/Items", f"/emby/Items/{item.guid}"):
+        r_jwt_only = client.get(url, headers={"Authorization": f"Bearer {portal_jwt}"})
+        assert r_jwt_only.status_code == 401, f"{url} must reject JWT-only"
+    # 2) 携带门户账号卡签发的专用 web token（X-Emby-Token）全部 200 且下发中文 DisplayTitle
+    web_key = rotate_web_portal_token(db, user)
+    headers = {"X-Emby-Token": web_key}
+    assert client.get("/emby/Users/me/Views", headers=headers).status_code == 200
+    items_res = client.get("/emby/Users/me/Items?IncludeItemTypes=Movie&Recursive=true", headers=headers)
+    assert items_res.status_code == 200
+    assert items_res.json()["Items"][0]["DisplayTitle"] == "八部半"
+    detail_res = client.get(f"/emby/Items/{item.guid}", headers=headers)
+    assert detail_res.status_code == 200
+    assert detail_res.json()["DisplayTitle"] == "八部半"

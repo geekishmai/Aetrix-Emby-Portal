@@ -9,12 +9,49 @@
  * 2026-10-13 旧页面清理：播放相关 wrapper（getPlaybackInfo / reportPlaying /
  * reportProgress / reportStopped）随 WatchView 删除；网页播放走第三方客户端。
  *
- * 鉴权：全部携带门户 JWT（后端 /emby/* 已支持 JWT 回退）。
- * 复用 api/index.ts 的 axios 实例：自动附 Authorization 头 + 401 自动刷新。
+ * 鉴权（CO2-P0/P1）：后端 get_emby_user 只认 Emby token（已拒绝门户 JWT 回退）。
+ * 所有 /emby/* 请求统一携带 `X-Emby-Token: getEmbyApiKey()`；缺 key 时先拉
+ * `/api/user/emby/server` 拿专用 web key；遇 401 清旧 key 重拉一次账号卡再重试；
+ * 用户尚未解锁观影权限（granted=false / 无 key）时抛 EmbyAccessNotGrantedError 供页面展示友好引导。
  */
+import type { AxiosRequestConfig } from 'axios'
 import { shallowRef } from 'vue'
 import api from '@/api'
 import { embyApiKeyRef, getEmbyApiKey, setEmbyApiKey, withImageKey } from '@/api/imageKey'
+
+export interface EmbyViewPermissionInfo {
+  granted: boolean
+  external: boolean
+  realmFree: boolean
+  unlockPoints: number
+  unlockDays: number
+  pointsBalance: number
+}
+
+export class EmbyAccessNotGrantedError extends Error {
+  readonly code = 'EMBY_ACCESS_NOT_GRANTED'
+  readonly permission: EmbyViewPermissionInfo
+  constructor(permission: EmbyViewPermissionInfo) {
+    super('尚未开启片库观影权限')
+    this.name = 'EmbyAccessNotGrantedError'
+    this.permission = permission
+  }
+}
+
+export function isEmbyAccessNotGranted(err: unknown): err is EmbyAccessNotGrantedError {
+  if (err instanceof EmbyAccessNotGrantedError) return true
+  if (typeof err === 'object' && err !== null && 'code' in err) {
+    return err.code === 'EMBY_ACCESS_NOT_GRANTED'
+  }
+  return false
+}
+
+export function httpStatusOf(err: unknown): number | undefined {
+  if (typeof err !== 'object' || err === null || !('response' in err)) return undefined
+  const resp = err.response
+  if (typeof resp !== 'object' || resp === null || !('status' in resp)) return undefined
+  return typeof resp.status === 'number' ? resp.status : undefined
+}
 
 /**
  * 分离部署时，门户 EM 与 Emby EA 是两个地址：
@@ -76,11 +113,37 @@ function setEmbyBase(base: string): string {
   return embyBaseCache
 }
 
+const DEFAULT_PERMISSION: EmbyViewPermissionInfo = {
+  granted: false,
+  external: false,
+  realmFree: false,
+  unlockPoints: 0,
+  unlockDays: 0,
+  pointsBalance: 0,
+}
+
+export const embyPermissionRef = shallowRef<EmbyViewPermissionInfo>({ ...DEFAULT_PERMISSION })
+
 /** 登出时清掉，避免下个登录用户拿到上一个人的 EA 地址与图片 key */
 export function resetEmbyBaseUrl(): void {
   embyBasePromise = null
+  embyBaseTs = 0
+  embyPermissionRef.value = { ...DEFAULT_PERMISSION }
   setEmbyBase('')
   setEmbyApiKey('')
+}
+
+interface ServerCardBootstrap {
+  base_url?: string
+  emby_api_key?: string
+  external?: boolean
+  view_permission?: {
+    granted?: boolean
+    realm_free?: boolean
+    unlock_points?: number
+    unlock_days?: number
+    points_balance?: number
+  }
 }
 
 function fetchEmbyBase(): Promise<string> {
@@ -88,14 +151,22 @@ function fetchEmbyBase(): Promise<string> {
     // PA-054：同 getAccountCard，把手里那把图片 key 带回去复用（见 imageKey）。
     const currentKey = getEmbyApiKey()
     embyBasePromise = api
-      .get<never, { base_url?: string; emby_api_key?: string }>(
+      .get<never, ServerCardBootstrap>(
         '/api/user/emby/server',
         currentKey ? { headers: { 'X-Web-Image-Key': currentKey } } : undefined,
       )
       .then((card) => {
-        // PA-036：账号卡同时下发图片用的 api_key，一并落地（轮换后旧图失效、
-        // 响应式重拼会立刻换上新 key 的地址）
-        if (card?.emby_api_key) setEmbyApiKey(card.emby_api_key)
+        const vp = card?.view_permission
+        const nextKey = (card?.emby_api_key || '').trim()
+        setEmbyApiKey(nextKey)
+        embyPermissionRef.value = {
+          granted: vp?.granted !== false && Boolean(nextKey),
+          external: Boolean(card?.external),
+          realmFree: Boolean(vp?.realm_free),
+          unlockPoints: Number(vp?.unlock_points || 0),
+          unlockDays: Number(vp?.unlock_days || 0),
+          pointsBalance: Number(vp?.points_balance || 0),
+        }
         return setEmbyBase(card?.base_url || '')
       })
       .catch((error) => {
@@ -107,8 +178,10 @@ function fetchEmbyBase(): Promise<string> {
 }
 
 async function embyBaseUrl(): Promise<string> {
-  // 缓存未过期直接用；过期（或没有）则重新拉账号卡，并发去重
-  if (embyBaseCache && Date.now() - embyBaseTs <= EMBY_BASE_TTL_MS) return embyBaseCache
+  // CO2-P1：必须同时满足「地址缓存未过期」且「手里已有非空 emby_api_key」才命中缓存；
+  // 缺 key 时强制拉一次 /api/user/emby/server（同源部署下 base_url 可能为空串，靠 embyBaseTs > 0 判定已拉过）
+  const fresh = embyBaseTs > 0 && Date.now() - embyBaseTs <= EMBY_BASE_TTL_MS
+  if (fresh && Boolean(getEmbyApiKey())) return embyBaseCache
   return fetchEmbyBase()
 }
 
@@ -126,7 +199,7 @@ export function refreshEmbyBaseUrl(): void {
 }
 
 /**
- * 确保 EA 地址已就绪（图片地址依赖它）；拉不到（未开通 / 网络错误）时返回当前值（可能为空），不抛错。
+ * 确保 EA 地址与专用 web key 已就绪；拉不到（未开通 / 网络错误）时返回当前值，不抛错。
  */
 export async function ensureEmbyBase(): Promise<string> {
   try {
@@ -136,18 +209,61 @@ export async function ensureEmbyBase(): Promise<string> {
   }
 }
 
-async function embyGet<T>(path: string, config?: object): Promise<T> {
-  return api.get<never, T>(`${await embyBaseUrl()}${path}`, config)
+function withEmbyTokenConfig(config: AxiosRequestConfig | undefined, key: string): AxiosRequestConfig {
+  return {
+    ...(config || {}),
+    headers: {
+      ...(config?.headers || {}),
+      'X-Emby-Token': key,
+    },
+  }
 }
 
-async function embyPost<T>(path: string, data?: unknown): Promise<T> {
-  return api.post<never, T>(`${await embyBaseUrl()}${path}`, data)
+async function runEmbyCall<T>(
+  exec: (base: string, key: string) => Promise<T>,
+): Promise<T> {
+  const base = await embyBaseUrl()
+  const key = getEmbyApiKey()
+  if (!key) {
+    throw new EmbyAccessNotGrantedError(embyPermissionRef.value)
+  }
+  try {
+    return await exec(base, key)
+  } catch (err: unknown) {
+    const status = httpStatusOf(err)
+    if (status === 401) {
+      // key 轮换或过期：清掉旧 key 与在途缓存，重拉一次账号卡再重试一次
+      embyBasePromise = null
+      embyBaseTs = 0
+      setEmbyApiKey('')
+      const freshBase = await fetchEmbyBase()
+      const freshKey = getEmbyApiKey()
+      if (!freshKey) {
+        throw new EmbyAccessNotGrantedError(embyPermissionRef.value)
+      }
+      return exec(freshBase, freshKey)
+    }
+    throw err
+  }
 }
 
-async function embyDelete<T>(path: string): Promise<T> {
-  return api.delete<never, T>(`${await embyBaseUrl()}${path}`)
+async function embyGet<T>(path: string, config?: AxiosRequestConfig): Promise<T> {
+  return runEmbyCall((base, key) =>
+    api.get<never, T>(`${base}${path}`, withEmbyTokenConfig(config, key)),
+  )
 }
 
+async function embyPost<T>(path: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+  return runEmbyCall((base, key) =>
+    api.post<never, T>(`${base}${path}`, data, withEmbyTokenConfig(config, key)),
+  )
+}
+
+async function embyDelete<T>(path: string, config?: AxiosRequestConfig): Promise<T> {
+  return runEmbyCall((base, key) =>
+    api.delete<never, T>(`${base}${path}`, withEmbyTokenConfig(config, key)),
+  )
+}
 // ==================== 类型 ====================
 
 export interface EmbyUserData {
@@ -164,6 +280,11 @@ export interface EmbyItem {
   Id: string
   Name: string
   Type: 'Movie' | 'Series' | 'Season' | 'Episode' | string
+  DisplayTitle?: string | null
+  OriginalTitle?: string | null
+  Aliases?: string[] | null
+  People?: Array<{ Name: string; Role?: string; Type?: string }> | null
+  Countries?: string[] | null
   IsFolder: boolean
   ChildCount?: number | null
   ProductionYear?: number | null
@@ -461,7 +582,7 @@ export function backdropUrl(item: EmbyItem, maxWidth = 1280): string {
  *
  * Thumb：服务端按横版背景图（Backdrop 链）出图，用作海报缺失时的兜底。
  */
-export function imageUrl(itemId: string, kind: 'Primary' | 'Backdrop' | 'Thumb', maxWidth = 0): string {
+export function imageUrl(itemId: string, kind: 'Primary' | 'Backdrop' | 'Thumb' | 'Logo', maxWidth = 0): string {
   // PA-036（口径翻转，用户 2026-11-02 定夺）：图片端点已加鉴权，<img> 只能靠
   // URL 里的 api_key 带凭据——拼的是账号卡下发的专用 Emby token，不是门户
   // JWT（H2 的「JWT 不进 URL」仍然成立）。token 进日志 / 历史 / Referer 的
