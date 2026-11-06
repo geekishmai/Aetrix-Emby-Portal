@@ -1074,6 +1074,14 @@ class MountProvider:
         """缓存命中后现挂凭据；默认无凭据可挂，返回一份拷贝（缓存对象不外借）。"""
         return PlayTarget(stored.kind, stored.value, dict(stored.headers or {}))
 
+    def extract_file_id_from_target(self, stored: PlayTarget) -> str:
+        """从脱凭据解析结果提取稳定文件 ID（如 115 pickcode），供第一层 48h 路径→ID 缓存使用。"""
+        return str((stored.headers or {}).get("X-Pickcode") or "").strip()
+
+    def resolve_play_target_by_id(self, rel: str, file_id: str) -> Optional[PlayTarget]:
+        """第一层路径→ID 命中但第二层直链过期时的快速换链钩子（跳过目录定位）。"""
+        return None
+
     # ---- 公共实现 ----
 
     def exists(self, rel: str) -> bool:
@@ -1515,12 +1523,14 @@ class Pan115Mount(MountProvider):
                 }
         raise MountError(f"115 上找不到文件: {rel}")
 
-    def resolve_play_target(self, rel: str) -> PlayTarget:
-        entry = self._locate(rel)
-        if not entry.get("pickcode"):
+    def resolve_play_target(self, rel: str, *, pickcode: Optional[str] = None) -> PlayTarget:
+        pickcode_115 = str(pickcode or "").strip()
+        if not pickcode_115:
+            entry = self._locate(rel)
+            pickcode_115 = str(entry.get("pickcode") or "").strip()
+        if not pickcode_115:
             raise MountError(f"115 未返回该文件的 pickcode: {rel}")
         try:
-            pickcode_115 = entry["pickcode"]
             # A-016：换链缓存必须按凭据作用域隔离——键是（凭据摘要，
             # pickcode），绝不把 Cookie 明文当键；同一凭据的两挂载
             # 共用同一签名地址是正确的（URL 有效性只取决于账号＋文件）。
@@ -1543,6 +1553,11 @@ class Pan115Mount(MountProvider):
             # 摘要前 16 位（pan115_guard.scope_of 同口径），判定可直接对表。
             "X-115-Scope": scope[:16],
         })
+
+    def resolve_play_target_by_id(self, rel: str, file_id: str) -> Optional[PlayTarget]:
+        if not file_id:
+            return None
+        return self.resolve_play_target(rel, pickcode=file_id)
 
     # 解析缓存的凭据拆分：Cookie 每次现取（``transfer115.resolve_cookie`` 是
     # 唯一状态入口），缓存里只留 UA / Referer 与 X-Pickcode——X-Pickcode 不是
@@ -1622,7 +1637,14 @@ def _get_cached_115_url(pickcode, scope):
             del _pan115_url_cache[key]
     return None
 
-def _set_cached_115_url(pickcode, url, scope, ttl=10800):
+def _set_cached_115_url(pickcode, url, scope, ttl=None):
+    if ttl is None:
+        ttl = min(
+            float(RESOLVE_CACHE_MAX_TTL_SEC),
+            compute_url_cache_ttl(url),
+        )
+    if ttl <= 0:
+        return
     with _pan115_url_cache_lock:
         if len(_pan115_url_cache) >= 1000:
             sk = sorted(_pan115_url_cache, key=lambda k: _pan115_url_cache[k][1])
@@ -2342,14 +2364,87 @@ def load_mount(db: Session, mount_id: int):
 # - 进程内 dict（与 115 换链缓存 / 目录缓存同口径）：api 与 ea 两进程各
 #   一份、失效不广播，靠 TTL 收敛；要跨进程共享须先保证凭据已拆出，再迁
 #   CacheManager 的 playback 域，另行立项。
-RESOLVE_TARGET_CACHE_TTL_SEC = env_int("RESOLVE_TARGET_CACHE_TTL_SEC", 600, 0, 3600)
+#: 两层解析缓存上限（48 小时 = 172800 秒）：
+#: 1) 第一层（_PATH_ID_CACHE：路径 → pickcode/file_id）按 RESOLVE_TARGET_CACHE_TTL_SEC
+#:    缓存，最高 48 小时，不含 URL、不含凭据；文件移动/删除靠 403/404/410 连带失效兜底。
+#: 2) 第二层（_RESOLVE_CACHE / _pan115_url_cache：直链层）按 URL 自身过期参数
+#:    （t= 或 expires= Unix 到期秒，线上实测 115 直链 t 为未来到期时刻）提前 5 分钟失效，
+#:    无法解析时退回 3600 秒，并受 RESOLVE_TARGET_CACHE_TTL_SEC 上限封顶；同样不进凭据。
+RESOLVE_CACHE_MAX_TTL_SEC = 172800
+RESOLVE_URL_EXPIRY_MARGIN_SEC = 300
+RESOLVE_URL_FALLBACK_TTL_SEC = 3600
+RESOLVE_TARGET_CACHE_TTL_SEC = env_int(
+    "RESOLVE_TARGET_CACHE_TTL_SEC", RESOLVE_CACHE_MAX_TTL_SEC, 0, RESOLVE_CACHE_MAX_TTL_SEC
+)
 #: 上限与 Drive 存在性正缓存同数（10000）；满员先清过期、仍满整体清空。
 RESOLVE_TARGET_CACHE_MAX = 10000
 
 # 模块级直接初始化，不许懒初始化（同 _pan115_url_cache_lock 的口径）。
+# _RESOLVE_CACHE: key -> (expire_mono, stored_play_target_without_creds)
+# _PATH_ID_CACHE: key -> (expire_mono, file_id_str)
 _RESOLVE_CACHE: dict = {}
+_PATH_ID_CACHE: dict = {}
 _RESOLVE_CACHE_LOCK = threading.Lock()
 _RESOLVE_CACHE_STATS = {"hits": 0, "misses": 0, "expired": 0, "evictions": 0}
+_PATH_ID_CACHE_STATS = {"hits": 0, "misses": 0, "expired": 0, "evictions": 0}
+
+
+def parse_url_expiry_epoch(url: Optional[str]) -> Optional[float]:
+    """从直链 URL 查询串提取到期 Unix 秒级时间戳（识别 ``expires`` 与 ``t``）。
+
+    线上实证（2026-11-06）：115 CDN 直链查询串 ``?t=<10位整数>&...`` 的 ``t``
+    恒为未来 Unix 秒级到期时刻（非生成时刻）。仅接受合理纪元范围
+    （秒级 1e9..1e10 或毫秒级 1e12..1e13），避免把 ``?t=1`` 类小整数旗标误判为已过期。
+    """
+    if not url:
+        return None
+    try:
+        query = urllib.parse.urlsplit(url).query
+    except Exception:  # noqa: BLE001
+        return None
+    if not query:
+        return None
+    found_t: Optional[float] = None
+    for k, raw in urllib.parse.parse_qsl(query, keep_blank_values=False):
+        kl = (k or "").strip().lower()
+        if kl not in ("expires", "t"):
+            continue
+        s = (raw or "").strip()
+        if not s:
+            continue
+        try:
+            val = float(s)
+        except (TypeError, ValueError):
+            continue
+        if not (val == val and val != float("inf") and val != float("-inf")):
+            continue
+        if 1_000_000_000_000.0 <= val < 10_000_000_000_000.0:
+            val = val / 1000.0
+        if not (1_000_000_000.0 <= val < 10_000_000_000.0):
+            continue
+        if kl == "expires":
+            return val
+        if found_t is None:
+            found_t = val
+    return found_t
+
+
+def compute_url_cache_ttl(
+    url: Optional[str],
+    *,
+    now_epoch: Optional[float] = None,
+    margin_sec: float = RESOLVE_URL_EXPIRY_MARGIN_SEC,
+    fallback_ttl: float = RESOLVE_URL_FALLBACK_TTL_SEC,
+) -> float:
+    """按直链真实到期时刻计算缓存秒数：提前 ``margin_sec``（默认 5 分钟）失效；
+    已处于安全余量内或已过期时返回 ``0.0``（不缓存）；无到期参数时退回 ``fallback_ttl``（3600s）。
+    """
+    exp = parse_url_expiry_epoch(url)
+    if exp is None:
+        return max(0.0, float(fallback_ttl))
+    now_ep = time.time() if now_epoch is None else float(now_epoch)
+    rem = exp - now_ep - float(margin_sec)
+    return rem if rem > 0.0 else 0.0
 
 
 #: 解析单飞锁（键同解析缓存）：同一文件并发未命中只让一个线程真去换链。
@@ -2383,16 +2478,27 @@ def _resolve_single_flight_exit(key: tuple) -> None:
 def resolve_cache_stats() -> dict:
     """解析缓存命中情况（健康检查 / 测试用）"""
     with _RESOLVE_CACHE_LOCK:
-        return {**_RESOLVE_CACHE_STATS, "entries": len(_RESOLVE_CACHE),
-                "ttl_seconds": RESOLVE_TARGET_CACHE_TTL_SEC}
+        return {
+            **_RESOLVE_CACHE_STATS,
+            "entries": len(_RESOLVE_CACHE),
+            "ttl_seconds": RESOLVE_TARGET_CACHE_TTL_SEC,
+            "path_id_entries": len(_PATH_ID_CACHE),
+            "path_id_hits": _PATH_ID_CACHE_STATS["hits"],
+            "path_id_misses": _PATH_ID_CACHE_STATS["misses"],
+            "path_id_expired": _PATH_ID_CACHE_STATS["expired"],
+            "path_id_evictions": _PATH_ID_CACHE_STATS["evictions"],
+        }
 
 
 def reset_resolve_cache() -> None:
-    """清空解析缓存与计数（测试隔离用，照 #1203 熔断 ``reset_all`` 先例）。"""
+    """清空两层解析缓存与计数（测试隔离用，照 #1203 熔断 ``reset_all`` 先例）。"""
     with _RESOLVE_CACHE_LOCK:
         _RESOLVE_CACHE.clear()
+        _PATH_ID_CACHE.clear()
         for name in _RESOLVE_CACHE_STATS:
             _RESOLVE_CACHE_STATS[name] = 0
+        for name in _PATH_ID_CACHE_STATS:
+            _PATH_ID_CACHE_STATS[name] = 0
 
 
 def _resolve_cache_key(provider, rel: str) -> tuple:
@@ -2431,6 +2537,12 @@ def _resolve_cache_get(key: tuple) -> Optional[PlayTarget]:
 def _resolve_cache_put(key: tuple, stored: Optional[PlayTarget]) -> None:
     if stored is None or RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
         return
+    url_ttl = min(
+        float(RESOLVE_TARGET_CACHE_TTL_SEC),
+        compute_url_cache_ttl(stored.value),
+    )
+    if url_ttl <= 0:
+        return
     now = time.monotonic()
     with _RESOLVE_CACHE_LOCK:
         if len(_RESOLVE_CACHE) >= RESOLVE_TARGET_CACHE_MAX:
@@ -2441,27 +2553,74 @@ def _resolve_cache_put(key: tuple, stored: Optional[PlayTarget]) -> None:
             if len(_RESOLVE_CACHE) >= RESOLVE_TARGET_CACHE_MAX:
                 _RESOLVE_CACHE.clear()
             _RESOLVE_CACHE_STATS["evictions"] += 1
-        _RESOLVE_CACHE[key] = (now + RESOLVE_TARGET_CACHE_TTL_SEC, stored)
+        _RESOLVE_CACHE[key] = (now + url_ttl, stored)
+
+
+def _path_id_cache_get(key: tuple) -> Optional[str]:
+    """取第一层路径→文件 ID 缓存（不含 URL、不含凭据）。TTL=0 恒未命中。"""
+    if RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
+        return None
+    now = time.monotonic()
+    with _RESOLVE_CACHE_LOCK:
+        row = _PATH_ID_CACHE.get(key)
+        if row is not None and row[0] > now:
+            _PATH_ID_CACHE_STATS["hits"] += 1
+            return row[1]
+        if row is not None:
+            _PATH_ID_CACHE.pop(key, None)
+            _PATH_ID_CACHE_STATS["expired"] += 1
+        _PATH_ID_CACHE_STATS["misses"] += 1
+        return None
+
+
+def _path_id_cache_put(key: tuple, file_id: str) -> None:
+    if not file_id or RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
+        return
+    now = time.monotonic()
+    with _RESOLVE_CACHE_LOCK:
+        if len(_PATH_ID_CACHE) >= RESOLVE_TARGET_CACHE_MAX:
+            for k in [k for k, row in _PATH_ID_CACHE.items() if row[0] <= now]:
+                _PATH_ID_CACHE.pop(k, None)
+            if len(_PATH_ID_CACHE) >= RESOLVE_TARGET_CACHE_MAX:
+                _PATH_ID_CACHE.clear()
+            _PATH_ID_CACHE_STATS["evictions"] += 1
+        _PATH_ID_CACHE[key] = (now + RESOLVE_TARGET_CACHE_TTL_SEC, str(file_id))
+
+
+def _maybe_evict_path_id_on_error(key: tuple, provider) -> None:
+    """按缓存 ID 换链报错时淘汰第一层映射（115 冷却期内跳过，与 Z-2 同口径）。"""
+    try:
+        cookie_fn = getattr(provider, "_cookie", None)
+        if callable(cookie_fn):
+            from backend.emby_server import pan115_guard as _pg
+            if _pg.enabled():
+                scope_hint = _pan115_cache_scope(cookie_fn())[:16]
+                if scope_hint and _pg.cooldown_state(scope_hint) is not None:
+                    return
+    except Exception:  # noqa: BLE001 — 判定异常按非冷却处理
+        pass
+    with _RESOLVE_CACHE_LOCK:
+        _PATH_ID_CACHE.pop(key, None)
 
 
 def invalidate_resolve_cache(mount_id: Optional[int] = None,
                              rel: Optional[str] = None) -> None:
-    """清解析缓存：mount_id + rel 只清一条；只给 mount_id 清整个挂载；都不给全清。"""
+    """清两层解析缓存：mount_id + rel 只清一条；只给 mount_id 清整个挂载；都不给全清。"""
     with _RESOLVE_CACHE_LOCK:
         if mount_id is None and rel is None:
             _RESOLVE_CACHE.clear()
+            _PATH_ID_CACHE.clear()
             return
-        for key in [k for k in _RESOLVE_CACHE
-                    if (mount_id is None or k[0] == mount_id)
-                    and (rel is None or k[3] == rel)]:
-            _RESOLVE_CACHE.pop(key, None)
+        for cache in (_RESOLVE_CACHE, _PATH_ID_CACHE):
+            for key in [k for k in cache
+                        if (mount_id is None or k[0] == mount_id)
+                        and (rel is None or k[3] == rel)]:
+                cache.pop(key, None)
 
 
 def invalidate_resolve_cache_by_pickcode(pickcode: str) -> None:
-    """按 X-Pickcode 反查清解析缓存（115 中继上游 403/404/410 时连带调用）。
-
-    只清 115 换链缓存不够：解析缓存里还留着同一条死链，不连带清会被它
-    续命最多一个 TTL。永不抛——失效失败最多多留 TTL 秒陈旧。
+    """按 X-Pickcode 反查同时清第二层直链缓存与第一层路径→ID 缓存
+    （115 中继上游 403/404/410 时连带调用，兜底文件移动或删除）。
     """
     if not pickcode:
         return
@@ -2469,7 +2628,9 @@ def invalidate_resolve_cache_by_pickcode(pickcode: str) -> None:
         for key in [k for k, row in _RESOLVE_CACHE.items()
                     if (row[1].headers or {}).get("X-Pickcode") == pickcode]:
             _RESOLVE_CACHE.pop(key, None)
-
+        for key in [k for k, row in _PATH_ID_CACHE.items()
+                    if row[1] == pickcode]:
+            _PATH_ID_CACHE.pop(key, None)
 
 def invalidate_resolve_cache_for_path(file_path: Optional[str]) -> None:
     """按条目 ``file_path`` 清一条解析缓存（扫描确认丢失 / 管理端删条目 /
@@ -2574,10 +2735,25 @@ def resolve_play_target(file_path: Optional[str], db: Session, library=None, *,
             stored = _resolve_cache_get(cache_key)   # 等锁期间别人可能已经解析完
             if stored is not None:
                 return _reattach_cached_target(provider, stored, rel)
-            target = provider.resolve_final(rel)
+            cached_id = None if _is_strm_name(rel) else _path_id_cache_get(cache_key)
+            target = None
+            if cached_id:
+                try:
+                    target = provider.resolve_play_target_by_id(rel, cached_id)
+                except Exception:
+                    _maybe_evict_path_id_on_error(cache_key, provider)
+                    raise
+            if target is None:
+                target = provider.resolve_final(rel)
             if target.kind == "url":
                 target.value = validate_remote_url(target.value)
-                _resolve_cache_put(cache_key, _stored_play_target(provider, target, rel))
+                cacheable = _stored_play_target(provider, target, rel)
+                if cacheable is not None:
+                    if not _is_strm_name(rel):
+                        file_id = provider.extract_file_id_from_target(cacheable)
+                        if file_id:
+                            _path_id_cache_put(cache_key, file_id)
+                    _resolve_cache_put(cache_key, cacheable)
             return target
         finally:
             if acquired:

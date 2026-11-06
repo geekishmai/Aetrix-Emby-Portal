@@ -741,6 +741,16 @@ class DriveMount(RemoteMount):
         return PlayTarget(
             "url", url, drive_auth.drive_auth_headers(url, entry.file_id))
 
+
+    def extract_file_id_from_target(self, stored: PlayTarget) -> str:
+        return str(_file_id_from_url(stored.value) or "").strip()
+
+    def resolve_play_target_by_id(self, rel: str, file_id: str) -> Optional[PlayTarget]:
+        if not file_id:
+            return None
+        url = drive_auth.drive_usercontent_download_url(file_id)
+        return PlayTarget(
+            "url", url, drive_auth.drive_auth_headers(url, file_id))
     # 解析缓存的凭据拆分：Bearer 每次经 drive_auth 现取（SA 轮换与 401 按值
     # 失效都在那一层维护），缓存里只留 url 本身。现挂时把亲和键还原成
     # file_id——它就写在 usercontent 直链的 id 参数里，与 resolve() 当初

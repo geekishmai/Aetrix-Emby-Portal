@@ -171,28 +171,30 @@ def error_from_dict(data: dict) -> ProviderRuntimeError:
                                 retry_after=retry_after)
 
 
-_DEADLINE_SIG_CACHE: dict[tuple, bool] = {}
+_HANDLER_SIG_CACHE: dict[tuple, bool] = {}
 
 
-def _handler_accepts_deadline(handler, method: str, fn) -> bool:
-    """handler 方法是否显式接受 ``deadline`` 形参（签名探测，QA AD-2）。
+def _handler_accepts_param(handler, method: str, fn, param: str) -> bool:
+    """handler 方法是否显式接受 ``param`` 形参（签名探测，QA AD-2）。
 
-    按 (handler 类型, 方法名) 缓存——同一 sidecar 进程内签名不会变。
-    探测失败（内建函数/装饰器签名不可读）按「不接受」处理：宁可少传
-    一个可选参数，也不冒重调风险。
+    按 (handler 类型, 方法名, 参数名) 缓存——同一 sidecar 进程内签名不会变。
+    探测失败按「不接受」处理：宁可少传可选参数，也不冒 TypeError 重调风险。
     """
-    key = (type(handler), method)
-    hit = _DEADLINE_SIG_CACHE.get(key)
+    key = (type(handler), method, param)
+    hit = _HANDLER_SIG_CACHE.get(key)
     if hit is not None:
         return hit
     try:
         import inspect as _inspect
-        accepted = "deadline" in _inspect.signature(fn).parameters
+        accepted = param in _inspect.signature(fn).parameters
     except (TypeError, ValueError):
         accepted = False
-    _DEADLINE_SIG_CACHE[key] = accepted
+    _HANDLER_SIG_CACHE[key] = accepted
     return accepted
 
+
+def _handler_accepts_deadline(handler, method: str, fn) -> bool:
+    return _handler_accepts_param(handler, method, fn, "deadline")
 
 def build_manifest(provider: str, socket_path: str | None = None) -> dict:
     """构造某 provider 的 manifest（握手文档，宿主侧用它验 sidecar 身份）。"""
@@ -347,8 +349,12 @@ class ProviderRuntimeClient:
             params["byte_length"] = byte_length
         return self.call("open_range", params)  # type: ignore[return-value]
 
-    def resolve_play_target(self, session_id: str, path: str) -> dict:
-        return self.call("resolve_play_target", {"session_id": session_id, "path": path})  # type: ignore[return-value]
+    def resolve_play_target(self, session_id: str, path: str,
+                            *, pickcode: str | None = None) -> dict:
+        params: dict = {"session_id": session_id, "path": path}
+        if pickcode:
+            params["pickcode"] = pickcode
+        return self.call("resolve_play_target", params)  # type: ignore[return-value]
 
     def resolve_display_asset(self, session_id: str, path: str,
                               byte_offset: int = 0,
@@ -497,6 +503,9 @@ class ProviderRuntimeServer:
                 return fn(session, params.get("path") or "/",
                           params.get("byte_offset", 0), params.get("byte_length"), **_kw)
             if method in ("resolve_play_target",):
+                _pc = params.get("pickcode")
+                if _pc and _handler_accepts_param(handler, method, fn, "pickcode"):
+                    _kw = {**_kw, "pickcode": _pc}
                 return fn(session, params.get("path") or "/", **_kw)
             if method == "health":
                 return fn(session)

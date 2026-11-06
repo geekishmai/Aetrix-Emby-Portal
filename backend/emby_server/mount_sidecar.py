@@ -343,6 +343,31 @@ class P115SidecarMount(SidecarMountProvider):
         }
 
 
+    def resolve_play_target_by_id(self, rel: str, file_id: str) -> Optional[PlayTarget]:
+        """第一层路径→pickcode 命中时直接按 pickcode 向 sidecar 换直链（跳过目录定位）。"""
+        if not file_id:
+            return None
+        fn = self.client.resolve_play_target
+        accepts_pc = False
+        try:
+            import inspect as _inspect
+            accepts_pc = "pickcode" in _inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            accepts_pc = False
+        try:
+            if accepts_pc:
+                result = fn(self.session_id, rel, pickcode=file_id)
+            else:
+                result = fn(self.session_id, rel)
+        except ProviderRuntimeError as exc:
+            raise _wrap_sidecar_error(exc, "sidecar 换链失败") from exc
+        url = result.get("url") or ""
+        if not url:
+            raise MountError(f"sidecar 未返回播放地址：{rel}")
+        headers = dict(result.get("headers") or {})
+        headers["Cookie"] = self._cookie()
+        return PlayTarget("url", url, headers)
+
 __all__ = [
     "P115SidecarMount",
     "SidecarMountProvider",
