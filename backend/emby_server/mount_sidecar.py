@@ -250,6 +250,10 @@ class SidecarMountProvider(MountProvider):
         url = result.get("url") or ""
         if not url:
             raise MountError(f"sidecar 未返回播放地址：{rel}")
+        try:
+            self._last_resolved_size = max(0, int(result.get("size") or 0))
+        except (TypeError, ValueError):
+            self._last_resolved_size = 0
         headers = dict(result.get("headers") or {})
         # 契约规定回包不含 Cookie：宿主用自己现取的 Cookie 重贴（不信任回包凭据）。
         headers["Cookie"] = self._cookie()
@@ -343,27 +347,34 @@ class P115SidecarMount(SidecarMountProvider):
         }
 
 
-    def resolve_play_target_by_id(self, rel: str, file_id: str) -> Optional[PlayTarget]:
-        """第一层路径→pickcode 命中时直接按 pickcode 向 sidecar 换直链（跳过目录定位）。"""
+    def resolve_play_target_by_id(
+        self, rel: str, file_id: str, file_size: Optional[int] = None
+    ) -> Optional[PlayTarget]:
+        """第一层路径→pickcode 命中时直接按 pickcode (+file_size) 向 sidecar 换直链。"""
         if not file_id:
             return None
         fn = self.client.resolve_play_target
-        accepts_pc = False
+        call_kw: dict = {}
         try:
             import inspect as _inspect
-            accepts_pc = "pickcode" in _inspect.signature(fn).parameters
+            sig_params = _inspect.signature(fn).parameters
+            if "pickcode" in sig_params:
+                call_kw["pickcode"] = file_id
+            if file_size and int(file_size) > 0 and "file_size" in sig_params:
+                call_kw["file_size"] = int(file_size)
         except (TypeError, ValueError):
-            accepts_pc = False
+            call_kw = {}
         try:
-            if accepts_pc:
-                result = fn(self.session_id, rel, pickcode=file_id)
-            else:
-                result = fn(self.session_id, rel)
+            result = fn(self.session_id, rel, **call_kw)
         except ProviderRuntimeError as exc:
             raise _wrap_sidecar_error(exc, "sidecar 换链失败") from exc
         url = result.get("url") or ""
         if not url:
             raise MountError(f"sidecar 未返回播放地址：{rel}")
+        try:
+            self._last_resolved_size = max(0, int(result.get("size") or file_size or 0))
+        except (TypeError, ValueError):
+            self._last_resolved_size = 0
         headers = dict(result.get("headers") or {})
         headers["Cookie"] = self._cookie()
         return PlayTarget("url", url, headers)

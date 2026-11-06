@@ -32,7 +32,7 @@ from urllib.parse import urlencode
 from sqlalchemy.orm import Session
 
 from backend.emby_server import models as em
-from backend.emby_server.env_util import env_float
+from backend.emby_server.env_util import env_float, env_int
 from backend.emby_server.upstream_sources import SealedSecretError, seal_secret, unseal_secret
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,17 @@ PAN115_UA = os.getenv(
     "PAN115_USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+)
+# 115 网页端 webapi /files/download 单文件上限为 200 MiB（209,715,200 字节，
+# 超限返回 msg_code=50028「文件大小超出限制」；见 p115client.tool.download 的
+# 1024*1024*200 分界与本仓 2026-10-31 探针实证：157MB 成功、843MB 50028）。
+# 默认留 5% 安全余量取 190 MiB（199,229,440 字节）：文件大小超过该阈值时直接走
+# proapi app 加密通道（大文件取链从 +2 降为 +1），未超阈值或未知大小维持 webapi 优先。
+PAN115_WEB_DOWNLOAD_LIMIT_BYTES = 200 * 1024 * 1024
+PAN115_WEB_DOWNLOAD_MAX_BYTES = env_int(
+    "PAN115_WEB_DOWNLOAD_MAX_BYTES",
+    190 * 1024 * 1024,
+    lo=0,
 )
 
 # ==================== 秒传（initupload）协议 ====================
@@ -1039,7 +1050,8 @@ class Pan115Client:
     # ---- 下载 ----
 
     def download_url(self, pickcode: str, *, app_first: bool = False,
-                     deadline: Optional[float] = None) -> str:
+                     deadline: Optional[float] = None,
+                     file_size: Optional[int] = None) -> str:
         """取单个文件下载地址（供外部下载器 / 直链使用）。
 
         两条通道（2026-10-31 生产探针实证）：
@@ -1072,11 +1084,17 @@ class Pan115Client:
                     "115 app 通道取链失败，播放器场景不回落网页端："
                     "err=%s", exc)
                 raise
+        if file_size is not None:
+            try:
+                sz = int(file_size)
+            except (TypeError, ValueError):
+                sz = 0
+            if sz > 0 and sz > PAN115_WEB_DOWNLOAD_MAX_BYTES:
+                return self._download_url_app(pickcode, deadline=deadline)
         try:
             return self._download_url_web(pickcode, deadline=deadline)
         except Pan115ChannelLimitError:
             return self._download_url_app(pickcode, deadline=deadline)
-
     def _download_url_web(self, pickcode: str, deadline: Optional[float] = None) -> str:
         """网页端取链（webapi /files/download，大文件有大小限制）。"""
         body = self._call(

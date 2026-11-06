@@ -1078,7 +1078,16 @@ class MountProvider:
         """从脱凭据解析结果提取稳定文件 ID（如 115 pickcode），供第一层 48h 路径→ID 缓存使用。"""
         return str((stored.headers or {}).get("X-Pickcode") or "").strip()
 
-    def resolve_play_target_by_id(self, rel: str, file_id: str) -> Optional[PlayTarget]:
+    def extract_file_size_from_target(self, stored: PlayTarget) -> int:
+        """提取本次解析已知的文件字节大小（未知返 0），供 115 大文件直选 app 通道复用。"""
+        try:
+            return max(0, int(getattr(self, "_last_resolved_size", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def resolve_play_target_by_id(
+        self, rel: str, file_id: str, file_size: Optional[int] = None
+    ) -> Optional[PlayTarget]:
         """第一层路径→ID 命中但第二层直链过期时的快速换链钩子（跳过目录定位）。"""
         return None
 
@@ -1523,13 +1532,28 @@ class Pan115Mount(MountProvider):
                 }
         raise MountError(f"115 上找不到文件: {rel}")
 
-    def resolve_play_target(self, rel: str, *, pickcode: Optional[str] = None) -> PlayTarget:
+    def resolve_play_target(
+        self,
+        rel: str,
+        *,
+        pickcode: Optional[str] = None,
+        file_size: Optional[int] = None,
+    ) -> PlayTarget:
         pickcode_115 = str(pickcode or "").strip()
+        resolved_size = 0
+        if file_size is not None:
+            try:
+                resolved_size = max(0, int(file_size))
+            except (TypeError, ValueError):
+                resolved_size = 0
         if not pickcode_115:
             entry = self._locate(rel)
             pickcode_115 = str(entry.get("pickcode") or "").strip()
+            if not resolved_size:
+                resolved_size = max(0, int(entry.get("size") or 0))
         if not pickcode_115:
             raise MountError(f"115 未返回该文件的 pickcode: {rel}")
+        self._last_resolved_size = resolved_size
         try:
             # A-016：换链缓存必须按凭据作用域隔离——键是（凭据摘要，
             # pickcode），绝不把 Cookie 明文当键；同一凭据的两挂载
@@ -1537,7 +1561,16 @@ class Pan115Mount(MountProvider):
             scope = _pan115_cache_scope(self._cookie())
             url = _get_cached_115_url(pickcode_115, scope)
             if not url:
-                url = self._client().download_url(pickcode_115)
+                dl_fn = self._client().download_url
+                dl_kw: dict = {}
+                if resolved_size > 0:
+                    try:
+                        import inspect as _inspect
+                        if "file_size" in _inspect.signature(dl_fn).parameters:
+                            dl_kw["file_size"] = resolved_size
+                    except (TypeError, ValueError):
+                        pass
+                url = dl_fn(pickcode_115, **dl_kw)
                 _set_cached_115_url(pickcode_115, url, scope)
         except (transfer115.Pan115Error, transfer115.Pan115AuthError) as exc:
             raise self._wrap(exc) from exc
@@ -1554,10 +1587,12 @@ class Pan115Mount(MountProvider):
             "X-115-Scope": scope[:16],
         })
 
-    def resolve_play_target_by_id(self, rel: str, file_id: str) -> Optional[PlayTarget]:
+    def resolve_play_target_by_id(
+        self, rel: str, file_id: str, file_size: Optional[int] = None
+    ) -> Optional[PlayTarget]:
         if not file_id:
             return None
-        return self.resolve_play_target(rel, pickcode=file_id)
+        return self.resolve_play_target(rel, pickcode=file_id, file_size=file_size)
 
     # 解析缓存的凭据拆分：Cookie 每次现取（``transfer115.resolve_cookie`` 是
     # 唯一状态入口），缓存里只留 UA / Referer 与 X-Pickcode——X-Pickcode 不是
@@ -2384,6 +2419,7 @@ RESOLVE_TARGET_CACHE_MAX = 10000
 # _PATH_ID_CACHE: key -> (expire_mono, file_id_str)
 _RESOLVE_CACHE: dict = {}
 _PATH_ID_CACHE: dict = {}
+_PATH_SIZE_CACHE: dict = {}
 _RESOLVE_CACHE_LOCK = threading.Lock()
 _RESOLVE_CACHE_STATS = {"hits": 0, "misses": 0, "expired": 0, "evictions": 0}
 _PATH_ID_CACHE_STATS = {
@@ -2502,6 +2538,7 @@ def reset_resolve_cache() -> None:
     with _RESOLVE_CACHE_LOCK:
         _RESOLVE_CACHE.clear()
         _PATH_ID_CACHE.clear()
+        _PATH_SIZE_CACHE.clear()
         for name in _RESOLVE_CACHE_STATS:
             _RESOLVE_CACHE_STATS[name] = 0
         for name in _PATH_ID_CACHE_STATS:
@@ -2595,8 +2632,8 @@ def _decode_redis_str(val: Any) -> str:
     return str(val)
 
 
-def _redis_path_id_get(key: tuple) -> Optional[tuple[str, float]]:
-    """从 Redis 读取第一层路径→文件 ID（跨进程、跨容器重启保留 48h，零凭据）。"""
+def _redis_path_id_get(key: tuple) -> Optional[tuple[str, int, float]]:
+    """从 Redis 读取第一层路径→(文件 ID, 文件字节数, 剩余秒数)，零凭据。"""
     mount_id, mount_type, fp_digest, rel = key
     if mount_id is None or RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
         return None
@@ -2626,6 +2663,10 @@ def _redis_path_id_get(key: tuple) -> Optional[tuple[str, float]]:
     file_id = str(payload.get("id") or "").strip()
     if not file_id:
         return None
+    try:
+        file_size = max(0, int(payload.get("sz") or 0))
+    except (TypeError, ValueError):
+        file_size = 0
     pttl = res[1] if len(res) > 1 else -1
     try:
         pttl_num = int(pttl)
@@ -2635,10 +2676,10 @@ def _redis_path_id_get(key: tuple) -> Optional[tuple[str, float]]:
         rem_sec = min(float(RESOLVE_TARGET_CACHE_TTL_SEC), pttl_num / 1000.0)
     else:
         rem_sec = float(RESOLVE_TARGET_CACHE_TTL_SEC)
-    return (file_id, max(0.001, rem_sec))
+    return (file_id, file_size, max(0.001, rem_sec))
 
 
-def _redis_path_id_put(key: tuple, file_id: str) -> None:
+def _redis_path_id_put(key: tuple, file_id: str, file_size: int = 0) -> None:
     mount_id, mount_type, fp_digest, rel = key
     if mount_id is None or not file_id or RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
         return
@@ -2647,10 +2688,10 @@ def _redis_path_id_put(key: tuple, file_id: str) -> None:
     pc_key = _redis_path_id_pc_key(file_id)
     mnt_key = _redis_path_id_mnt_key(mount_id)
     mounts_key = _redis_path_id_mounts_key()
-    payload = json.dumps(
-        {"mt": mount_type, "fp": fp_digest, "id": str(file_id)},
-        separators=(",", ":"),
-    )
+    body_dict: dict = {"mt": mount_type, "fp": fp_digest, "id": str(file_id)}
+    if file_size and int(file_size) > 0:
+        body_dict["sz"] = int(file_size)
+    payload = json.dumps(body_dict, separators=(",", ":"))
     try:
         from backend.database import redis_call
 
@@ -2752,8 +2793,8 @@ def _redis_path_id_clear_all() -> None:
         pass
 
 
-def _path_id_cache_get(key: tuple) -> Optional[str]:
-    """取第一层路径→文件 ID 缓存（L1 内存 → L2 Redis；不含 URL、不含凭据）。"""
+def _path_id_cache_get_with_size(key: tuple) -> Optional[tuple[str, int]]:
+    """取第一层路径→(文件 ID, 文件字节数) 缓存（L1 内存 → L2 Redis；不含 URL、不含凭据）。"""
     if RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
         return None
     now = time.monotonic()
@@ -2761,39 +2802,55 @@ def _path_id_cache_get(key: tuple) -> Optional[str]:
         row = _PATH_ID_CACHE.get(key)
         if row is not None and row[0] > now:
             _PATH_ID_CACHE_STATS["hits"] += 1
-            return row[1]
+            sz = int(_PATH_SIZE_CACHE.get(key, 0) or 0)
+            return (row[1], sz)
         if row is not None:
             _PATH_ID_CACHE.pop(key, None)
+            _PATH_SIZE_CACHE.pop(key, None)
             _PATH_ID_CACHE_STATS["expired"] += 1
     redis_hit = _redis_path_id_get(key)
     if redis_hit is not None:
-        file_id, rem_sec = redis_hit
+        file_id, file_size, rem_sec = redis_hit
         now2 = time.monotonic()
         with _RESOLVE_CACHE_LOCK:
             if len(_PATH_ID_CACHE) < RESOLVE_TARGET_CACHE_MAX:
                 _PATH_ID_CACHE[key] = (now2 + rem_sec, file_id)
+                if file_size > 0:
+                    _PATH_SIZE_CACHE[key] = file_size
             _PATH_ID_CACHE_STATS["hits"] += 1
             _PATH_ID_CACHE_STATS["redis_hits"] += 1
-        return file_id
+        return (file_id, file_size)
     with _RESOLVE_CACHE_LOCK:
         _PATH_ID_CACHE_STATS["misses"] += 1
     return None
 
 
-def _path_id_cache_put(key: tuple, file_id: str) -> None:
+def _path_id_cache_get(key: tuple) -> Optional[str]:
+    hit = _path_id_cache_get_with_size(key)
+    return hit[0] if hit is not None else None
+
+
+def _path_id_cache_put(key: tuple, file_id: str, file_size: int = 0) -> None:
     if not file_id or RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
         return
     now = time.monotonic()
     fid = str(file_id)
+    fsz = max(0, int(file_size or 0))
     with _RESOLVE_CACHE_LOCK:
         if len(_PATH_ID_CACHE) >= RESOLVE_TARGET_CACHE_MAX:
             for k in [k for k, row in _PATH_ID_CACHE.items() if row[0] <= now]:
                 _PATH_ID_CACHE.pop(k, None)
+                _PATH_SIZE_CACHE.pop(k, None)
             if len(_PATH_ID_CACHE) >= RESOLVE_TARGET_CACHE_MAX:
                 _PATH_ID_CACHE.clear()
+                _PATH_SIZE_CACHE.clear()
             _PATH_ID_CACHE_STATS["evictions"] += 1
         _PATH_ID_CACHE[key] = (now + RESOLVE_TARGET_CACHE_TTL_SEC, fid)
-    _redis_path_id_put(key, fid)
+        if fsz > 0:
+            _PATH_SIZE_CACHE[key] = fsz
+        else:
+            _PATH_SIZE_CACHE.pop(key, None)
+    _redis_path_id_put(key, fid, fsz)
 
 
 def _maybe_evict_path_id_on_error(key: tuple, provider) -> None:
@@ -2810,6 +2867,7 @@ def _maybe_evict_path_id_on_error(key: tuple, provider) -> None:
         pass
     with _RESOLVE_CACHE_LOCK:
         _PATH_ID_CACHE.pop(key, None)
+        _PATH_SIZE_CACHE.pop(key, None)
     _redis_path_id_delete_one(key[0], key[3])
 
 
@@ -2820,8 +2878,9 @@ def invalidate_resolve_cache(mount_id: Optional[int] = None,
         if mount_id is None and rel is None:
             _RESOLVE_CACHE.clear()
             _PATH_ID_CACHE.clear()
+            _PATH_SIZE_CACHE.clear()
         else:
-            for cache in (_RESOLVE_CACHE, _PATH_ID_CACHE):
+            for cache in (_RESOLVE_CACHE, _PATH_ID_CACHE, _PATH_SIZE_CACHE):
                 for key in [k for k in cache
                             if (mount_id is None or k[0] == mount_id)
                             and (rel is None or k[3] == rel)]:
@@ -2845,6 +2904,7 @@ def invalidate_resolve_cache_by_pickcode(pickcode: str) -> None:
         for key in [k for k, row in _PATH_ID_CACHE.items()
                     if row[1] == pickcode]:
             _PATH_ID_CACHE.pop(key, None)
+            _PATH_SIZE_CACHE.pop(key, None)
     _redis_path_id_delete_by_pickcode(pickcode)
 def invalidate_resolve_cache_for_path(file_path: Optional[str]) -> None:
     """按条目 ``file_path`` 清一条解析缓存（扫描确认丢失 / 管理端删条目 /
@@ -2949,11 +3009,22 @@ def resolve_play_target(file_path: Optional[str], db: Session, library=None, *,
             stored = _resolve_cache_get(cache_key)   # 等锁期间别人可能已经解析完
             if stored is not None:
                 return _reattach_cached_target(provider, stored, rel)
-            cached_id = None if _is_strm_name(rel) else _path_id_cache_get(cache_key)
+            cached_entry = None if _is_strm_name(rel) else _path_id_cache_get_with_size(cache_key)
             target = None
-            if cached_id:
+            if cached_entry is not None:
+                cached_id, cached_size = cached_entry
                 try:
-                    target = provider.resolve_play_target_by_id(rel, cached_id)
+                    by_id_fn = provider.resolve_play_target_by_id
+                    accepts_sz = False
+                    try:
+                        import inspect as _inspect
+                        accepts_sz = "file_size" in _inspect.signature(by_id_fn).parameters
+                    except (TypeError, ValueError):
+                        accepts_sz = False
+                    if accepts_sz:
+                        target = by_id_fn(rel, cached_id, file_size=cached_size)
+                    else:
+                        target = by_id_fn(rel, cached_id)
                 except Exception:
                     _maybe_evict_path_id_on_error(cache_key, provider)
                     raise
@@ -2966,7 +3037,8 @@ def resolve_play_target(file_path: Optional[str], db: Session, library=None, *,
                     if not _is_strm_name(rel):
                         file_id = provider.extract_file_id_from_target(cacheable)
                         if file_id:
-                            _path_id_cache_put(cache_key, file_id)
+                            file_size = provider.extract_file_size_from_target(cacheable)
+                            _path_id_cache_put(cache_key, file_id, file_size=file_size)
                     _resolve_cache_put(cache_key, cacheable)
             return target
         finally:

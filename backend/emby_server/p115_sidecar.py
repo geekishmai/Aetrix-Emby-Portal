@@ -572,22 +572,41 @@ class P115SidecarHandler:
 
     def resolve_play_target(self, session, path: str,
                             deadline: float | None = None,
-                            pickcode: str | None = None) -> dict:
+                            pickcode: str | None = None,
+                            file_size: int | None = None) -> dict:
         """换链：只回直链与非秘密头，不搬字节、不回 Cookie（宿主重贴）。
 
-        宿主第一层路径→pickcode 缓存（48h）命中但直链过期时直接传 ``pickcode``，
-        跳过逐级目录定位，只调一次 ``download_url``。
+        宿主第一层路径→pickcode 缓存（48h）命中但直链过期时直接传 ``pickcode``
+        与 ``file_size``，跳过逐级目录定位，并让大文件直接选 app 通道（只调一次 ``download_url``）。
         """
         state = self._state(session)
         pickcode = str(pickcode or "").strip()
+        resolved_size = 0
+        if file_size is not None:
+            try:
+                resolved_size = max(0, int(file_size))
+            except (TypeError, ValueError):
+                resolved_size = 0
         if not pickcode:
             entry = self._locate_with_retry(state, path, deadline=deadline)
             pickcode = entry.get("pickcode") or ""
+            if not resolved_size:
+                resolved_size = max(0, int(entry.get("size") or 0))
         if not pickcode:
             raise ProviderRuntimeError("not_found", f"115 未返回该文件的 pickcode：{path}")
+
         def _fetch_dl() -> str:
+            dl_fn = state.client.download_url
+            dl_kw: dict = {"deadline": deadline}
+            if resolved_size > 0:
+                try:
+                    import inspect as _inspect
+                    if "file_size" in _inspect.signature(dl_fn).parameters:
+                        dl_kw["file_size"] = resolved_size
+                except (TypeError, ValueError):
+                    pass
             try:
-                return state.client.download_url(pickcode, deadline=deadline)
+                return dl_fn(pickcode, **dl_kw)
             except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
                 raise _map_115_error(exc) from exc
 
@@ -596,13 +615,13 @@ class P115SidecarHandler:
         )
         return {
             "url": url,
+            "size": resolved_size,
             "headers": {
                 "User-Agent": state.ua or transfer115.PAN115_UA,
                 "Referer": "https://115.com/",
                 "X-Pickcode": pickcode,
             },
         }
-
     def health(self, session) -> dict:
         return {"ok": True, "provider": PROVIDER, "protocol": PROTOCOL,
                 "capabilities": list(BASE_CAPABILITIES), "extensions": list(P115_EXTENSIONS)}
