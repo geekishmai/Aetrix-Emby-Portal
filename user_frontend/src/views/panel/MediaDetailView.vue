@@ -19,6 +19,17 @@
         </div>
       </div>
 
+      <div v-else-if="notGranted" class="md-section-card" role="status">
+        <h2 class="md-sec-h">尚未开启片库观影权限</h2>
+        <p style="margin:0;font-size:14px;color:#524b42;line-height:1.6">
+          前往「我的」激活观影凭证或开通会员后，即可查看完整影片详情并一键唤起播放器点播。
+        </p>
+        <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
+          <RouterLink to="/game/account" class="v4-retry" style="text-decoration:none">去我的页面开启权限</RouterLink>
+          <RouterLink to="/shop" class="md-ghost-link">前往补给站</RouterLink>
+        </div>
+      </div>
+
       <div v-else-if="error || !item" class="v4-err md-err" role="alert">
         <span>{{ error || '未找到该影片信息' }}</span>
         <div style="margin-top:10px;display:flex;gap:10px">
@@ -26,7 +37,6 @@
           <RouterLink to="/library" class="md-ghost-link">去片库浏览</RouterLink>
         </div>
       </div>
-
       <template v-else>
         <article class="md-hero-card">
           <div v-if="backdropSrc && !backdropBroken" class="md-backdrop">
@@ -65,7 +75,7 @@
                   decoding="async"
                   @error="logoBroken = true"
                 />
-                <h1 class="md-title">{{ title }}</h1>
+                <h1 class="md-title" :class="{ 'has-logo': logoSrc && !logoBroken }">{{ title }}</h1>
                 <p v-if="subOriginalTitle" class="md-orig-title">{{ subOriginalTitle }}</p>
               </div>
 
@@ -163,13 +173,15 @@ import {
   embyApi,
   ensureEmbyBase,
   formatDuration,
+  httpStatusOf,
   imageUrl,
+  isEmbyAccessNotGranted,
   posterUrl,
   ticksToSeconds,
   type EmbyItem,
 } from '@/api/emby'
 import PlayerSchemeSheet from '@/components/panel/PlayerSchemeSheet.vue'
-import { displayMediaTitle, resolutionBadge } from '@/utils/mediaTitle'
+import { cleanOriginalSubtitle, displayMediaTitle, resolutionBadge } from '@/utils/mediaTitle'
 import { humanizeError } from '@/composables/usePanelApi'
 import { useToast } from '@/composables/useToast'
 
@@ -193,6 +205,7 @@ const toast = useToast()
 
 const loading = ref(true)
 const error = ref('')
+const notGranted = ref(false)
 const item = ref<FullEmbyItem | null>(null)
 const seasons = ref<EmbyItem[]>([])
 const pickerOpen = ref(false)
@@ -205,11 +218,9 @@ const brokenSeasons = reactive(new Set<string>())
 
 const itemId = computed(() => String(route.params.id || ''))
 const title = computed(() => displayMediaTitle(item.value))
-const subOriginalTitle = computed(() => {
-  const orig = (item.value?.OriginalTitle || '').trim()
-  if (!orig || orig === title.value) return ''
-  return orig
-})
+const subOriginalTitle = computed(() =>
+  cleanOriginalSubtitle(item.value?.OriginalTitle, title.value),
+)
 
 const posterSrc = computed(() => (item.value ? posterUrl(item.value, 520) : ''))
 const backdropSrc = computed(() => (item.value ? backdropUrl(item.value, 1400) : ''))
@@ -288,7 +299,7 @@ async function loadDetail() {
   if (!itemId.value) return
   loading.value = true
   error.value = ''
-  posterBroken.value = false
+  notGranted.value = false
   backdropBroken.value = false
   logoBroken.value = false
   seasons.value = []
@@ -305,7 +316,12 @@ async function loadDetail() {
       }
     }
   } catch (err: unknown) {
-    error.value = humanizeError(err)
+    const status = httpStatusOf(err)
+    if (isEmbyAccessNotGranted(err) || status === 401 || status === 403) {
+      notGranted.value = true
+    } else {
+      error.value = humanizeError(err)
+    }
   } finally {
     loading.value = false
   }
@@ -351,43 +367,45 @@ onMounted(() => {
 
 .md-hero-card {
   position: relative;
-  background: #fdfbfa;
-  border: 1px solid #d1d1cd;
+  background: #1a1714;
+  border: 1px solid #2f2a24;
   border-radius: 16px;
   overflow: hidden;
+  color: #f6f1e7;
 }
 
 .md-backdrop {
-  position: relative;
-  height: 240px;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
-  background: #efe9df;
+  background: #1a1714;
+  pointer-events: none;
 }
 
 .md-backdrop img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  opacity: 0.52;
   display: block;
 }
 
 .md-backdrop-scrim {
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(253, 251, 250, 0.15) 0%, rgba(253, 251, 250, 0.96) 92%, #fdfbfa 100%);
+  background:
+    linear-gradient(90deg, rgba(22, 19, 16, 0.94) 0%, rgba(22, 19, 16, 0.80) 50%, rgba(22, 19, 16, 0.58) 100%),
+    linear-gradient(180deg, rgba(22, 19, 16, 0.36) 0%, rgba(22, 19, 16, 0.94) 100%);
 }
 
 .md-hero-grid {
   position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
   gap: 28px;
-  padding: 28px;
+  padding: 32px;
   align-items: start;
-}
-
-.md-backdrop + .md-hero-grid {
-  margin-top: -96px;
 }
 
 .md-poster-frame {
@@ -395,8 +413,8 @@ onMounted(() => {
   aspect-ratio: 2 / 3;
   border-radius: 14px;
   overflow: hidden;
-  background: #efe9df;
-  border: 1px solid #d1d1cd;
+  background: #2b2620;
+  border: 1px solid rgba(255, 253, 248, 0.18);
 }
 
 .md-poster-frame img {
@@ -409,22 +427,25 @@ onMounted(() => {
 .md-poster-fallback {
   width: 100%;
   height: 100%;
+  padding: 24px 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(155deg, #e5ddd0, #cbbfab);
-  color: #27251e;
-  font-size: 32px;
+  text-align: center;
+  background: linear-gradient(155deg, #322c25, #221e19);
+  color: #f6f1e7;
+  font-size: 26px;
   font-weight: 500;
 }
 
 .md-logo-img {
-  max-height: 64px;
-  max-width: min(320px, 100%);
+  max-height: 76px;
+  max-width: min(360px, 100%);
   width: auto;
   object-fit: contain;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   display: block;
+  filter: drop-shadow(0 2px 12px rgba(0, 0, 0, 0.62));
 }
 
 .md-title {
@@ -433,13 +454,18 @@ onMounted(() => {
   font-weight: 500;
   line-height: 1.3;
   letter-spacing: 0;
-  color: #27251e;
+  color: #faf8f5;
+}
+
+.md-title.has-logo {
+  font-size: 22px;
+  color: #ebe4d8;
 }
 
 .md-orig-title {
   margin: 6px 0 0;
   font-size: 15px;
-  color: #524b42;
+  color: #c9c0b2;
 }
 
 .md-meta-pills {
@@ -452,16 +478,17 @@ onMounted(() => {
 .md-pill {
   padding: 4px 12px;
   border-radius: 9999px;
-  border: 1px solid #d1d1cd;
-  background: #faf8f5;
-  color: #27251e;
+  border: 1px solid rgba(255, 253, 248, 0.2);
+  background: rgba(255, 253, 248, 0.08);
+  color: #f4efe6;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
 .md-pill-teal {
-  border-color: #016a71;
-  color: #016a71;
+  border-color: #36b3ba;
+  background: rgba(1, 106, 113, 0.42);
+  color: #c4f5f8;
   font-weight: 500;
 }
 
@@ -474,8 +501,8 @@ onMounted(() => {
 
 .md-genre-chip {
   font-size: 13px;
-  color: #524b42;
-  background: #f2ede4;
+  color: #dcd4c6;
+  background: rgba(255, 253, 248, 0.1);
   padding: 3px 10px;
   border-radius: 9999px;
 }
@@ -495,7 +522,7 @@ onMounted(() => {
   padding: 0 22px;
   border-radius: 12px;
   border: none;
-  background: #016a71;
+  background: #018088;
   color: #ffffff;
   font-size: 15px;
   font-weight: 500;
@@ -504,7 +531,7 @@ onMounted(() => {
 }
 
 .md-btn-primary:hover {
-  opacity: 0.9;
+  background: #01929b;
 }
 
 .md-btn-ghost {
@@ -514,9 +541,9 @@ onMounted(() => {
   min-height: 44px;
   padding: 0 18px;
   border-radius: 12px;
-  border: 1px solid #d1d1cd;
-  background: #faf8f5;
-  color: #27251e;
+  border: 1px solid rgba(255, 253, 248, 0.24);
+  background: rgba(255, 253, 248, 0.08);
+  color: #faf8f5;
   font-size: 14px;
   font-weight: 500;
   font-family: inherit;
@@ -526,7 +553,11 @@ onMounted(() => {
 .md-overview-block {
   margin-top: 24px;
   padding-top: 18px;
-  border-top: 1px solid #ece8e0;
+  border-top: 1px solid rgba(255, 253, 248, 0.14);
+}
+
+.md-hero-card .md-sec-h {
+  color: #faf8f5;
 }
 
 .md-sec-h {
@@ -541,14 +572,14 @@ onMounted(() => {
   max-width: 72ch;
   font-size: 15px;
   line-height: 1.7;
-  color: #27251e;
+  color: #e6dfd2;
   white-space: pre-line;
 }
 
 .md-specs {
   margin: 20px 0 0;
   padding-top: 16px;
-  border-top: 1px solid #ece8e0;
+  border-top: 1px solid rgba(255, 253, 248, 0.14);
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px 20px;
@@ -556,14 +587,14 @@ onMounted(() => {
 
 .md-spec-item dt {
   font-size: 13px;
-  color: #524b42;
+  color: #bfb5a5;
 }
 
 .md-spec-item dd {
   margin: 3px 0 0;
   font-size: 14px;
   font-weight: 500;
-  color: #27251e;
+  color: #faf8f5;
   font-variant-numeric: tabular-nums;
 }
 

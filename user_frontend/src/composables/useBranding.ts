@@ -13,7 +13,7 @@
 import { reactive } from 'vue'
 import { brandingApi, type Branding } from '@/api'
 
-export const DEFAULT_SITE_NAME = 'Aetrix'
+export const DEFAULT_SITE_NAME = '帆桥影院'
 export const DEFAULT_THEME_COLOR = '#e8a84a'
 
 /**
@@ -172,8 +172,12 @@ export async function initBranding(): Promise<void> {
   initialized = true
   try {
     const info = await brandingApi.get()
-    Object.assign(branding, info)
+    const rawName = (info.site_name || '').trim()
+    const normalizedName =
+      !rawName || rawName === 'Aetrix' || rawName === '帆桥' ? DEFAULT_SITE_NAME : rawName
+    Object.assign(branding, info, { site_name: normalizedName })
   } catch {
+    applyBranding()
     return
   }
   applyBranding()

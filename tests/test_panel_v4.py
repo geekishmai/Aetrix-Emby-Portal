@@ -856,3 +856,59 @@ def test_feed_cleans_pt_titles_and_prefers_chinese_alias(db, user):
     texts = [i["text"] for i in client.get("/api/panel/feed").json()["data"]["items"]]
     assert "刮削更新 · 《八部半》等 25 部资料已补全" in texts
     assert any("Sherlock Holmes A Game of Shadows" in t and "beAst" not in t and "1080p" not in t for t in texts)
+
+
+def test_clean_pt_title_preserves_roman_sequel_and_decimal_version():
+    """CO2-P2 回归：双语切分不得截断续集罗马数字（教父 II、天之杯 II），不得拆散 梅根2.0。"""
+    from backend.emby_server.portal_title import clean_pt_title
+
+    assert clean_pt_title("教父 II") == "教父 II"
+    assert clean_pt_title("教父 III") == "教父 III"
+    assert clean_pt_title("教父 II The Godfather Part II 1974 1080p BluRay") == "教父 II"
+    assert clean_pt_title("天之杯 II") == "天之杯 II"
+    assert clean_pt_title("命运之夜——天之杯 II ：迷失之蝶") == "命运之夜——天之杯 II ：迷失之蝶"
+    assert clean_pt_title("命运之夜——天之杯 II：迷失之蝶 Heaven Feel II 2019 1080p BluRay") == "命运之夜——天之杯 II：迷失之蝶"
+    assert clean_pt_title("梅根2.0") == "梅根2.0"
+    assert clean_pt_title("梅根2.0.M3GAN.2.0.2025.2160p.WEB-DL.DDP5.1.H265") == "梅根2.0"
+    assert clean_pt_title("哥斯拉-1.0") == "哥斯拉-1.0"
+    assert clean_pt_title("赤壁（下） Red Cliff II H 265 10 bit HD") == "赤壁（下）"
+
+
+def test_emby_routes_require_x_emby_token_and_return_clean_titles(db, user, monkeypatch):
+    """CO2-P0 真实路由联调：/emby/* 拒绝纯门户 JWT（401），携带 rotate_web_portal_token 签发的 X-Emby-Token 返回 200 与 DisplayTitle。"""
+    monkeypatch.setenv("SECRET_KEY", "test-secret-for-portal-ui-p1-check")
+    from backend.security import create_access_token
+    from backend.emby_server import api as emby_api_mod
+    from backend.emby_server.auth import get_db as emby_auth_get_db, rotate_web_portal_token
+    from backend.emby_server import models as em
+
+    lib = em.Library(guid="lib-guid-p1", name="外语电影", collection_type="movies")
+    db.add(lib)
+    db.commit()
+    db.refresh(lib)
+    item = _mk_media(
+        db, "movie", "Eight.and.a.Half.1963.1080p.10bit.MiniHD-FRDS",
+        datetime.now(), library_id=lib.id, aliases="八部半,8½",
+    )
+
+    app = FastAPI()
+    app.include_router(emby_api_mod.emby_router)
+    app.dependency_overrides[emby_api_mod.get_db] = lambda: (yield db)
+    app.dependency_overrides[emby_auth_get_db] = lambda: (yield db)
+    client = TestClient(app)
+
+    portal_jwt = create_access_token(user.id, {"username": user.username})
+    # 1) 纯门户 JWT 请求 /emby/* 必须 401（锁定 get_emby_user 安全边界）
+    for url in ("/emby/Users/me/Views", "/emby/Users/me/Items", f"/emby/Items/{item.guid}"):
+        r_jwt_only = client.get(url, headers={"Authorization": f"Bearer {portal_jwt}"})
+        assert r_jwt_only.status_code == 401, f"{url} must reject JWT-only"
+    # 2) 携带门户账号卡签发的专用 web token（X-Emby-Token）全部 200 且下发中文 DisplayTitle
+    web_key = rotate_web_portal_token(db, user)
+    headers = {"X-Emby-Token": web_key}
+    assert client.get("/emby/Users/me/Views", headers=headers).status_code == 200
+    items_res = client.get("/emby/Users/me/Items?IncludeItemTypes=Movie&Recursive=true", headers=headers)
+    assert items_res.status_code == 200
+    assert items_res.json()["Items"][0]["DisplayTitle"] == "八部半"
+    detail_res = client.get(f"/emby/Items/{item.guid}", headers=headers)
+    assert detail_res.status_code == 200
+    assert detail_res.json()["DisplayTitle"] == "八部半"

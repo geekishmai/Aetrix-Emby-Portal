@@ -76,11 +76,21 @@
         </div>
       </header>
 
-      <div v-if="error" class="v4-err lib-err" role="alert">
+      <div v-if="notGranted" class="lib-empty-card" role="status">
+        <p class="lib-empty-title">尚未开启片库观影权限</p>
+        <p class="lib-empty-desc">
+          前往「我的」激活观影凭证或开通会员后，即可按分类浏览全部馆藏高清海报与影片详情。
+        </p>
+        <div style="margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+          <RouterLink to="/game/account" class="v4-retry" style="text-decoration:none">去我的页面开启权限</RouterLink>
+          <RouterLink to="/shop" class="lib-sort-btn" style="text-decoration:none">前往补给站</RouterLink>
+        </div>
+      </div>
+
+      <div v-else-if="error" class="v4-err lib-err" role="alert">
         <span>片库加载失败：{{ error }}</span>
         <button type="button" class="v4-retry" @click="reloadItems">重试</button>
       </div>
-
       <div v-else-if="loading && items.length === 0" class="lib-grid" aria-hidden="true">
         <div v-for="n in 18" :key="n" class="lib-card-skel">
           <div class="v4-skeleton lib-skel-poster"></div>
@@ -119,8 +129,9 @@
                 @error="markBroken(item.Id)"
               />
               <div v-else class="lib-poster-placeholder">
-                <span class="lib-ph-type">{{ item.Type === 'Series' ? 'SERIES' : 'FILM' }}</span>
+                <span class="lib-ph-type">{{ item.Type === 'Series' ? '剧集' : '电影' }}</span>
                 <span class="lib-ph-text">{{ titleOf(item) }}</span>
+                <span class="lib-ph-foot">暂无海报</span>
               </div>
               <span v-if="ratingOf(item)" class="lib-badge-rating">★ {{ ratingOf(item) }}</span>
               <span v-if="resOf(item)" class="lib-badge-res">{{ resOf(item) }}</span>
@@ -155,7 +166,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { Search } from 'lucide-vue-next'
-import { embyApi, ensureEmbyBase, posterUrl, type EmbyItem } from '@/api/emby'
+import { embyApi, ensureEmbyBase, httpStatusOf, isEmbyAccessNotGranted, posterUrl, type EmbyItem } from '@/api/emby'
 import { displayMediaTitle, resolutionBadge } from '@/utils/mediaTitle'
 import { humanizeError } from '@/composables/usePanelApi'
 import { useToast } from '@/composables/useToast'
@@ -187,6 +198,7 @@ const totalCount = ref(0)
 const loading = ref(true)
 const loadingMore = ref(false)
 const error = ref('')
+const notGranted = ref(false)
 const brokenIds = reactive(new Set<string>())
 
 let searchTimer: number | undefined
@@ -232,6 +244,7 @@ async function fetchPage(reset: boolean) {
     activeController?.abort()
     loading.value = true
     error.value = ''
+    notGranted.value = false
   } else {
     if (loadingMore.value || loading.value) return
     loadingMore.value = true
@@ -260,6 +273,13 @@ async function fetchPage(reset: boolean) {
     items.value = reset ? nextBatch : [...items.value, ...nextBatch]
   } catch (err: unknown) {
     if (ctrl.signal.aborted) return
+    const status = httpStatusOf(err)
+    if (isEmbyAccessNotGranted(err) || status === 401 || status === 403) {
+      notGranted.value = true
+      items.value = []
+      totalCount.value = 0
+      return
+    }
     const msg = humanizeError(err)
     if (reset) {
       error.value = msg
@@ -605,29 +625,34 @@ onUnmounted(() => {
 .lib-poster-placeholder {
   width: 100%;
   height: 100%;
-  padding: 14px;
+  padding: 40px 14px 14px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  background: linear-gradient(155deg, #e7dfd0, #cfc4b0);
+  background: linear-gradient(160deg, #eae2d3 0%, #d8ccb8 100%);
   color: #27251e;
 }
 
 .lib-ph-type {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-size: 12px;
+  font-weight: 500;
   color: #524b42;
 }
 
 .lib-ph-text {
   font-size: 15px;
   font-weight: 500;
-  line-height: 1.35;
+  line-height: 1.4;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  word-break: break-word;
+}
+
+.lib-ph-foot {
+  font-size: 12px;
+  color: #6b6257;
 }
 
 .lib-badge-rating {
@@ -636,23 +661,26 @@ onUnmounted(() => {
   right: 8px;
   padding: 2px 8px;
   border-radius: 9999px;
-  background: rgba(39, 37, 30, 0.85);
+  background: rgba(28, 25, 22, 0.84);
   color: #fdfbfa;
   font-size: 12px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+  line-height: 1.4;
 }
 
 .lib-badge-res {
   position: absolute;
+  top: 8px;
   left: 8px;
-  bottom: 8px;
   padding: 2px 7px;
   border-radius: 6px;
-  background: rgba(253, 251, 250, 0.9);
-  color: #27251e;
+  background: rgba(28, 25, 22, 0.82);
+  color: #fdfbfa;
   font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
 }
 
 .lib-card-title {
@@ -661,9 +689,11 @@ onUnmounted(() => {
   font-weight: 500;
   line-height: 1.4;
   color: #27251e;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
+  word-break: break-word;
 }
 
 .lib-card-meta {

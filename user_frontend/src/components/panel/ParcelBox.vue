@@ -10,13 +10,12 @@
     @click="onTap"
     @keydown="onKey"
   >
-    <div class="d3-cover p1-parcel-cover" :class="coverTone">
+    <div class="d3-cover p1-parcel-cover" :class="[coverTone, { 'has-img': posterSrc && !imgBroken }]">
       <img
         v-if="posterSrc && !imgBroken"
         :src="posterSrc"
         :alt="cleanName"
         class="p1-parcel-img"
-        loading="lazy"
         decoding="async"
         @error="imgBroken = true"
       />
@@ -78,7 +77,8 @@
 import { computed, ref, watch } from 'vue'
 import type { ParcelItem } from '@/composables/usePanelApi'
 import { useRouter } from 'vue-router'
-import { imageAuthUrl } from '@/api/emby'
+import { imageAuthUrl, imageUrl } from '@/api/emby'
+import { embyApiKeyRef } from '@/api/imageKey'
 import { displayMediaTitle } from '@/utils/mediaTitle'
 
 const props = withDefaults(
@@ -95,12 +95,16 @@ const router = useRouter()
 const imgBroken = ref(false)
 const cleanName = computed(() => displayMediaTitle({ Name: props.parcel.name || props.parcel.title || '' }) || '神秘包裹')
 const posterSrc = computed(() => {
+  if (!embyApiKeyRef.value) return ''
+  if (props.parcel.guid) return imageUrl(String(props.parcel.guid), 'Primary', 360)
   const raw = props.parcel.poster_url
   if (!raw) return ''
   const sep = raw.includes('?') ? '&' : '?'
   return imageAuthUrl(`${raw}${sep}maxWidth=360`)
 })
-/** 封面变体没有单独的「去看」按钮，整卡就是按钮；面单变体开封后由脚上的按钮承接。 */
+watch(posterSrc, () => {
+  imgBroken.value = false
+})
 const cardIsButton = computed(() => props.variant === 'cover')
 const coverLabel = computed(() => {
   if (!isOpen.value) return '待拆封存，点击开封'
@@ -237,6 +241,9 @@ function onTap() {
 .v4-parcel.is-busy { pointer-events: none; opacity: 0.75; }
 .p1-parcel-cover {
   position: relative;
+}
+.p1-parcel-cover.has-img {
+  padding: 0 !important;
 }
 .p1-parcel-img {
   width: 100%;

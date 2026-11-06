@@ -54,6 +54,9 @@ body {
 }
 
 @media (min-width: 768px) {
+  .app-header .header-container {
+    max-width: min(720px, 92vw);
+  }
   .v4-page {
     max-width: min(720px, 92vw);
     padding-bottom: 48px;
@@ -64,6 +67,9 @@ body {
 }
 
 @media (min-width: 1024px) {
+  .app-header .header-container {
+    max-width: min(1080px, 94vw);
+  }
   .v4-page {
     max-width: min(1080px, 94vw);
   }
@@ -73,6 +79,9 @@ body {
 }
 
 @media (min-width: 1280px) {
+  .app-header .header-container {
+    max-width: min(1480px, 94vw);
+  }
   /* 1280 * 0.94 = 1203.2px，扣除左右 24px*2 后内容区净宽 1155px（> 960px 硬指标） */
   .v4-page {
     max-width: min(1240px, 94vw);

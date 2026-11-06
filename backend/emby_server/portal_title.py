@@ -24,9 +24,30 @@ _GENERIC_DIRS = frozenset({
     "specials", "bdmv", "stream",
 })
 _SEASON_DIR_RE = re.compile(r"^(?:season\s*\d+|s\d{1,2}|第[一二三四五六七八九十\d]+[季部])$", re.IGNORECASE)
-_LEADING_CJK_TITLE_RE = re.compile(
-    r"^([\u4e00-\u9fff0-9][\u4e00-\u9fff0-9：:·・，,！!？?—\-（）()\s]{0,38}?[\u4e00-\u9fff0-9）)])"
-    r"(?:(?:\s+|\.)[A-Za-z]{2,}|\s*$)"
+_ROMAN_RE = re.compile(r"^(?:I{1,3}|IV|VI{0,3}|IX|XI{0,2}|[Ⅰ-Ⅻ])$")
+_PT_DISPLAY_JUNK_RE = re.compile(
+    r"\b(?:2160p|1440p|1080[ip]|720p|480p|4k|8k|uhd|hdr10\+?|hdr|sdr|dv|dolby|hevc|avc|"
+    r"[hx][.\s]?26[45]|blu[\s\-]?ray|bluray|remux|web[\s\-]?dl|webrip|bdrip|brrip|hdtv|dvdrip|bdmv|"
+    r"truehd(?:[.\s]*\d[.\s]\d)?|dts(?:[-\s.]?hd(?:[.\s]?ma|[.\s]?hra?)?)?(?:[.\s]?\d[.\s]\d)?|"
+    r"dtshd(?:ma)?(?:[.\s]?\d[.\s]\d)?|hdma(?:[.\s]?\d[.\s]\d)?|hd\s+ma(?:\s+\d[.\s]\d)?|"
+    r"ddp?[.\s]?\d[.\s]\d|(?:eac3|ac3|aac|flac)(?:[.\s]?\d[.\s]\d)?|atmos|(?:8|10|12)\s*bit|"
+    r"(?:[2-9]|multi|dual|2ual)audios?|pgs|repack|proper|complete|minihd|mnhd|beitai|chdweb|chdbits|"
+    r"tagweb|taghd|momoweb|momohd|ctrlweb|ctrlhd|enthd|bathd|homeweb|homehd|hdbweb|frds|adweb|ourtv|harestv|hhweb|mweb|ttg|2d3d)\b",
+    re.IGNORECASE,
+)
+_CASE_SENSITIVE_GROUP_RE = re.compile(r"(?:\b[A-Za-z0-9_]+@[A-Za-z0-9_]+\b|\bbeAst\b)")
+_TAIL_SHORT_TAG_RE = re.compile(
+    r"(?:\s+|[-._])[\[(（【]?\s*(?:hktv|hk|tw|us|gb|kr|jp|cn|gl|cee|dc|alt|chd|xiaomi|ma|hd)\s*[\])）】]?\s*$",
+    re.IGNORECASE,
+)
+# 双语标题切分：中文主名（允许末尾跟罗马数字续集号如 II/III/IV 或 2.0 版本号） + 纯英文副名直到句末（句末绝不含中文）
+_BILINGUAL_SPLIT_RE = re.compile(
+    r"^("
+    r"[\u4e00-\u9fff0-9][\u4e00-\u9fff0-9A-Za-z\u2160-\u216b：:·・，,！!？?—\-（）().\s]{0,60}?"
+    r"[\u4e00-\u9fff0-9）)\u2160-\u216b]"
+    r"(?:\s+(?:I{2,3}|IV|VI{0,3}|IX|XI{0,2}))?"
+    r")"
+    r"\s+([A-Za-z][A-Za-z0-9'’:,.\-\s]*)$"
 )
 
 
@@ -34,31 +55,53 @@ def contains_cjk(text: str | None) -> bool:
     return bool(text and _CJK_RE.search(text))
 
 
+def _is_english_translation_tail(tail: str) -> bool:
+    """判定末尾拉丁串是否为双语附加英文原名（排除单独罗马数字如 II/III）。"""
+    t = tail.strip(" .-_:：()[]")
+    if not t or contains_cjk(t) or _ROMAN_RE.match(t):
+        return False
+    # 去掉末尾纯年份后再看英文词数/长度
+    t_no_year = re.sub(r"\b(?:19|20)\d{2}\b", " ", t).strip()
+    words = [w for w in re.findall(r"[A-Za-z0-9]+", t_no_year) if not _ROMAN_RE.match(w)]
+    alpha_words = [w for w in words if re.search(r"[A-Za-z]", w)]
+    if len(alpha_words) >= 2:
+        return True
+    if len(alpha_words) == 1 and len(alpha_words[0]) >= 4:
+        return True
+    return False
+
+
 def clean_pt_title(raw: str | None) -> str:
-    """剥除标题末尾残留的 PT 压制参数/官组名；若为「中文名 + 英文原名」双语串则优先取中文段。"""
+    """剥除标题末尾残留的 PT 压制参数/官组名；保留中文标点、罗马数字续集号与 2.0 版本号。"""
     text = (raw or "").strip()
     if not text:
         return ""
-    text = _BRACKET_META_RE.sub(" ", text).strip()
-    from backend.emby_server import tmdb as tmdb_lib
-
-    cleaned = tmdb_lib._clean_query(text)
-    tail = cleaned
+    s = _BRACKET_META_RE.sub(" ", text)
+    s = _CASE_SENSITIVE_GROUP_RE.sub(" ", s)
+    s = _PT_DISPLAY_JUNK_RE.sub(" ", s)
+    # 仅保护片名版本号小数点（如 梅根2.0 / 哥斯拉-1.0 / 0.0兆赫），把 .2025 / .M3GAN 等文件名分隔符转空格
+    s = re.sub(r"(?<!\d)\.|(?<=\d)\.(?!\d(?!\d))|[_+]+", " ", s)
+    s = re.sub(r"(?<![\d.])\b(?:1\s0|2\s0|5\s1|7\s1)\b(?![\d.])", " ", s)
+    s = re.sub(r"\s+", " ", s).strip(" .-_")
     while True:
-        nxt = tmdb_lib._REGION_TAIL_RE.sub(" ", tail).strip(" -_.()（）[]")
+        nxt = _TAIL_SHORT_TAG_RE.sub("", s).strip(" .-_")
         nxt = re.sub(r"\s+", " ", nxt).strip()
-        if not nxt or nxt == tail:
+        if not nxt or nxt == s:
             break
-        tail = nxt
-    candidate = tail or cleaned or text
-    # 双语拼接形如「谍影重重1 The Bourne Identity」或「第一次的离别 A First Farewell」→ 取中文主名
-    m = _LEADING_CJK_TITLE_RE.match(candidate)
-    if m:
+        s = nxt
+    # 若末尾跟了压制文件名年份（如 Eight and a Half 1963 / 梅根2.0 M3GAN 2.0 2025），在纯英文发布串末尾剥除年份
+    candidate = s or text
+    m = _BILINGUAL_SPLIT_RE.match(candidate)
+    if m and contains_cjk(m.group(1)) and _is_english_translation_tail(m.group(2)):
         cjk_head = re.sub(r"\s+", " ", m.group(1)).strip(" .-_:：")
         if contains_cjk(cjk_head) and len(cjk_head) >= 2:
             return cjk_head
+    # 纯英文 PT 发布名（原串含句点分隔或压制词）剥除末尾 4 位年份
+    if not contains_cjk(candidate) and ("." in text or candidate != text):
+        no_yr = re.sub(r"\s+(?:19|20)\d{2}$", "", candidate).strip(" -_.")
+        if no_yr and re.search(r"[A-Za-z]", no_yr):
+            return no_yr
     return candidate
-
 
 def extract_folder_cjk_title(file_path: str | None) -> str:
     """从挂载路径父目录（如 `宿醉3[繁英字幕].The.Hangover.Part.III.2013...`）提取中文片名。"""

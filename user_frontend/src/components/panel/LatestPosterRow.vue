@@ -23,6 +23,11 @@
         </div>
       </div>
 
+      <div v-else-if="notGranted" class="v4-empty p1-unlock-guide">
+        <span>开启观影权限后，即可在这里直接浏览最新入库海报与影片详情。</span>
+        <RouterLink to="/game/account" class="p1-inline-link">去我的页面开启权限 →</RouterLink>
+      </div>
+
       <div v-else-if="error" class="v4-err">
         <span>最新入库加载失败：{{ error }}</span>
         <button type="button" class="v4-retry" @click="loadLatest">重试</button>
@@ -31,7 +36,6 @@
       <div v-else-if="items.length === 0" class="v4-empty">
         片库正在入库刮削中，稍后回来看看，或直接<RouterLink to="/library" class="p1-inline-link">打开片库</RouterLink>
       </div>
-
       <div v-else class="p1-shelf-wrap">
         <button
           v-if="canScrollLeft"
@@ -72,10 +76,11 @@
                 @error="markBroken(item.Id)"
               />
               <div v-else class="p1-poster-fallback">
-                <span>{{ titleOf(item).slice(0, 2) }}</span>
+                <span class="p1-ph-title">{{ titleOf(item) }}</span>
+                <span class="p1-ph-note">暂无海报</span>
               </div>
+              <span v-if="resOf(item)" class="p1-badge-res">{{ resOf(item) }}</span>
               <span v-if="ratingOf(item)" class="p1-badge-rating">★ {{ ratingOf(item) }}</span>
-              <span v-else-if="resOf(item)" class="p1-badge-res">{{ resOf(item) }}</span>
             </div>
             <div class="p1-poster-name" :title="titleOf(item)">{{ titleOf(item) }}</div>
             <div class="p1-poster-meta">
@@ -103,12 +108,13 @@
 import { nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { ArrowRight, ChevronLeft, ChevronRight } from 'lucide-vue-next'
-import { embyApi, ensureEmbyBase, posterUrl, type EmbyItem } from '@/api/emby'
+import { embyApi, ensureEmbyBase, httpStatusOf, isEmbyAccessNotGranted, posterUrl, type EmbyItem } from '@/api/emby'
 import { displayMediaTitle, hasCjk, resolutionBadge } from '@/utils/mediaTitle'
 import { humanizeError } from '@/composables/usePanelApi'
 
 const loading = ref(true)
 const error = ref('')
+const notGranted = ref(false)
 const items = ref<EmbyItem[]>([])
 const brokenIds = reactive(new Set<string>())
 
@@ -196,6 +202,7 @@ function onCardClick(e: MouseEvent) {
 async function loadLatest() {
   loading.value = true
   error.value = ''
+  notGranted.value = false
   try {
     await ensureEmbyBase()
     const res = await embyApi.getItems({
@@ -216,8 +223,9 @@ async function loadLatest() {
     })
     items.value = withPoster.slice(0, 18)
   } catch (err: unknown) {
-    const status = (err as { response?: { status?: number } })?.response?.status
-    if (status === 401 || status === 403) {
+    const status = httpStatusOf(err)
+    if (isEmbyAccessNotGranted(err) || status === 401 || status === 403) {
+      notGranted.value = true
       items.value = []
     } else {
       error.value = humanizeError(err)
@@ -371,27 +379,55 @@ onUnmounted(() => {
 .p1-poster-fallback {
   width: 100%;
   height: 100%;
+  padding: 38px 12px 12px;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(155deg, #dfd7c8, #c8beac);
+  flex-direction: column;
+  justify-content: space-between;
+  background: linear-gradient(160deg, #eae2d3 0%, #d8ccb8 100%);
   color: #27251e;
-  font-size: 24px;
-  font-weight: 500;
 }
 
-.p1-badge-rating,
-.p1-badge-res {
+.p1-ph-title {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.p1-ph-note {
+  font-size: 12px;
+  color: #6b6257;
+}
+
+.p1-badge-rating {
   position: absolute;
   top: 8px;
   right: 8px;
   padding: 2px 8px;
   border-radius: 9999px;
-  background: rgba(39, 37, 30, 0.84);
+  background: rgba(28, 25, 22, 0.84);
   color: #fdfbfa;
   font-size: 12px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+.p1-badge-res {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(28, 25, 22, 0.82);
+  color: #fdfbfa;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   line-height: 1.4;
 }
 
@@ -401,9 +437,11 @@ onUnmounted(() => {
   font-weight: 500;
   line-height: 1.4;
   color: #27251e;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
+  word-break: break-word;
 }
 
 .p1-poster-meta {
