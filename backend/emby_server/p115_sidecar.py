@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 import os
 import time
 import signal
@@ -147,6 +148,12 @@ class P115SidecarHandler:
         self._negative_cache: dict[tuple[str, str], float] = {}
         self._negative_ttl = env_float(
             "P115_SIDECAR_NEGATIVE_CACHE_SEC", 60.0, 0.0)
+        # 并发在途单飞（跨宿主进程 api/ea 或预取与播放同刻到达时，合并同一
+        # (scope, cid) 的 list_dir 与同一 (scope, pickcode) 的 download_url，
+        # 完成后 finally 立即弹出，不在 sidecar 留持久直链副本）。
+        self._inflight_lock = threading.Lock()
+        self._list_inflight: dict[tuple[str, str], Future] = {}
+        self._dl_inflight: dict[tuple[str, str], Future] = {}
 
     # ---- 会话 ----
     def session_upsert(self, session_id: str, data: dict) -> None:
@@ -288,16 +295,59 @@ class P115SidecarHandler:
                 hit = self._dir_cache.get(key)
                 if hit is not None and hit[0] > now:
                     return list(hit[1])
+
+        def _fetch_dir() -> list[dict]:
+            if not fresh and self._dir_cache_ttl > 0:
+                now_inner = time.monotonic()
+                with self._cache_lock:
+                    hit_inner = self._dir_cache.get(key)
+                    if hit_inner is not None and hit_inner[0] > now_inner:
+                        return list(hit_inner[1])
+            try:
+                fetched = state.client.list_dir(cid or "0", deadline=deadline)
+            except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
+                raise _map_115_error(exc) from exc
+            if self._dir_cache_ttl > 0:
+                with self._cache_lock:
+                    self._dir_cache[key] = (
+                        time.monotonic() + self._dir_cache_ttl,
+                        list(fetched),
+                    )
+                    if len(self._dir_cache) > self._cache_max_dirs:
+                        self._evict_dir_cache_locked(state.scope)
+            return list(fetched)
+
+        if fresh:
+            return _fetch_dir()
+        return list(self._run_singleflight(self._list_inflight, key, _fetch_dir, deadline=deadline))
+
+    def _run_singleflight(self, table: dict[tuple[str, str], Future],
+                          key: tuple[str, str], fn,
+                          deadline: float | None = None):
+        with self._inflight_lock:
+            fut = table.get(key)
+            is_leader = fut is None
+            if is_leader:
+                fut = Future()
+                table[key] = fut
+        if is_leader:
+            try:
+                res = fn()
+            except BaseException as exc:
+                fut.set_exception(exc)
+                raise
+            else:
+                fut.set_result(res)
+                return res
+            finally:
+                with self._inflight_lock:
+                    if table.get(key) is fut:
+                        table.pop(key, None)
+        wait_sec = max(0.05, deadline - time.time()) if deadline is not None else 30.0
         try:
-            items = state.client.list_dir(cid or "0", deadline=deadline)
-        except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
-            raise _map_115_error(exc) from exc
-        if self._dir_cache_ttl > 0:
-            with self._cache_lock:
-                self._dir_cache[key] = (now + self._dir_cache_ttl, list(items))
-                if len(self._dir_cache) > self._cache_max_dirs:
-                    self._evict_dir_cache_locked(state.scope)
-        return items
+            return fut.result(timeout=wait_sec)
+        except FutureTimeoutError as exc:
+            raise ProviderRuntimeError("deadline_exceeded", "sidecar 在途单飞等待超时") from exc
 
     def _evict_dir_cache_locked(self, scope: str) -> None:
         """超限时淘汰一半目录缓存（须持 _cache_lock）。
@@ -535,10 +585,15 @@ class P115SidecarHandler:
             pickcode = entry.get("pickcode") or ""
         if not pickcode:
             raise ProviderRuntimeError("not_found", f"115 未返回该文件的 pickcode：{path}")
-        try:
-            url = state.client.download_url(pickcode, deadline=deadline)
-        except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
-            raise _map_115_error(exc) from exc
+        def _fetch_dl() -> str:
+            try:
+                return state.client.download_url(pickcode, deadline=deadline)
+            except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
+                raise _map_115_error(exc) from exc
+
+        url = self._run_singleflight(
+            self._dl_inflight, (state.scope, pickcode), _fetch_dl, deadline=deadline
+        )
         return {
             "url": url,
             "headers": {

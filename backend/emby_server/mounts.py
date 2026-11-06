@@ -2386,8 +2386,14 @@ _RESOLVE_CACHE: dict = {}
 _PATH_ID_CACHE: dict = {}
 _RESOLVE_CACHE_LOCK = threading.Lock()
 _RESOLVE_CACHE_STATS = {"hits": 0, "misses": 0, "expired": 0, "evictions": 0}
-_PATH_ID_CACHE_STATS = {"hits": 0, "misses": 0, "expired": 0, "evictions": 0}
-
+_PATH_ID_CACHE_STATS = {
+    "hits": 0,
+    "misses": 0,
+    "expired": 0,
+    "evictions": 0,
+    "redis_hits": 0,
+}
+RESOLVE_PATH_ID_REDIS_PREFIX = "aetrix:resolve_path_id:v1"
 
 def parse_url_expiry_epoch(url: Optional[str]) -> Optional[float]:
     """从直链 URL 查询串提取到期 Unix 秒级时间戳（识别 ``expires`` 与 ``t``）。
@@ -2452,10 +2458,10 @@ def compute_url_cache_ttl(
 #: 建新锁」造成两把锁并行换链（QA V-5）。
 _RESOLVE_LOCKS: dict = {}
 
-#: 等单飞锁的上限（秒）：换链上游挂起时不让播放请求线程全堵在锁上，超时
-#: 降级为自己直接解析（放弃单飞，QA V-6）。
-_RESOLVE_SINGLE_FLIGHT_WAIT_SEC = 5.0
-
+#: 等单飞锁的上限（秒）：线上实测（2026-11-06 12:04Z）冷目录 4 级定位（含千片目录分页）
+#: + 取链约需 6–8s；旧值 5.0s 会让 stream 在 prefetch 尚未完成时超时穿透，触发第二次
+#: 并发换链（download_url 翻倍 + guard 1rps 桶自排队），放宽至 15.0s 覆盖完整冷链路。
+_RESOLVE_SINGLE_FLIGHT_WAIT_SEC = 15.0
 
 def _resolve_single_flight_enter(key: tuple) -> threading.Lock:
     with _RESOLVE_CACHE_LOCK:
@@ -2484,6 +2490,7 @@ def resolve_cache_stats() -> dict:
             "ttl_seconds": RESOLVE_TARGET_CACHE_TTL_SEC,
             "path_id_entries": len(_PATH_ID_CACHE),
             "path_id_hits": _PATH_ID_CACHE_STATS["hits"],
+            "path_id_redis_hits": _PATH_ID_CACHE_STATS["redis_hits"],
             "path_id_misses": _PATH_ID_CACHE_STATS["misses"],
             "path_id_expired": _PATH_ID_CACHE_STATS["expired"],
             "path_id_evictions": _PATH_ID_CACHE_STATS["evictions"],
@@ -2499,23 +2506,30 @@ def reset_resolve_cache() -> None:
             _RESOLVE_CACHE_STATS[name] = 0
         for name in _PATH_ID_CACHE_STATS:
             _PATH_ID_CACHE_STATS[name] = 0
+    _redis_path_id_clear_all()
+
+
+def _config_fingerprint_digest(provider) -> str:
+    """配置指纹的 SHA-256 摘要（绝不让原始 config JSON 中的凭据进内存键或 Redis）。"""
+    mount = getattr(provider, "mount", None)
+    mount_path = str(getattr(mount, "path", "") or "")
+    raw = _config_fingerprint(provider)
+    return hashlib.sha256(f"{mount_path}\0{raw}".encode("utf-8")).hexdigest()
 
 
 def _resolve_cache_key(provider, rel: str) -> tuple:
-    """缓存键 = (挂载 id, 类型, 配置指纹, rel)，与目录缓存同法（mounts._list_cache_key）。
+    """缓存键 = (挂载 id, 类型, 配置指纹 SHA256, rel)。
 
-    配置指纹进键：挂载改配置 / 换 Cookie 后指纹变，旧条目自然打不中，无需
-    主动清理。键里**不许**放 user_id / token / Cookie——解析结果与用户无关
-    （权限在播放入口已先行判定），放用户维度只会把命中率打碎。
+    配置指纹摘要进键：挂载改配置 / 换挂载级 Cookie 后摘要变，旧条目自然打不中；
+    摘要不可逆，保证内存键与 Redis 持久层均零凭据。
     """
     mount = getattr(provider, "mount", None)
     return (
         getattr(mount, "id", None),
         (getattr(mount, "mount_type", "") or "").strip(),
-        _config_fingerprint(provider),
+        _config_fingerprint_digest(provider),
         rel or "/",
     )
-
 
 def _resolve_cache_get(key: tuple) -> Optional[PlayTarget]:
     """取缓存（命中返回缓存里的脱凭据副本；过期顺手删并当未命中）。TTL=0 恒未命中。"""
@@ -2556,8 +2570,190 @@ def _resolve_cache_put(key: tuple, stored: Optional[PlayTarget]) -> None:
         _RESOLVE_CACHE[key] = (now + url_ttl, stored)
 
 
+def _redis_path_id_fwd_key(mount_id: Any, rel: str) -> str:
+    rel_digest = hashlib.sha256((rel or "/").encode("utf-8")).hexdigest()
+    return f"{RESOLVE_PATH_ID_REDIS_PREFIX}:item:{mount_id}:{rel_digest}"
+
+
+def _redis_path_id_pc_key(file_id: str) -> str:
+    return f"{RESOLVE_PATH_ID_REDIS_PREFIX}:pc:{file_id}"
+
+
+def _redis_path_id_mnt_key(mount_id: Any) -> str:
+    return f"{RESOLVE_PATH_ID_REDIS_PREFIX}:mnt:{mount_id}"
+
+
+def _redis_path_id_mounts_key() -> str:
+    return f"{RESOLVE_PATH_ID_REDIS_PREFIX}:mounts"
+
+
+def _decode_redis_str(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="ignore")
+    return str(val)
+
+
+def _redis_path_id_get(key: tuple) -> Optional[tuple[str, float]]:
+    """从 Redis 读取第一层路径→文件 ID（跨进程、跨容器重启保留 48h，零凭据）。"""
+    mount_id, mount_type, fp_digest, rel = key
+    if mount_id is None or RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
+        return None
+    fwd_key = _redis_path_id_fwd_key(mount_id, rel)
+    try:
+        from backend.database import redis_call
+
+        def _op(client):
+            pipe = client.pipeline()
+            pipe.get(fwd_key)
+            pipe.pttl(fwd_key)
+            return pipe.execute()
+
+        res = redis_call(_op, default=None)
+    except Exception:  # noqa: BLE001
+        return None
+    if not res or not res[0]:
+        return None
+    try:
+        payload = json.loads(_decode_redis_str(res[0]))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("mt") != mount_type or payload.get("fp") != fp_digest:
+        return None
+    file_id = str(payload.get("id") or "").strip()
+    if not file_id:
+        return None
+    pttl = res[1] if len(res) > 1 else -1
+    try:
+        pttl_num = int(pttl)
+    except (TypeError, ValueError):
+        pttl_num = -1
+    if pttl_num > 0:
+        rem_sec = min(float(RESOLVE_TARGET_CACHE_TTL_SEC), pttl_num / 1000.0)
+    else:
+        rem_sec = float(RESOLVE_TARGET_CACHE_TTL_SEC)
+    return (file_id, max(0.001, rem_sec))
+
+
+def _redis_path_id_put(key: tuple, file_id: str) -> None:
+    mount_id, mount_type, fp_digest, rel = key
+    if mount_id is None or not file_id or RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
+        return
+    ttl_int = max(1, int(RESOLVE_TARGET_CACHE_TTL_SEC))
+    fwd_key = _redis_path_id_fwd_key(mount_id, rel)
+    pc_key = _redis_path_id_pc_key(file_id)
+    mnt_key = _redis_path_id_mnt_key(mount_id)
+    mounts_key = _redis_path_id_mounts_key()
+    payload = json.dumps(
+        {"mt": mount_type, "fp": fp_digest, "id": str(file_id)},
+        separators=(",", ":"),
+    )
+    try:
+        from backend.database import redis_call
+
+        def _op(client):
+            pipe = client.pipeline()
+            pipe.set(fwd_key, payload, ex=ttl_int)
+            pipe.sadd(pc_key, fwd_key)
+            pipe.expire(pc_key, ttl_int)
+            pipe.sadd(mnt_key, fwd_key)
+            pipe.expire(mnt_key, ttl_int)
+            pipe.sadd(mounts_key, str(mount_id))
+            pipe.expire(mounts_key, ttl_int)
+            pipe.execute()
+
+        redis_call(_op, default=None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _redis_path_id_delete_one(mount_id: Any, rel: str) -> None:
+    if mount_id is None:
+        return
+    fwd_key = _redis_path_id_fwd_key(mount_id, rel)
+    try:
+        from backend.database import redis_call
+
+        redis_call(lambda c: c.delete(fwd_key), default=None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _redis_path_id_delete_mount(mount_id: Any) -> None:
+    if mount_id is None:
+        return
+    mnt_key = _redis_path_id_mnt_key(mount_id)
+    mounts_key = _redis_path_id_mounts_key()
+    try:
+        from backend.database import redis_call
+
+        def _op(client):
+            members = [_decode_redis_str(m) for m in (client.smembers(mnt_key) or ())]
+            members = [m for m in members if m]
+            pipe = client.pipeline()
+            if members:
+                pipe.delete(*members)
+            pipe.delete(mnt_key)
+            pipe.srem(mounts_key, str(mount_id))
+            pipe.execute()
+
+        redis_call(_op, default=None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _redis_path_id_delete_by_pickcode(pickcode: str) -> None:
+    if not pickcode:
+        return
+    pc_key = _redis_path_id_pc_key(pickcode)
+    try:
+        from backend.database import redis_call
+
+        def _op(client):
+            members = [_decode_redis_str(m) for m in (client.smembers(pc_key) or ())]
+            members = [m for m in members if m]
+            pipe = client.pipeline()
+            if members:
+                pipe.delete(*members)
+            pipe.delete(pc_key)
+            pipe.execute()
+
+        redis_call(_op, default=None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _redis_path_id_clear_all() -> None:
+    mounts_key = _redis_path_id_mounts_key()
+    try:
+        from backend.database import redis_call
+
+        def _op(client):
+            mids = [_decode_redis_str(m) for m in (client.smembers(mounts_key) or ())]
+            mids = [m for m in mids if m]
+            if not mids:
+                client.delete(mounts_key)
+                return
+            to_del = [mounts_key]
+            for mid in mids:
+                mk = _redis_path_id_mnt_key(mid)
+                to_del.append(mk)
+                for fk in (client.smembers(mk) or ()):
+                    s = _decode_redis_str(fk)
+                    if s:
+                        to_del.append(s)
+            client.delete(*to_del)
+
+        redis_call(_op, default=None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _path_id_cache_get(key: tuple) -> Optional[str]:
-    """取第一层路径→文件 ID 缓存（不含 URL、不含凭据）。TTL=0 恒未命中。"""
+    """取第一层路径→文件 ID 缓存（L1 内存 → L2 Redis；不含 URL、不含凭据）。"""
     if RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
         return None
     now = time.monotonic()
@@ -2569,14 +2765,26 @@ def _path_id_cache_get(key: tuple) -> Optional[str]:
         if row is not None:
             _PATH_ID_CACHE.pop(key, None)
             _PATH_ID_CACHE_STATS["expired"] += 1
+    redis_hit = _redis_path_id_get(key)
+    if redis_hit is not None:
+        file_id, rem_sec = redis_hit
+        now2 = time.monotonic()
+        with _RESOLVE_CACHE_LOCK:
+            if len(_PATH_ID_CACHE) < RESOLVE_TARGET_CACHE_MAX:
+                _PATH_ID_CACHE[key] = (now2 + rem_sec, file_id)
+            _PATH_ID_CACHE_STATS["hits"] += 1
+            _PATH_ID_CACHE_STATS["redis_hits"] += 1
+        return file_id
+    with _RESOLVE_CACHE_LOCK:
         _PATH_ID_CACHE_STATS["misses"] += 1
-        return None
+    return None
 
 
 def _path_id_cache_put(key: tuple, file_id: str) -> None:
     if not file_id or RESOLVE_TARGET_CACHE_TTL_SEC <= 0:
         return
     now = time.monotonic()
+    fid = str(file_id)
     with _RESOLVE_CACHE_LOCK:
         if len(_PATH_ID_CACHE) >= RESOLVE_TARGET_CACHE_MAX:
             for k in [k for k, row in _PATH_ID_CACHE.items() if row[0] <= now]:
@@ -2584,7 +2792,8 @@ def _path_id_cache_put(key: tuple, file_id: str) -> None:
             if len(_PATH_ID_CACHE) >= RESOLVE_TARGET_CACHE_MAX:
                 _PATH_ID_CACHE.clear()
             _PATH_ID_CACHE_STATS["evictions"] += 1
-        _PATH_ID_CACHE[key] = (now + RESOLVE_TARGET_CACHE_TTL_SEC, str(file_id))
+        _PATH_ID_CACHE[key] = (now + RESOLVE_TARGET_CACHE_TTL_SEC, fid)
+    _redis_path_id_put(key, fid)
 
 
 def _maybe_evict_path_id_on_error(key: tuple, provider) -> None:
@@ -2601,27 +2810,32 @@ def _maybe_evict_path_id_on_error(key: tuple, provider) -> None:
         pass
     with _RESOLVE_CACHE_LOCK:
         _PATH_ID_CACHE.pop(key, None)
+    _redis_path_id_delete_one(key[0], key[3])
 
 
 def invalidate_resolve_cache(mount_id: Optional[int] = None,
                              rel: Optional[str] = None) -> None:
-    """清两层解析缓存：mount_id + rel 只清一条；只给 mount_id 清整个挂载；都不给全清。"""
+    """清两层解析缓存（含 Redis 持久层）：mount_id + rel 只清一条；只给 mount_id 清整挂载；都不给全清。"""
     with _RESOLVE_CACHE_LOCK:
         if mount_id is None and rel is None:
             _RESOLVE_CACHE.clear()
             _PATH_ID_CACHE.clear()
-            return
-        for cache in (_RESOLVE_CACHE, _PATH_ID_CACHE):
-            for key in [k for k in cache
-                        if (mount_id is None or k[0] == mount_id)
-                        and (rel is None or k[3] == rel)]:
-                cache.pop(key, None)
+        else:
+            for cache in (_RESOLVE_CACHE, _PATH_ID_CACHE):
+                for key in [k for k in cache
+                            if (mount_id is None or k[0] == mount_id)
+                            and (rel is None or k[3] == rel)]:
+                    cache.pop(key, None)
+    if mount_id is None and rel is None:
+        _redis_path_id_clear_all()
+    elif mount_id is not None and rel is not None:
+        _redis_path_id_delete_one(mount_id, rel)
+    elif mount_id is not None:
+        _redis_path_id_delete_mount(mount_id)
 
 
 def invalidate_resolve_cache_by_pickcode(pickcode: str) -> None:
-    """按 X-Pickcode 反查同时清第二层直链缓存与第一层路径→ID 缓存
-    （115 中继上游 403/404/410 时连带调用，兜底文件移动或删除）。
-    """
+    """按 X-Pickcode 反查同时清第二层直链缓存与第一层路径→ID 缓存（含 Redis 跨进程持久层）。"""
     if not pickcode:
         return
     with _RESOLVE_CACHE_LOCK:
@@ -2631,7 +2845,7 @@ def invalidate_resolve_cache_by_pickcode(pickcode: str) -> None:
         for key in [k for k, row in _PATH_ID_CACHE.items()
                     if row[1] == pickcode]:
             _PATH_ID_CACHE.pop(key, None)
-
+    _redis_path_id_delete_by_pickcode(pickcode)
 def invalidate_resolve_cache_for_path(file_path: Optional[str]) -> None:
     """按条目 ``file_path`` 清一条解析缓存（扫描确认丢失 / 管理端删条目 /
     分享补开见 404 时，在 ``invalidate_drive_exists_for_item`` 的调用点同点位
