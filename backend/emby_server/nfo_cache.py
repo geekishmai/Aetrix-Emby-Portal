@@ -65,8 +65,8 @@ _warned = False
 
 
 def _cfg_enabled() -> bool:
-    return (os.getenv("EMBY_NFO_PICKCODE_CACHE", "0") or "0").strip().lower() in {
-        "1", "true", "yes", "on",
+    return (os.getenv("EMBY_NFO_PICKCODE_CACHE", "1") or "1").strip().lower() not in {
+        "0", "false", "no", "off",
     }
 
 

@@ -71,9 +71,22 @@ DEFAULT_STRIP_TERMS = (
     # v2：音频声道多词条必须排在单一声频词之前，否则 "DDP 2 0" 先被
     # "ddp" 咬掉只剩孤立的 "2 0" 留在标题里（生产 1,508 条实证）。
     # CLEAN_RE 已把 "DDP 2.0" 拆成 "DDP 2 0"，故词条用 \s+ 拼声道数。
+    # v4：DTS-HD MA / TrueHD / DDP 紧贴声道号或多词声道号必须在单声频词前剥净，
+    # 避免 "DTS-HD.MA.5.1" 被单剥 "dts" 后残留 "HD MA 5 1" 或 "TrueHD5.1" 漏匹配。
+    r"dts\s+hd\s+ma(?:\s+\d\s+\d)?", r"dts\s+hd(?:\s+hra?)?(?:\s+\d\s+\d)?",
+    r"dts\s+hdma(?:\s+\d\s+\d)?", r"dtshdma(?:\s*\d\s+\d)?", "hdma",
+    r"hd\s+ma(?:\s+\d\s+\d)?", r"truehd\s*\d\s+\d",
+    r"ddp\s*\d\s+\d", r"dd\s*\d\s+\d", r"dts\s*\d\s+\d",
+    r"eac3\s*\d\s+\d", r"ac3\s*\d\s+\d", r"aac\s*\d\s+\d",
     r"ddp\s+\d\s+\d", r"dd\s+\d\s+\d", r"dts\s+\d\s+\d",
     r"eac3\s+\d\s+\d", r"ac3\s+\d\s+\d", r"aac\s+\d\s+\d",
     "aac", "ac3", "eac3", "dts", "flac", "truehd", "atmos", "ddp",
+    # v4：位深、多音轨、色彩/字幕轨标记（库 4 实证：10bit / 2Audio / 2ualAudio / SDR / PGS）
+    "10bit", "8bit", "12bit",
+    "2audio", "3audio", "4audio", "5audio",
+    "2audios", "3audios", "4audios",
+    "multiaudio", "dualaudio", "2ualaudio",
+    "sdr", "pgs",
     # v2：发行组标签（生产实证：ADWeb 1,508 条）。只加已实证的这一个，
     # 不凭空扩组名词表——组名撞真片名词的风险由 \b 整词边界兜底。
     "adweb",
@@ -86,6 +99,12 @@ DEFAULT_STRIP_TERMS = (
     # （电影《Ma》、HK 常见于正式标题）不进全局词表，由搜索候选的
     # 「区域/介质尾词剥离」变体层处理（scanner._search_candidates）。
     "avc", "2d3d", "ttg",
+    # v4（2026-11-06 库 4 外语电影与 S5 备胎实证）：无歧义 PT 官组/压制组复合后缀。
+    # 易撞真片名的词（如 Beast/Alt/GL/Page）绝不进全局词表：beAst 按大小写敏感单剥，
+    # ALT/GL 等走 tmdb._REGION_TAIL_RE 仅尾部候选剥离。
+    "minihd", "mnhd", "beitai", "chdweb", "chdbits",
+    "tagweb", "taghd", "momoweb", "momohd", "ctrlweb", "ctrlhd",
+    "enthd", "bathd", "homeweb", "homehd", "hdbweb", "frds",
 )
 
 # v2 新增词条（冻存 v1 的依据）：v1 = 现行词表去掉下面这 7 条。
@@ -97,22 +116,40 @@ _V2_ADDED_TERMS = (
     r"eac3\s+\d\s+\d", r"ac3\s+\d\s+\d", r"aac\s+\d\s+\d",
 )
 
-# v3 新增词条（v3 = 现行词表去掉这 3 条即 v2）。
+# v3 新增词条（v3 = v3 词表去掉这 3 条即 v2）。
 _V3_ADDED_TERMS = ("avc", "2d3d", "ttg")
 
-PACK_VERSION = "v3"
+# v4 新增词条（冻存 v1/v2/v3 原文不变）。
+_V4_ADDED_TERMS = (
+    r"dts\s+hd\s+ma(?:\s+\d\s+\d)?", r"dts\s+hd(?:\s+hra?)?(?:\s+\d\s+\d)?",
+    r"dts\s+hdma(?:\s+\d\s+\d)?", r"dtshdma(?:\s*\d\s+\d)?", "hdma",
+    r"hd\s+ma(?:\s+\d\s+\d)?", r"truehd\s*\d\s+\d",
+    r"ddp\s*\d\s+\d", r"dd\s*\d\s+\d", r"dts\s*\d\s+\d",
+    r"eac3\s*\d\s+\d", r"ac3\s*\d\s+\d", r"aac\s*\d\s+\d",
+    "10bit", "8bit", "12bit",
+    "2audio", "3audio", "4audio", "5audio",
+    "2audios", "3audios", "4audios",
+    "multiaudio", "dualaudio", "2ualaudio",
+    "sdr", "pgs",
+    "minihd", "mnhd", "beitai", "chdweb", "chdbits",
+    "tagweb", "taghd", "momoweb", "momohd", "ctrlweb", "ctrlhd",
+    "enthd", "bathd", "homeweb", "homehd", "hdbweb", "frds",
+)
+
+PACK_VERSION = "v4"
 
 #: 版本 → 词表冻存。新增版本时在此加一版、PACK_VERSION 指过去，
 #: 旧版词表永不改——改旧版词表等于改写历史，回滚就无据可查。
 PACK_VERSION_TERMS = {
-    "v1": tuple(t for t in DEFAULT_STRIP_TERMS if t not in _V2_ADDED_TERMS
-                and t not in _V3_ADDED_TERMS),
-    "v2": tuple(t for t in DEFAULT_STRIP_TERMS if t not in _V3_ADDED_TERMS),
-    "v3": DEFAULT_STRIP_TERMS,
+    "v1": tuple(t for t in DEFAULT_STRIP_TERMS
+                if t not in _V2_ADDED_TERMS and t not in _V3_ADDED_TERMS
+                and t not in _V4_ADDED_TERMS),
+    "v2": tuple(t for t in DEFAULT_STRIP_TERMS
+                if t not in _V3_ADDED_TERMS and t not in _V4_ADDED_TERMS),
+    "v3": tuple(t for t in DEFAULT_STRIP_TERMS if t not in _V4_ADDED_TERMS),
+    "v4": DEFAULT_STRIP_TERMS,
 }
-PACK_VERSION_ORDER = ("v1", "v2", "v3")
-PACK_VERSION = "v3"
-
+PACK_VERSION_ORDER = ("v1", "v2", "v3", "v4")
 # 保护词占位符：私有区字符（U+E000 起）不是 \\w 词字符，任何
 # \\b 界定的词条都不可能在占位符里命中，也不会跨占位符拼出词条。
 _PLACEHOLDER_BASE = 0xE000

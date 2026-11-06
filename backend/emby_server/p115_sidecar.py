@@ -509,10 +509,29 @@ class P115SidecarHandler:
         pickcode = entry.get("pickcode") or ""
         if not pickcode:
             raise ProviderRuntimeError("not_found", f"115 未返回该文件的 pickcode：{rel}")
-        try:
-            url = state.client.download_url(pickcode, deadline=deadline)
-        except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
-            raise _map_115_error(exc) from exc
+        def _fetch_dl() -> str:
+            dl_fn = state.client.download_url
+            dl_kw: dict = {}
+            try:
+                import inspect as _inspect
+                params = _inspect.signature(dl_fn).parameters
+                if "app_first" in params:
+                    # 小文件（如 .nfo/.srt）走 webapi /files/download 会返回 f=3 动态
+                    # Set-Cookie 绑定的 CDN 链接，无对应会话 Cookie 直拉必返 HTTP 403；
+                    # app 通道（proapi /app/chrome/downurl）签出的链接仅绑 UA，实测稳定 206。
+                    dl_kw["app_first"] = True
+                if "deadline" in params:
+                    dl_kw["deadline"] = deadline
+            except (TypeError, ValueError):
+                dl_kw["deadline"] = deadline
+            try:
+                return dl_fn(pickcode, **dl_kw)
+            except Exception as exc:  # noqa: BLE001 — 115 异常统一分级
+                raise _map_115_error(exc) from exc
+
+        url = self._run_singleflight(
+            self._dl_inflight, (state.scope, pickcode), _fetch_dl, deadline=deadline
+        )
         end = None if byte_length is None else byte_offset + byte_length - 1
         range_header = f"bytes={byte_offset}-" if end is None else f"bytes={byte_offset}-{end}"
         headers = {
@@ -520,6 +539,8 @@ class P115SidecarHandler:
             "Referer": "https://115.com/",
             "Range": range_header,
         }
+        if state.cookie:
+            headers["Cookie"] = state.cookie
         client = self._http_client_factory()
         try:
             resp = client.get(url, headers=headers)
@@ -788,7 +809,7 @@ class P115SidecarHandler:
 def _default_http_client():
     import httpx
 
-    return httpx.Client(timeout=default_timeout_sec())
+    return httpx.Client(timeout=default_timeout_sec(), follow_redirects=True)
 
 
 def main(argv=None) -> int:

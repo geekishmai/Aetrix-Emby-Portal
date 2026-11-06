@@ -787,6 +787,13 @@ _VERSION_TOKEN_RE = re.compile(r"(?<=\S)(?<![\d.])-?\d{1,2}\.\d{1,2}(?![\d.])")
 _VERSION_DOT_PLACEHOLDER = "\ue000"
 _VERSION_DASH_PLACEHOLDER = "\ue001"
 
+_AUDIO_PREFIX_BEFORE_CHANNEL_RE = re.compile(
+    r"(?:ddp?|truehd|dts(?:[-.\s]?hd(?:[.\s]?ma)?)?|hdma|eac3|ac3|aac|flac|opus|pcm|atmos)$",
+    re.IGNORECASE,
+)
+_CASE_SENSITIVE_GROUP_RE = re.compile(
+    r"(?:\b[A-Za-z0-9_]+@[A-Za-z0-9_]+\b|\bbeAst\b)"
+)
 
 _DUP_DASH_BEFORE_YEAR_RE = re.compile(
     r"-\s*(\d{1,2})(?=\s*[\(\[【]|\.\s*(?:19|20)\d{2}\b)"
@@ -825,12 +832,20 @@ def clean_name(raw: str, pack=None) -> str:
     name = raw or ""
     # 版本号 token 先行保护（见 _VERSION_TOKEN_RE 注释）：`梅根2.0`→不拆，
     # `哥斯拉-1.0`→不拆。必须在下面的 `-N` 剔除之前，占位的 `-` 不再被误杀。
-    name = _VERSION_TOKEN_RE.sub(
-        lambda m: m.group(0)
-        .replace("-", _VERSION_DASH_PLACEHOLDER)
-        .replace(".", _VERSION_DOT_PLACEHOLDER),
-        name,
-    )
+    def _protect_version_token(m: "re.Match") -> str:
+        # DDP5.1 / TrueHD5.1 / AAC2.0 等声频词紧贴的声道号不是片名版本号（如梅根2.0），
+        # 不做点号占位保护，交给后续 CLEAN_RE + rule_pack 声道规则一并剥净。
+        prefix = name[: m.start()]
+        if _AUDIO_PREFIX_BEFORE_CHANNEL_RE.search(prefix):
+            return m.group(0)
+        return (
+            m.group(0)
+            .replace("-", _VERSION_DASH_PLACEHOLDER)
+            .replace(".", _VERSION_DOT_PLACEHOLDER)
+        )
+
+    name = _VERSION_TOKEN_RE.sub(_protect_version_token, name)
+    name = _CASE_SENSITIVE_GROUP_RE.sub(" ", name)
     # 去掉文件名主干末尾的 `[N]` 重复下载标记（如 `... - 1080p [2]`）：下载器
     # 给同名第二个文件打的记号，不是片名。必须在 CLEAN_RE 剥掉 `[]` 之前
     # 整段删除，否则只剩孤立的 `N` 留在片名里（生产实证：「第四公民 2」）。

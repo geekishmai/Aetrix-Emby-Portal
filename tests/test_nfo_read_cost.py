@@ -134,10 +134,11 @@ def _make_item(**kw):
 
 
 def test_defaults_off_preserves_legacy_nfo_reads(monkeypatch):
-    """默认双开关全关：即使目录带 {tmdb-N}，行为与改前一致仍读旁挂 .nfo。"""
-    monkeypatch.delenv("ENRICH_NFO_SMART_SKIP", raising=False)
+    """显式关闭双开关时：即使目录带 {tmdb-N}，行为与基线一致仍每次读旁挂 .nfo；默认开启 pickcode 缓存。"""
     monkeypatch.delenv("EMBY_NFO_PICKCODE_CACHE", raising=False)
-
+    assert nfo_cache.enabled() is True
+    monkeypatch.delenv("ENRICH_NFO_SMART_SKIP", raising=False)
+    monkeypatch.setenv("EMBY_NFO_PICKCODE_CACHE", "0")
     dir_rel = "/华语电影/无间道 (2002) {tmdb-10775}"
     prov = _Fake115SidecarProvider(
         entries_by_dir={

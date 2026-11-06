@@ -62,7 +62,7 @@ def _pick_id(root: ET.Element, id_type: str) -> str:
     """tmdb / imdb / tvdb 三种写法：``<tmdbid>`` / ``<imdb_id>`` / ``<uniqueid type="tmdb">``"""
     tag_map = {
         "tmdb": ("tmdbid",),
-        "imdb": ("imdb_id", "imdbid"),
+        "imdb": ("imdb_id", "imdbid", "imdb"),
         "tvdb": ("tvdbid",),
     }
     for tag in tag_map.get(id_type, ()):
@@ -72,6 +72,10 @@ def _pick_id(root: ET.Element, id_type: str) -> str:
     for u in root.findall("uniqueid"):
         if (u.get("type") or "").lower() == id_type and u.text and u.text.strip():
             return u.text.strip()
+    if id_type == "imdb":
+        raw_id = _text(root, "id")
+        if raw_id and re.match(r"^tt\d{5,}$", raw_id, re.IGNORECASE):
+            return raw_id
     return ""
 
 

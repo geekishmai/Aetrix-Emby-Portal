@@ -26,21 +26,23 @@ DORAEMON = "哆啦A梦：伴我同行 Stand By Me Doraemon HK 2D3D AVC HD MA TTG
 
 
 def test_pack_version_is_v3():
-    assert rp.PACK_VERSION == "v3"
-    assert rp.default_pack().version == "v3"
+    assert rp.PACK_VERSION == "v4"
+    assert rp.default_pack().version == "v4"
 
 
 def test_v3_terms_added_and_freeze_intact():
     terms = set(rp.DEFAULT_STRIP_TERMS)
     assert {"avc", "2d3d", "ttg"} <= terms
-    # 冻存：v3 - v3新增 = v2；v2 - v2新增 = v1
-    assert set(rp.PACK_VERSION_TERMS["v3"]) == terms
+    # 冻存：v4 - v4新增 = v3；v3 - v3新增 = v2；v2 - v2新增 = v1
+    assert set(rp.PACK_VERSION_TERMS["v4"]) == terms
+    v4_added = set(rp._V4_ADDED_TERMS)
     v3_added = {"avc", "2d3d", "ttg"}
     v2_added = {"adweb", r"ddp\s+\d\s+\d", r"dd\s+\d\s+\d", r"dts\s+\d\s+\d",
                 r"eac3\s+\d\s+\d", r"ac3\s+\d\s+\d", r"aac\s+\d\s+\d"}
-    assert set(rp.PACK_VERSION_TERMS["v2"]) == terms - v3_added
-    assert set(rp.PACK_VERSION_TERMS["v1"]) == terms - v3_added - v2_added
-    assert rp.PACK_VERSION_ORDER == ("v1", "v2", "v3")
+    assert set(rp.PACK_VERSION_TERMS["v3"]) == terms - v4_added
+    assert set(rp.PACK_VERSION_TERMS["v2"]) == terms - v4_added - v3_added
+    assert set(rp.PACK_VERSION_TERMS["v1"]) == terms - v4_added - v3_added - v2_added
+    assert rp.PACK_VERSION_ORDER == ("v1", "v2", "v3", "v4")
 
 
 def test_pack_strips_doraemon_noise():

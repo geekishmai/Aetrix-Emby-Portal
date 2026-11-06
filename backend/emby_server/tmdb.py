@@ -331,13 +331,16 @@ def _retry_after_seconds(resp) -> Optional[float]:
 # 绝不写错名字）。
 
 # 发行/压制/碟片/字幕类标签：只出现在文件名里，不属于标题
+_CASE_SENSITIVE_QUERY_GROUP_RE = re.compile(
+    r"(?:\b[A-Za-z0-9_]+@[A-Za-z0-9_]+\b|\bbeAst\b)"
+)
 _QUERY_JUNK_RE = re.compile(r"""(?ix)
-      \b(dual|ddp?\s?5\s?1|dd\s?5\s?1|dts\s?hd|dtshd|atmos|truehd|dts(?:-hd)?|ac3|aac|flac|[234]audios?)\b
-    | \b([hx]?\s?264|[hx]?\s?265|hevc|avc|bdc|bluray|blu-ray|web-?dl|webrip|hdtv|dvdrip|bdrip|bdmv|remux)\b
-    | \b(1080[ip]|720p|480p|2160p|4k|8k|10bit)\b
+      \b(dual|ddp?[.\s]?\d[.\s]?\d|dd[.\s]?\d[.\s]?\d|dts(?:[-\s]?hd(?:[.\s]?ma|[.\s]?hra?)?)?(?:[.\s]?\d[.\s]?\d)?|dtshd(?:ma)?(?:[.\s]?\d[.\s]?\d)?|hdma(?:[.\s]?\d[.\s]?\d)?|hd\s+ma(?:\s+\d[\s.]\d)?|atmos|truehd(?:[.\s]?\d[.\s]?\d)?|(?:eac3|ac3|aac|flac)(?:[.\s]?\d[.\s]?\d)?|(?:[2-9]|multi|dual|2ual)audios?)\b
+    | \b([hx]?\s?264|[hx]?\s?265|hevc|avc|bdc|bluray|blu-ray|web-?dl|webrip|hdtv|dvdrip|bdrip|bdmv|remux|sdr|pgs)\b
+    | \b(1080[ip]|720p|480p|2160p|4k|8k|(?:8|10|12)bit)\b
     | \b(s\d{1,2}e\d{1,3}|e\d{1,3}|ep\d{1,3}|d[12]|disc\s?\d|cd[12])\b
     | (原盘|中字|简繁\w{0,3}|繁中|简中|粤语|国语|双语|高码率|重制版|蓝光|特效|花絮|熟肉|生肉)
-    | \b(2d3d|ttg|ddp)\b
+    | \b(2d3d|ttg|ddp|adweb|minihd|mnhd|beitai|chdweb|chdbits|tagweb|taghd|momoweb|momohd|ctrlweb|ctrlhd|enthd|bathd|homeweb|homehd|hdbweb|frds)\b
     | (?<=[\s\-_\[\(（【])(?:ma|hd|hk|tw|us|gb)(?=[\s\-_\)\)）】]|$)
 """)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ffー]+")
@@ -363,7 +366,8 @@ _YEAR_TAIL_RE = re.compile(
     re.IGNORECASE,
 )
 _REGION_TAIL_RE = re.compile(
-    r"\s+[\[\(（【]?\s*(?:hktv|hk|tw|us|gb|kr|jp|cn|2d3d|3d|avc|hevc|ma|ttg|adweb|"
+    r"\s+[\[\(（【]?\s*(?:hktv|hk|tw|us|gb|kr|jp|cn|gl|cee|dc|alt|chd|xiaomi|"
+    r"2d3d|3d|avc|hevc|ma|hd|sdr|pgs|ttg|adweb|minihd|beitai|chdweb|"
     r"1080p|2160p|4k|uhd|remux|web[\s\-]?dl|blu[\s\-]?ray)\s*[\]\)）】]?\s*$",
     re.IGNORECASE,
 )
@@ -574,8 +578,10 @@ def _norm_text(s):
 
 def _clean_query(name):
     """去发行标签与分隔符，返回可用于搜索的干净查询。"""
-    # 先折全角标点，否则「剧名：副标题」里的全角冒号会让 TMDB 零结果
-    s = _QUERY_JUNK_RE.sub(" ", _fold_punct(name or ""))
+    # 先折全角标点并剥大小写敏感组名（如 beAst / uploader@Group），防止误伤真词 Beast
+    folded = _CASE_SENSITIVE_QUERY_GROUP_RE.sub(" ", _fold_punct(name or ""))
+    s = _QUERY_JUNK_RE.sub(" ", folded)
+    s = re.sub(r"(?<![\d.])\b(?:1\s0|2\s0|5\s1|7\s1)\b(?![\d.])", " ", s)
     s = re.sub(r"[._\-+]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s

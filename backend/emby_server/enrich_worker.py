@@ -1503,6 +1503,13 @@ def nfo_smart_skip_enabled() -> bool:
     }
 
 
+def identify_nfo_fallback_enabled() -> bool:
+    """identify 段搜索未命中时兜底读同目录 .nfo 取 tmdbid/imdbid 开关（默认 1=开）。"""
+    return (os.getenv("ENRICH_IDENTIFY_NFO_FALLBACK", "1") or "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
 def _remote_nfo_skip_reason(
     item: Any,
     scan_file: Any,
@@ -1510,11 +1517,13 @@ def _remote_nfo_skip_reason(
     inherit_parent: Optional[dict],
     needs_repair: bool,
 ) -> Optional[str]:
-    """判断远程挂载条目是否可安全跳过旁挂 .nfo 读取（避免 115 download_url 风暴）。
+    """判断远程挂载条目是否先跳过前置 .nfo 读取（避免 115 download_url 风暴）。
 
     仅在开关开启、非本地磁盘文件、无修复请求、TMDB 已配置时生效：
     - ``path_tag``：路径含 ``{tmdb-N}`` / ``{tmdbid=N}`` 且未进 404 死号集；
-    - ``bound_tmdb``：条目已有非空 ``tmdb_id``（两队列 fill 段或已绑定重刮）；
+    - ``bound_tmdb``：条目已有非空 ``tmdb_id`` 或 ``imdb_id``（两队列 fill 段或已绑定重刮）；
+    - ``identify_search_first``：未绑定 movie/series 先走 TMDB 搜索（0 取链），
+      仅当搜索未命中或被复核门拒掉时才在后半段兜底读同目录 .nfo（走 pickcode 永久缓存+单飞）；
     - ``episode_parent_tmdb``：单集的父级剧已 done 且有 ``tmdb_id``（走季接口继承）。
     """
     if not nfo_smart_skip_enabled() or needs_repair:
@@ -1528,32 +1537,83 @@ def _remote_nfo_skip_reason(
         path_tag = _path_tmdb_tag(item)
         if path_tag and path_tag not in _PATH_TAG_DEAD:
             return "path_tag"
-        if str(getattr(item, "tmdb_id", "") or "").strip():
+        if (str(getattr(item, "tmdb_id", "") or "").strip()
+                or str(getattr(item, "imdb_id", "") or "").strip()):
             return "bound_tmdb"
+        if identify_nfo_fallback_enabled():
+            return "identify_search_first"
     elif kind == "episode" and inherit_parent:
         if str(inherit_parent.get("tmdb_id") or "").strip():
             return "episode_parent_tmdb"
     return None
 
 
-def _lazy_rescue_nfo_on_path_tag_miss(item: Any, kind: str, result: dict) -> None:
-    """path_tag 跳过 NFO 后若遇到死号 404 且标题回退也未命中，按需补读一次 NFO 救活身份。"""
-    from backend.emby_server import scanner as _sc
+def _resolve_tmdb_from_imdb(imdb_id: str, kind: str) -> Optional[str]:
+    """用 TMDB /find/{imdb_id}?external_source=imdb_id 反查对应 kind 的 tmdb_id。"""
     from backend.emby_server.tmdb import tmdb_client
 
-    scan_file = _scanfile_from_item(item)
-    if scan_file is None:
-        return
-    ctx = _shared_ctx(item, None)
+    if not imdb_id or not tmdb_client.configured:
+        return None
     try:
-        nfo_data, _s1, _s2 = _sc._nfo_work(ctx, scan_file, kind) or (None, None, None)
+        found = tmdb_client.find_by_imdb(imdb_id)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("path_tag 失配补读 NFO 失败 %s: %s", getattr(item, "file_path", ""), exc)
-        return
-    if not nfo_data:
-        return
-    result["nfo_data"] = nfo_data
+        logger.debug("IMDb→TMDB 反查失败 imdb=%s: %s", imdb_id, exc)
+        return None
+    if not isinstance(found, dict):
+        return None
+    bucket_key = "tv_results" if kind == "series" else "movie_results"
+    rows = found.get(bucket_key) or []
+    if rows and isinstance(rows[0], dict) and rows[0].get("id"):
+        return str(rows[0]["id"])
+    return None
+
+
+def _rescue_nfo_on_identify_miss(
+    item: Any,
+    kind: str,
+    result: dict,
+    tmdb_ctx: Optional[dict] = None,
+) -> None:
+    """TMDB 搜索未命中（或被复核门拒绝）时，兜底读同目录 .nfo 取 tmdbid / imdbid。
+
+    - 优先复用 pre 阶段已建好的 ``_scan_file`` 与 ``_ctx``（目录列举已在缓存，0 次额外 list）；
+    - 读取走 ``scanner._nfo_work`` → ``nfo_cache`` 按 pickcode 永久缓存 + 同键单飞，
+      每份 .nfo 终身最多触发 1 次 115 ``download_url``；
+    - 若 .nfo 给 ``tmdbid``：落 ``result["tmdb_id"]`` 并拉 ``details``；
+    - 若 .nfo 仅给 ``imdbid``：落 ``result["imdb_id"]``（保证 ``extract_binding`` 必成绑定），
+      并经 ``find_by_imdb`` 升级为 ``tmdb_id`` + ``details``。
+    """
+    from backend.emby_server import scanner as _sc
+    from backend.emby_server.tmdb import tmdb_client, TmdbTransientError
+
+    nfo_data = result.get("nfo_data")
+    if nfo_data is None:
+        scan_file = (tmdb_ctx or {}).get("_scan_file")
+        if scan_file is None:
+            scan_file = _scanfile_from_item(item)
+        if scan_file is None:
+            return
+        ctx = (tmdb_ctx or {}).get("_ctx")
+        if ctx is None:
+            ctx = _shared_ctx(item, None)
+        try:
+            nfo_data, _s1, _s2 = _sc._nfo_work(ctx, scan_file, kind) or (None, None, None)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("identify 兜底补读 NFO 失败 %s: %s", getattr(item, "file_path", ""), exc)
+            return
+        if not nfo_data:
+            return
+        result["nfo_data"] = nfo_data
+        progress.note_stage("enrich_nfo_fallback_hit")
+
+    nfo_iid = str(nfo_data.get("imdb_id") or "").strip()
+    if nfo_iid:
+        result["imdb_id"] = nfo_iid
+
     nfo_tid = str(nfo_data.get("tmdb_id") or "").strip()
+    if not nfo_tid and nfo_iid and kind in ("movie", "series"):
+        nfo_tid = _resolve_tmdb_from_imdb(nfo_iid, kind) or ""
+
     if nfo_tid and nfo_tid not in _PATH_TAG_DEAD:
         result["tmdb_id"] = nfo_tid
         if tmdb_client.configured:
@@ -1561,9 +1621,11 @@ def _lazy_rescue_nfo_on_path_tag_miss(item: Any, kind: str, result: dict) -> Non
                 details = tmdb_client.details(nfo_tid, kind)
                 if details is not None:
                     result["tmdb_details"] = details
+            except TmdbTransientError:
+                result["ok"] = False
+                result["error"] = "tmdb transient on nfo fallback, retry later"
             except Exception:  # noqa: BLE001
                 pass
-
 
 def _tmdb_plan_for_item(item, nfo_data, kind, needs_repair):
     """根据 item 与 nfo 规划 TMDB 操作（纯函数，无网络调用）。
@@ -1978,6 +2040,8 @@ def _enrich_fetch_pre(item: Any, holder: Optional[dict] = None,
         "kind": kind,
         "needs_repair": needs_repair,
         "tmdb_plan": tmdb_plan,
+        "_ctx": ctx,
+        "_scan_file": scan_file,
     }
     return result, tmdb_ctx
 
@@ -2136,8 +2200,10 @@ def _enrich_fetch_tmdb_post(result: dict, item: Any, tmdb_ctx: dict,
             # 批量路径：规划已在 pre 阶段完成，直接应用批量结果
             _apply_tmdb_plan_result(
                 result, item, tmdb_ctx["tmdb_plan"], batch_out, kind)
-        elif result.get("_nfo_skipped_reason") in ("path_tag", "bound_tmdb"):
-            # 单条路径跳过 NFO 时与批量路径共用同一 tmdb_plan（含 path_tag 404 回退 search）
+        elif result.get("_nfo_skipped_reason") in (
+            "path_tag", "bound_tmdb", "identify_search_first"
+        ):
+            # 单条路径跳过前置 NFO 时与批量路径共用同一 tmdb_plan
             _plan = tmdb_ctx.get("tmdb_plan") or {"op": "none"}
             if _plan.get("op") != "none":
                 _single_out = _run_tmdb_batch([(0, _plan)]).get(
@@ -2184,12 +2250,8 @@ def _enrich_fetch_tmdb_post(result: dict, item: Any, tmdb_ctx: dict,
                             getattr(item, "tmdb_id", None), True)
                         result["tmdb_hit"] = hit
                         result["tmdb_details"] = details
-        if (result.get("_nfo_skipped_reason") == "path_tag"
-                and result.get("ok", True)
-                and not result.get("tmdb_id")
-                and not result.get("tmdb_hit")):
-            _lazy_rescue_nfo_on_path_tag_miss(item, kind, result)
-            nfo_data = result.get("nfo_data")
+        # NFO 兜底移至绑定复核门之后（见下方）：若搜索未命中，或命中被严审/复核门拒掉，
+        # 统一走 _rescue_nfo_on_identify_miss 按需读同目录 .nfo 取 tmdbid/imdbid。
         # Step 0.5（链路规划）：降级期间 TMDB 命中同样从严——标题+年份都对上
         # 才算命中，不满足 → 丢弃命中，继续走下面的多源兜底（宁可 none 不乱认）。
         # 只筛 search 出来的 hit：单条/批量路径里 tmdb_hit 只在 search 分支
@@ -2308,6 +2370,13 @@ def _enrich_fetch_tmdb_post(result: dict, item: Any, tmdb_ctx: dict,
                             "name=%r tmdb_id=%s details_names=%r",
                             getattr(item, "id", "?"), _item_name,
                             _gate_cand, _det_names)
+        if (kind in ("series", "movie")
+                and identify_nfo_fallback_enabled()
+                and result.get("ok", True)
+                and not result.get("tmdb_id")
+                and not result.get("tmdb_hit")):
+            _rescue_nfo_on_identify_miss(item, kind, result, tmdb_ctx=tmdb_ctx)
+            nfo_data = result.get("nfo_data")
 # 原语言海报（StrmAssistant #10）：IO 阶段预取语言偏好的海报，
         # 写库阶段直接用（写事务里不碰网络，见模块注释处方 1）。
         # poster_language() == "system" 时 images_with_language 返回 None，不额外请求。
@@ -5414,6 +5483,13 @@ def _enrich_apply_two_stage(db, item: Any, fetched: dict,
                 item.poster_path or item.primary_image_url):
             item.repair_requested_at = None
         item.enrich_status = "done"
+        if getattr(item, "metadata_source", None) in (None, "", "none"):
+            if _bound_value(getattr(item, "tmdb_id", None)):
+                item.metadata_source = "tmdb"
+            elif _bound_value(getattr(item, "imdb_id", None)):
+                item.metadata_source = "imdb"
+            else:
+                item.metadata_source = "douban"
         _clear_blank_identity(item)
         item.enrich_attempts = 0
         item.enrich_last_error = None
