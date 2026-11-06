@@ -352,6 +352,7 @@ def test_unseal_idempotent(db, user):
         item = em.MediaItem(
             guid="test-guid-1", library_id=1, item_type="movie",
             name="测试电影", date_added=datetime.now(),
+            enrich_status="done", metadata_source="tmdb", poster_path="/p.jpg",
         )
         db.add(item)
         db.commit()
@@ -513,6 +514,7 @@ def test_today_unsealed_count_contract(db, user):
     item = em.MediaItem(
         guid="contract-today-1", library_id=1, item_type="movie",
         name="契约电影", date_added=datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None),
+        enrich_status="done", metadata_source="tmdb", poster_path="/p.jpg",
     )
     db.add(item)
     db.commit()
@@ -574,6 +576,10 @@ def _mk_media(db, item_type, name, date_added, **kw):
     from backend.emby_server import models as em
     kw.setdefault("guid", f"guid-{name}-{item_type}")
     kw.setdefault("library_id", 1)
+    if item_type in ("movie", "series"):
+        kw.setdefault("enrich_status", "done")
+        kw.setdefault("metadata_source", "tmdb")
+        kw.setdefault("poster_path", "/poster.jpg")
     item = em.MediaItem(item_type=item_type, name=name, date_added=date_added, **kw)
     db.add(item)
     db.commit()
@@ -666,6 +672,35 @@ def test_today_parcel_count_same_caliber_as_parcels(db, user):
     assert today["parcel_count"] == len(parcels) >= 1
     assert {p["id"] for p in parcels} == {series.id}
 
+
+
+def test_parcels_filters_unscraped_posterless_and_non_chinese_items(db, user):
+    """UI 专项第 1 期：今日封存只取已刮削 + 有海报 + 有中文名的条目，并优先展示中文译名。"""
+    start_utc = panel_api._today_start_utc_naive()
+    # 1) 未刮削（enrich_status='pending'）-> 排除
+    _mk_media(db, "movie", "未刮削电影", start_utc + timedelta(hours=1),
+              enrich_status="pending", metadata_source=None, poster_path="/a.jpg")
+    # 2) 刮削失败（metadata_source='none'）-> 排除
+    _mk_media(db, "movie", "Part Time Girlfriend 10bit ALT", start_utc + timedelta(hours=2),
+              enrich_status="done", metadata_source="none", poster_path="/b.jpg")
+    # 3) 无海报 -> 排除
+    _mk_media(db, "movie", "无海报中文片", start_utc + timedelta(hours=3),
+              enrich_status="done", metadata_source="tmdb", poster_path=None, primary_image_url=None)
+    # 4) 纯英文且无中文别名/目录名 -> 排除
+    _mk_media(db, "movie", "Untranslated Indie Film", start_utc + timedelta(hours=4),
+              enrich_status="done", metadata_source="tmdb", poster_path="/c.jpg")
+    # 5) 合格条目（英文原名 + aliases 含 TMDB 中文译名 + 有海报 + 已刮削）-> 入选且展示中文名
+    ok_movie = _mk_media(
+        db, "movie", "The Intern 10bit MiniHD", start_utc + timedelta(hours=5),
+        aliases="实习生,The Intern", enrich_status="done", metadata_source="tmdb",
+        poster_path="/intern.jpg",
+    )
+    app = _make_app(db, user)
+    client = TestClient(app)
+    parcels = client.get("/api/panel/parcels").json()["data"]["parcels"]
+    assert [p["id"] for p in parcels] == [ok_movie.id]
+    assert parcels[0]["name"] == "实习生"
+    assert parcels[0]["poster_url"] == f"/emby/Items/{ok_movie.guid}/Images/Primary"
 
 # ==================== 8. GET /api/panel/feed（发现页实时动态流）====================
 
@@ -769,3 +804,55 @@ def test_play_feed_text_anonymized(db, user):
         assert "张三" not in t
         assert "panel_test" not in t
         assert str(user.id) not in t
+
+
+def test_parcels_filters_unscraped_posterless_and_non_chinese(db, user):
+    """UI 专项第 1 期：今日封存只取已刮削、有海报、有中文名（或中文别名）的条目。"""
+    start_utc = panel_api._today_start_utc_naive()
+    # 1) 未刮削：应排除
+    _mk_media(db, "movie", "未刮削电影", start_utc + timedelta(hours=1),
+              enrich_status="pending", poster_path="/p1.jpg")
+    # 2) 无海报：应排除
+    _mk_media(db, "movie", "无海报电影", start_utc + timedelta(hours=2),
+              enrich_status="done", poster_path="")
+    # 3) 纯英文 PT 名且无中文别名：应排除
+    _mk_media(db, "movie", "Eight.and.a.Half.1963.1080p.10bit.MiniHD-FRDS",
+              start_utc + timedelta(hours=3), enrich_status="done", poster_path="/p3.jpg")
+    # 4) 英文名但 aliases 含中文名：应保留且展示中文名
+    aliased = _mk_media(
+        db, "movie", "Inception.2010.1080p.2Audio.MiniHD",
+        start_utc + timedelta(hours=4), enrich_status="done", poster_path="/p4.jpg",
+        aliases="盗梦空间,Inception",
+    )
+    # 5) 正常中文已刮削带海报条目：应保留
+    direct_cn = _mk_media(
+        db, "movie", "霸王别姬", start_utc + timedelta(hours=5),
+        enrich_status="done", poster_path="/p5.jpg",
+    )
+
+    client = TestClient(_make_app(db, user))
+    parcels = client.get("/api/panel/parcels").json()["data"]["parcels"]
+    assert [p["id"] for p in parcels] == [direct_cn.id, aliased.id]
+    assert [p["name"] for p in parcels] == ["霸王别姬", "盗梦空间"]
+
+
+def test_feed_cleans_pt_titles_and_prefers_chinese_alias(db, user):
+    """UI 专项第 1 期：动态流遇到残留英文 PT 名时优先反查中文别名，否则清洗压制参数尾巴。"""
+    _mk_media(
+        db, "movie", "Eight.and.a.Half.1963.1080p.10bit.MiniHD-FRDS",
+        datetime.now(), aliases="八部半,8½",
+    )
+    _push_feed(
+        db,
+        "刮削更新 · 《Eight.and.a.Half.1963.1080p.10bit.MiniHD-FRDS》等 25 部资料已补全",
+        "enrich",
+    )
+    _push_feed(
+        db,
+        "一位影迷开始看《Sherlock.Holmes.A.Game.of.Shadows.2011.BluRay.1080p.DTS-HD.MA.5.1.x264-beAst》",
+        "play",
+    )
+    client = TestClient(_make_app(db, user))
+    texts = [i["text"] for i in client.get("/api/panel/feed").json()["data"]["items"]]
+    assert "刮削更新 · 《八部半》等 25 部资料已补全" in texts
+    assert any("Sherlock Holmes A Game of Shadows" in t and "beAst" not in t and "1080p" not in t for t in texts)

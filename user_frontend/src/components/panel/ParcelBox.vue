@@ -10,13 +10,24 @@
     @click="onTap"
     @keydown="onKey"
   >
-    <div class="d3-cover" :class="coverTone">
-      <div class="d3-cov-k">{{ coverKicker }}</div>
-      <div class="d3-cov-t">{{ parcel.name || '神秘包裹' }}</div>
+    <div class="d3-cover p1-parcel-cover" :class="coverTone">
+      <img
+        v-if="posterSrc && !imgBroken"
+        :src="posterSrc"
+        :alt="cleanName"
+        class="p1-parcel-img"
+        loading="lazy"
+        decoding="async"
+        @error="imgBroken = true"
+      />
+      <template v-else>
+        <div class="d3-cov-k">{{ coverKicker }}</div>
+        <div class="d3-cov-t">{{ cleanName }}</div>
+      </template>
     </div>
     <div class="d3-parcel-body">
       <div style="min-width:0">
-        <div class="d3-parcel-name">{{ parcel.name || '神秘包裹' }}</div>
+        <div class="d3-parcel-name">{{ cleanName }}</div>
         <div class="d3-parcel-meta">{{ coverMeta }}</div>
         <div v-if="busy" class="d3-parcel-meta">拆封中，请稍等…</div>
       </div>
@@ -43,7 +54,7 @@
       </template>
       <template v-else>
         <!-- R37 P3-C2：名缺省说人话「神秘包裹」，不甩「未知」 -->
-        <b class="v4-parcel-name">{{ parcel.name || '神秘包裹' }}</b>
+        <b class="v4-parcel-name">{{ cleanName }}</b>
         <div class="v4-parcel-divider" aria-hidden="true"></div>
         <span class="v4-parcel-sub">{{ bodySub }}</span>
         <!-- R37 P3-C3：时间缺省直接隐藏时间行，不甩「时间未知」 -->
@@ -66,6 +77,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { ParcelItem } from '@/composables/usePanelApi'
+import { useRouter } from 'vue-router'
+import { imageAuthUrl } from '@/api/emby'
+import { displayMediaTitle } from '@/utils/mediaTitle'
 
 const props = withDefaults(
   defineProps<{ parcel: ParcelItem; busy?: boolean; variant?: 'parcel' | 'cover' }>(),
@@ -77,11 +91,20 @@ const emit = defineEmits<{
 }>()
 
 const isOpen = computed(() => !!props.parcel.unsealed)
+const router = useRouter()
+const imgBroken = ref(false)
+const cleanName = computed(() => displayMediaTitle({ Name: props.parcel.name || props.parcel.title || '' }) || '神秘包裹')
+const posterSrc = computed(() => {
+  const raw = props.parcel.poster_url
+  if (!raw) return ''
+  const sep = raw.includes('?') ? '&' : '?'
+  return imageAuthUrl(`${raw}${sep}maxWidth=360`)
+})
 /** 封面变体没有单独的「去看」按钮，整卡就是按钮；面单变体开封后由脚上的按钮承接。 */
 const cardIsButton = computed(() => props.variant === 'cover')
 const coverLabel = computed(() => {
   if (!isOpen.value) return '待拆封存，点击开封'
-  return `用播放器打开${props.parcel.name || '神秘包裹'}`
+  return `查看${cleanName.value}详情`
 })
 /* P-3 拆封仪式感：开封瞬间给印章一个「盖下去」的动效（一次性，动画结束自清） */
 const justOpened = ref(false)
@@ -178,7 +201,10 @@ function onKey(e: KeyboardEvent) {
 
 function onTap() {
   if (isOpen.value) {
-    // 已开封：整卡与「去看 →」都打开播放器选择，不走网页地址
+    if (props.parcel.guid) {
+      void router.push(`/media/${encodeURIComponent(props.parcel.guid)}`)
+      return
+    }
     openPicker()
     return
   }
@@ -209,6 +235,15 @@ function onTap() {
 .v4-parcel:not(.opened) { border-style: dashed; }
 .v4-parcel:active { transform: scale(0.96); }
 .v4-parcel.is-busy { pointer-events: none; opacity: 0.75; }
+.p1-parcel-cover {
+  position: relative;
+}
+.p1-parcel-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 /* 印章：右上角旋转小圆章 */
 .v4-parcel-stamp {
   position: absolute;

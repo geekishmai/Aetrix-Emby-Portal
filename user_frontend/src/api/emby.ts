@@ -164,6 +164,11 @@ export interface EmbyItem {
   Id: string
   Name: string
   Type: 'Movie' | 'Series' | 'Season' | 'Episode' | string
+  DisplayTitle?: string | null
+  OriginalTitle?: string | null
+  Aliases?: string[] | null
+  People?: Array<{ Name: string; Role?: string; Type?: string }> | null
+  Countries?: string[] | null
   IsFolder: boolean
   ChildCount?: number | null
   ProductionYear?: number | null
@@ -461,7 +466,7 @@ export function backdropUrl(item: EmbyItem, maxWidth = 1280): string {
  *
  * Thumb：服务端按横版背景图（Backdrop 链）出图，用作海报缺失时的兜底。
  */
-export function imageUrl(itemId: string, kind: 'Primary' | 'Backdrop' | 'Thumb', maxWidth = 0): string {
+export function imageUrl(itemId: string, kind: 'Primary' | 'Backdrop' | 'Thumb' | 'Logo', maxWidth = 0): string {
   // PA-036（口径翻转，用户 2026-11-02 定夺）：图片端点已加鉴权，<img> 只能靠
   // URL 里的 api_key 带凭据——拼的是账号卡下发的专用 Emby token，不是门户
   // JWT（H2 的「JWT 不进 URL」仍然成立）。token 进日志 / 历史 / Referer 的

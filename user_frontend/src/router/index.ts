@@ -33,6 +33,19 @@ const router = createRouter({
     ...(panelV4
       ? [
           {
+            path: '/library',
+            name: 'library',
+            component: () => import('@/views/panel/LibraryWallView.vue'),
+            meta: { title: '片库', requiresAuth: true },
+          },
+          {
+            path: '/media/:id',
+            alias: ['/library/:id'],
+            name: 'media-detail',
+            component: () => import('@/views/panel/MediaDetailView.vue'),
+            meta: { title: '影片详情', requiresAuth: true },
+          },
+          {
             path: '/collector',
             name: 'collector',
             component: () => import('@/views/panel/CollectorView.vue'),
@@ -289,11 +302,9 @@ router.beforeEach(async (to) => {
 
 // v4 面板第一版只做纸色浅色：在 v4 路由下强制 light，离开时恢复
 // （v4 视图自带 .v4-scope 纸色变量，这里只处理 html data-theme 与浏览器工具栏色）
-export const V4_PATHS = new Set(['/', '/collector', '/favorites', '/collections', '/server', '/shop', '/want', '/store-requests', '/activities', '/source-discovery', '/game', '/game/checkin', '/game/calendar', '/game/wishlist', '/game/signal', '/game/pigeon', '/game/ledger', '/game/supply', '/game/companion', '/game/guide', '/game/outfit', '/game/operator', '/game/account'])
-// 参数路由前缀：合集详情是 /collections/:id，afterEach 拿到的是实例路径
-// （如 /collections/123），静态集合永远匹配不上，须按前缀另判；
-// /collections/ 下目前只有详情这一条路由，前缀不会误伤非 v4 页。
-const V4_PATH_PREFIXES = ['/collections/']
+export const V4_PATHS = new Set(['/', '/library', '/collector', '/favorites', '/collections', '/server', '/shop', '/want', '/store-requests', '/activities', '/source-discovery', '/game', '/game/checkin', '/game/calendar', '/game/wishlist', '/game/signal', '/game/pigeon', '/game/ledger', '/game/supply', '/game/companion', '/game/guide', '/game/outfit', '/game/operator', '/game/account'])
+// 参数路由前缀：合集详情与影片详情带动态 id，按前缀启用纸面浅色主题
+const V4_PATH_PREFIXES = ['/collections/', '/media/', '/library/']
 // 底部坞由 App.vue 全局常驻渲染（PanelTabbar，≤768px 唯一一套，
 // 桌面 ≥769px 由 CSS 隐藏）；各视图模板不再自带 <PanelTabbar/>。
 function restoreUserTheme() {
@@ -320,9 +331,9 @@ router.afterEach((to) => {
   if (!panelV4) return
   // 尾斜杠规范化：/game/ 与 /game 是同一页；根路径 '/' 去掉斜杠会变空串，要兜回 '/'
   const v4Path = to.path.replace(/\/+$/, '') || '/'
-  if (V4_PATHS.has(v4Path) || V4_PATH_PREFIXES.some((p) => v4Path.startsWith(p))) {
+  if (to.name === 'not-found' || V4_PATHS.has(v4Path) || V4_PATH_PREFIXES.some((p) => v4Path.startsWith(p))) {
     document.documentElement.setAttribute('data-theme', 'light')
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#f5f1ea')
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#faf8f5')
   } else {
     restoreUserTheme()
   }

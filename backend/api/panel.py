@@ -278,17 +278,21 @@ def _today_parcel_items(db: Session, limit: int = 5) -> list:
                 series_by_id[s.id] = s
         except Exception:  # noqa: BLE001
             logger.exception("parcels 剧集回查失败")
+    from backend.emby_server.portal_title import is_qualified_parcel_item
+
     merged: dict = {}
     for it in whole:
-        merged[it.id] = (it.date_added or start, it)
+        if is_qualified_parcel_item(it):
+            merged[it.id] = (it.date_added or start, it)
     for sid, s in series_by_id.items():
+        if not is_qualified_parcel_item(s):
+            continue
         key = ep_latest.get(sid) or start
         prev = merged.get(sid)
         if prev is None or key > prev[0]:
             merged[sid] = (key, s)
     ordered = sorted(merged.values(), key=lambda t: t[0], reverse=True)
     return [it for _, it in ordered[:limit]]
-
 
 def _streak(db: Session, user_id: int) -> int:
     rec = db.query(models.CheckinRecord).filter_by(user_id=user_id).order_by(
@@ -410,14 +414,19 @@ def panel_parcels(
         models.PanelUnseal.user_id == user.id,
         models.PanelUnseal.item_id.in_(parcel_id_list)).all()} if parcel_id_list else set()
 
+    from backend.emby_server.portal_title import preferred_media_title
+
     parcels = []
     for it in items:
+        guid = getattr(it, "guid", None) or ""
         parcels.append({
             "id": it.id,
-            "name": it.name,
+            "guid": guid,
+            "name": preferred_media_title(it) or it.name,
             "item_type": it.item_type,
             "production_year": it.production_year,
             "video_resolution": getattr(it, "video_resolution", None),
+            "poster_url": f"/emby/Items/{guid}/Images/Primary" if guid else None,
             "added_at": it.date_added.isoformat() if it.date_added else None,
             "unsealed": it.id in unsealed_ids,
             # 播放改走账号卡 import_schemes。不再下发 Emby 网页地址，避免地址栏泄露。

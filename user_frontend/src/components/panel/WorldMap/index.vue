@@ -8,7 +8,7 @@
     <div class="world-col">
       <div class="map-frame">
       <div class="hud">
-        <span class="brand">Aetrix<b>.</b></span>
+        <span class="brand">{{ branding.site_name }}<b>.</b></span>
         <span class="worldname">探险世界</span>
         <div class="right">
           <span class="pill" v-if="streak > 0">连签 {{ streak }} 天<template v-if="streakHint"> · {{ streakHint }}</template></span>
@@ -112,6 +112,7 @@ import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { usePanelStore } from '@/stores/panel'
 import { useUserStore } from '@/stores/user'
+import { branding } from '@/composables/useBranding'
 import { humanizeError, panelApi } from '@/composables/usePanelApi'
 import type { ParcelItem, ParcelsData } from '@/composables/usePanelApi'
 import { memberApi } from '@/api/economy'

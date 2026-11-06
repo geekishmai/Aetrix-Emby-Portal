@@ -4,6 +4,8 @@
     <WorldHome v-if="homeWorldActive" />
     <template v-else>
     <!-- C档第2批：≥1280px 三栏仪表盘（d3-root 网格）；<1280px 保持现行单栏，移动端零变化 -->
+    <!-- 第 1 期快赢：最新入库海报横滑行置顶（桌面全宽展陈 + 手机首屏焦点，点海报直进详情） -->
+    <LatestPosterRow v-if="user.isLoggedIn" />
     <div ref="d3Root" class="v4-page d3-root">
       <!-- 左栏：问候 / 锚点 / 服务器卡 / 收藏家入口 / 脉搏摘要 / 每日一封 -->
       <div class="d3-left">
@@ -34,6 +36,7 @@
               class="v4-world-switch"
               @click="goWorld"
             >探险世界</button>
+            <RouterLink to="/library" class="v4-world-switch v4-lib-entry">浏览片库</RouterLink>
           </div>
         </header>
 
@@ -232,6 +235,8 @@ import WorldHome from '@/components/panel/WorldHome.vue'
 import GreetingCard from '@/components/panel/GreetingCard.vue'
 import PulseLine from '@/components/panel/PulseLine.vue'
 import RecentUpdates from '@/components/panel/RecentUpdates.vue'
+import LatestPosterRow from '@/components/panel/LatestPosterRow.vue'
+import { formatFeedText } from '@/utils/mediaTitle'
 import { embyApi, type HomeSection, type RecentAddedItem } from '@/api'
 import DiscoveryRightRail from '@/components/panel/DiscoveryRightRail.vue'
 import LibraryBand from '@/components/panel/LibraryBand.vue'
@@ -340,6 +345,7 @@ function syncWide() {
 // document.getElementById 重建（disc-libs 只在有库时渲染，
 // 固定列全量会在这些情况下指向不存在的区段）。
 const anchors = [
+  { id: 'disc-latest', label: '最新入库' },
   { id: 'disc-shelf', label: '今日封存' },
   { id: 'disc-letter', label: '每日一封' },
   { id: 'feed', label: '实时动态' },
@@ -638,7 +644,7 @@ const activityTexts = computed((): string[] => {
   const d = (pulse.value.data || {}) as Record<string, unknown>
   const acts = d.activities as Array<{ text?: string }> | undefined
   if (Array.isArray(acts)) {
-    const texts = acts.map((a) => cleanActivityText(a?.text)).filter(Boolean)
+    const texts = acts.map((a) => formatFeedText(cleanActivityText(a?.text))).filter(Boolean)
     if (texts.length) return texts
   }
   return ['暂无动态']
@@ -665,7 +671,7 @@ const feedItems = computed((): Array<{ key: string; time: string; text: string; 
   return items.map((it, i) => ({
     key: `${i}-${it.at || ''}-${String(it.text ?? '').slice(0, 12)}`,
     time: fmtFeedTime(it.at),
-    text: typeof it.text === 'string' && it.text.trim() ? it.text : '服务器刚才忙去了，这条动态没写清楚',
+    text: typeof it.text === 'string' && it.text.trim() ? formatFeedText(it.text) : '服务器刚才忙去了，这条动态没写清楚',
     library: typeof it.library === 'string' && it.library ? it.library : null,
   }))
 })
@@ -844,6 +850,15 @@ const hasLetterData = computed(() => Object.keys(letterData.value).length > 0)
 .v4-world-switch:focus-visible {
   outline: 2px solid var(--ink, #2A2620);
   outline-offset: 2px;
+}
+.v4-lib-entry {
+  text-decoration: none;
+  border-color: #016a71;
+  color: #016a71;
+}
+.v4-lib-entry:hover {
+  background: #016a71;
+  color: #ffffff;
 }
 /* ≥1280 日志正文已被 .m-only 收起，头上只剩这颗胶囊：去掉手机日志头的粗底边和内边距 */
 @media (min-width: 1280px) {

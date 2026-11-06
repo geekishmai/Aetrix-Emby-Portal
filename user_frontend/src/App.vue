@@ -11,6 +11,7 @@ import { usePanelStore } from '@/stores/panel'
 import { refreshEmbyBaseUrl } from '@/api/emby'
 import { tgApi } from '@/api/tg'
 import { useHomeViewMode } from '@/composables/useHomeViewMode'
+import './styles/portal-ui-p1.css'
 
 const { messages, remove, warning } = useToast()
 const userStore = useUserStore()

@@ -9,13 +9,17 @@
         <div class="d3-sec-title">媒体库速览</div>
         <div class="d3-sec-sub">{{ libs.length }} 个库 · 全部直挂可播</div>
       </div>
-      <RouterLink to="/server" class="d3-sec-link">服务器页 <span aria-hidden="true">→</span></RouterLink>
+      <RouterLink to="/library" class="d3-sec-link">进入片库 <span aria-hidden="true">→</span></RouterLink>
     </div>
     <div class="d3-lib-grid">
       <template v-for="lib in libs" :key="lib.library_id">
-        <RouterLink v-if="lib.count > 0" to="/server" class="d3-card d3-lib-card d3-hover">
+        <RouterLink
+          v-if="lib.count > 0"
+          :to="{ path: '/library', query: { name: lib.name } }"
+          class="d3-card d3-lib-card d3-hover"
+        >
           <div class="ln">{{ lib.name }}</div>
-          <div class="lc">{{ lib.count.toLocaleString('zh-CN') }} 条</div>
+          <div class="lc">{{ lib.count.toLocaleString('zh-CN') }} 部 · 点击浏览海报墙</div>
         </RouterLink>
         <div v-else class="d3-card d3-lib-card">
           <div class="ln">{{ lib.name }}</div>

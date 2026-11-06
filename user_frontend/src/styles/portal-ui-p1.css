@@ -1,0 +1,197 @@
+/* ============================================================
+ * 门户 UI 专项第 1 期增强层（feat/portal-ui-p1）
+ * 独立样式层以最小化侵入上游 v4-paper.css，降低后续同步合并成本：
+ * 1. 基础字号 ≥ 14px，次级灰字对比度提升至 WCAG AA+/AAA（#524b42 ≈ 7.6:1）；
+ * 2. 宽屏容器放宽：≥1280px 内容区严格 ≥ 960px（普通页 min(1240px,94vw)，展陈页 min(1480px,94vw)）；
+ * 3. 服务器页（.v4-server-grid）与我的页（.v4-account-grid）在桌面端升级为双栏网格，告别 380px 单栏。
+ * ============================================================ */
+
+html[data-theme='light'] {
+  --paper-ink-2: #524b42;
+  --paper-ink-3: #5c554b;
+  --paper-f-sm: 14px;
+}
+
+body {
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.v4-scope {
+  --ink2: #524b42;
+  --paper-f-sm: 14px;
+  font-size: 15px;
+  line-height: 1.55;
+  background: #faf8f5;
+  background-image: none;
+}
+
+/* 1. 全站基础字号 ≥ 14px 与高对比度灰字修正 */
+.v4-loghead p,
+.v4-sec-sub,
+.v4-err,
+.v4-empty,
+.v4-retry,
+.v4-collector-sub {
+  font-size: 14px;
+  color: #524b42;
+}
+
+.v4-retry {
+  color: #ffffff;
+}
+
+.v4-sec-title {
+  font-size: 16px;
+  font-weight: 500;
+}
+
+/* 2. 响应式容器放宽（手机 ≤767 保持单栏舒适度；平板 768 放宽；≥1280 严格 ≥ 960px） */
+@media (max-width: 768px) {
+  .v4-tabbar {
+    max-width: 100vw;
+  }
+}
+
+@media (min-width: 768px) {
+  .v4-page {
+    max-width: min(720px, 92vw);
+    padding-bottom: 48px;
+  }
+  .v4-page.v4-page-wide {
+    max-width: min(960px, 94vw);
+  }
+}
+
+@media (min-width: 1024px) {
+  .v4-page {
+    max-width: min(1080px, 94vw);
+  }
+  .v4-page.v4-page-wide {
+    max-width: min(1280px, 94vw);
+  }
+}
+
+@media (min-width: 1280px) {
+  /* 1280 * 0.94 = 1203.2px，扣除左右 24px*2 后内容区净宽 1155px（> 960px 硬指标） */
+  .v4-page {
+    max-width: min(1240px, 94vw);
+  }
+  .v4-page.d3-root,
+  .v4-page.v4-page-wide,
+  .v4-scope > .d3-band {
+    max-width: min(1480px, 94vw);
+  }
+
+  /* 桌面发现页灰字对比度与 14px 字号下限统一提升 */
+  .d3-sec-sub,
+  .d3-date-line,
+  .d3-empty,
+  .d3-rk span,
+  .d3-notice .from,
+  .d3-msg .who {
+    font-size: 14px;
+    color: #524b42;
+  }
+
+  .d3-sec-link,
+  .d3-err,
+  .d3-pulse-one,
+  .d3-feed-row,
+  .d3-parcel-name,
+  .d3-watch-t,
+  .d3-btn-ghost,
+  .d3-fortune p,
+  .d3-msg,
+  .d3-lib-card .lc {
+    font-size: 14px;
+    color: #524b42;
+  }
+
+  .d3-sec-link {
+    color: #016a71;
+  }
+
+  .d3-feed-row .fx,
+  .d3-parcel-name,
+  .d3-watch-t,
+  .d3-btn-ghost,
+  .d3-msg {
+    color: #27251e;
+  }
+
+  .d3-feed-row .ft {
+    font-size: 13px;
+    color: #524b42;
+  }
+
+  .d3-lib-card .ln {
+    font-size: 15px;
+    color: #27251e;
+  }
+}
+
+/* 3. 顶栏与宽屏内容区同宽对齐（DESIGN.md §5.3） */
+@media (min-width: 1280px) {
+  .app-header .header-container {
+    max-width: min(1480px, 94vw);
+  }
+}
+
+/* 4. 服务器页（/server）宽屏 2×2 双栏仪表盘（DESIGN.md §5.1） */
+@media (min-width: 1024px) {
+  .v4-server-page .v4-loghead {
+    margin: 0 20px 8px;
+    padding: 28px 4px 16px;
+    border-bottom: 1px solid #d1d1cd;
+  }
+  .v4-server-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+    padding: 12px 20px 32px;
+    align-items: start;
+  }
+  .v4-server-grid > .v4-sec {
+    padding: 20px;
+    background: #fdfbfa;
+    border: 1px solid #d1d1cd;
+    border-radius: 16px;
+  }
+}
+
+/* 服务器页媒体库柱状图可读性提升（ui-audit P2 #8） */
+.v4-eco .plant .ct {
+  font-size: 13px;
+  font-weight: 500;
+  color: #27251e;
+  font-variant-numeric: tabular-nums;
+}
+.v4-eco .plant .nm,
+.v4-eco .eco-foot {
+  font-size: 13px;
+  color: #524b42;
+}
+
+/* 5. 我的页 / 账号设置页（/game/account）宽屏双栏排布（告别 380px 长条单栏） */
+@media (min-width: 1024px) {
+  .v4-account-page .v4-loghead {
+    margin: 0 20px 8px;
+    padding: 28px 4px 18px;
+    border-bottom: 1px solid #d1d1cd;
+  }
+  .v4-account-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+    padding: 12px 20px 36px;
+    align-items: start;
+  }
+  .v4-account-grid > .v4-sec {
+    padding: 20px;
+    background: #fdfbfa;
+    border: 1px solid #d1d1cd;
+    border-radius: 16px;
+    margin: 0;
+  }
+}

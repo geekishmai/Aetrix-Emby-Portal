@@ -1,15 +1,18 @@
+<script setup lang="ts">
+import { branding } from '@/composables/useBranding'
+</script>
+
 <template>
   <main class="privacy-page">
     <div class="privacy-inner">
-      <p class="au-eyebrow privacy-eyebrow">Aetrix</p>
-      <h1 class="privacy-title">隐私政策</h1>
+      <h1 class="privacy-title">{{ branding.site_name }} · 隐私政策</h1>
       <p class="privacy-note">
-        以下内容适用于你通过 Aetrix 绑定自己的谷歌盘的情形。
+        以下内容适用于你通过 {{ branding.site_name }} 绑定自己的谷歌盘的情形。
       </p>
       <ol class="privacy-list">
         <li>
           <strong>我们访问什么：</strong>只有在你主动在账号设置里绑定自己的谷歌盘之后，
-          Aetrix 才会通过 Google OAuth 访问你的 Google Drive。drive.readonly 只读读取
+          {{ branding.site_name }} 才会通过 Google OAuth 访问你的 Google Drive。drive.readonly 只读读取
           你盘里媒体文件的名称、元数据和文件内容；drive.file 的写入只限在你自己绑定的盘里
           建转存目录、存转存副本，绝不删除、分享、改动你盘里的其他文件，也绝不碰别的用户的盘。
         </li>
@@ -29,7 +32,7 @@
         </li>
         <li>
           <strong>你随时能停：</strong>在账号设置里解绑，对应凭据即删除；你也可以随时在
-          Google 账号的“第三方访问权限”里撤销 Aetrix 的授权，撤销后本站
+          Google 账号的“第三方访问权限”里撤销 {{ branding.site_name }} 的授权，撤销后本站
           立即无法再访问你的盘。
         </li>
         <li>
@@ -61,7 +64,7 @@
           label and the names of the scopes you granted.
         </li>
         <li>
-          <strong>Encryption in transit.</strong> All communication between Aetrix and
+          <strong>Encryption in transit.</strong> All communication between {{ branding.site_name }} and
           Google (authorization, token exchange, refresh, revocation, and
           Drive API calls) uses HTTPS endpoints.
         </li>
@@ -86,11 +89,11 @@
         </li>
         <li>
           <strong>Revocation when you disconnect.</strong> When you unbind your Drive
-          in Aetrix, we (a) revoke the refresh token with Google's
+          in {{ branding.site_name }}, we (a) revoke the refresh token with Google's
           revocation endpoint, (b) delete the stored credential, and
           (c) remove the "anyone with the link can view" sharing that
           playback had placed on your transfer copies — all as part of the
-          same disconnect action. You can also revoke Aetrix's access at
+          same disconnect action. You can also revoke {{ branding.site_name }}'s access at
           any time from your Google Account's third-party access page.
         </li>
         <li>

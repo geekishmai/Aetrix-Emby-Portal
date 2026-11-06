@@ -1,6 +1,6 @@
 <template>
   <div class="v4-scope">
-    <div class="v4-page">
+    <div class="v4-page v4-account-page">
       <!-- 日志头：紧凑账号头（戳记行带网盘快捷入口；头像+用户名+身份徽章一行） -->
       <div class="v4-loghead">
         <div class="acct-stamp-row">
@@ -23,6 +23,7 @@
         </div>
       </div>
 
+      <div class="v4-account-grid">
       <!-- 我的权益：会员/公益资格/查看凭证合并为一组（组件 ProfileSubscriptions 原样复用） -->
       <section class="v4-sec" aria-label="我的权益">
         <!-- R41：补上标题行，与其他两节结构对齐（标题+副标题） -->
@@ -394,6 +395,7 @@
         </div>
         </div>
       </section>
+      </div>
     </div>
 
     <!-- 修改登录密码弹窗（由 ProfileView 移植） -->

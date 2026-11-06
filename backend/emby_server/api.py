@@ -592,6 +592,14 @@ def _item_dto(item: em.MediaItem, base: str, user_id: int, db: Session, full: bo
     dto = {
         "Name": _display_name(item, series_names),
         "SortName": item.sort_name or item.name or "",
+        "DisplayTitle": (
+            _display_name(item, series_names)
+            if item.item_type == "episode"
+            else __import__(
+                "backend.emby_server.portal_title", fromlist=["preferred_media_title"]
+            ).preferred_media_title(item)
+        ),
+        "Aliases": [a.strip() for a in (item.aliases or "").split(",") if a.strip()],
         "Id": item.guid,
         "ServerId": SERVER_ID,
         "Etag": _item_etag(item),
