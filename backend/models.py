@@ -306,6 +306,36 @@ class UserPlayLine(Base):
     user = relationship("WebUser", backref="play_line_pref")
 
 
+
+class FanqiaoIdentity(Base):
+    """帆桥（机场面板）SSO 与资格同步身份映射表。
+
+    独立建表，不复用 ``WebUser.telegram_id``：
+    - ``sub`` 为 ``HMAC-SHA256(shared_secret, panel_user_id)`` 的 64 位小写 hex；
+    - ``user_id`` 可空：Webhook 首次全量/增量推送未知 ``sub`` 时先建占位映射（``user_id=NULL``），
+      待用户首次点击 ``/sso/fanqiao`` 登录时再创建 ``WebUser`` 并绑定；
+    - 轮换共享密钥会改变全部 ``sub``，支持通过 ``reset_fanqiao_identities`` 整体清空重建。
+    """
+    __tablename__ = 'fanqiao_identities'
+
+    __table_args__ = (
+        Index('idx_fanqiao_identity_sub', 'sub', unique=True),
+        Index('idx_fanqiao_identity_user', 'user_id', unique=True),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sub = Column(String(64), unique=True, nullable=False)
+    user_id = Column(Integer, ForeignKey('web_users.id', ondelete='SET NULL'), unique=True, nullable=True)
+    tier = Column(String(20), nullable=False, default='none')
+    expires_at = Column(DateTime, nullable=True)
+    banned = Column(Boolean, default=False, nullable=False, server_default='0')
+    last_sso_at = Column(DateTime, nullable=True)
+    last_synced_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    user = relationship("WebUser", backref="fanqiao_identity")
+
 # ==================== 订阅和支付相关 ====================
 
 class SubscriptionPlan(Base):

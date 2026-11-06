@@ -17,6 +17,7 @@
 
 ADMIN = "admin"
 CODE = "code"
+FANQIAO = "fanqiao"
 INVITATION = "invitation"
 OPEN = "open"
 UNKNOWN = ""
@@ -24,14 +25,14 @@ UNKNOWN = ""
 LABELS = {
     ADMIN: "管理员创建",
     CODE: "卡密注册",
+    FANQIAO: "帆桥联动",
     INVITATION: "邀请码注册",
     OPEN: "开放注册",
     UNKNOWN: "未记录",
 }
 
 #: 下拉顺序（未记录排最后）
-ALL = (ADMIN, CODE, INVITATION, OPEN)
-
+ALL = (ADMIN, CODE, FANQIAO, INVITATION, OPEN)
 
 def label_of(value: str) -> str:
     return LABELS.get(value or UNKNOWN, value or UNKNOWN)
@@ -55,7 +56,7 @@ def resolve(entry: str, invitation_applied: bool) -> str:
       「自己注册的人」算成「邀请来的」。
     """
     value = normalize(entry)
-    if value in (ADMIN, CODE, INVITATION):
+    if value in (ADMIN, CODE, FANQIAO, INVITATION):
         return value
     if invitation_applied:
         return INVITATION
@@ -64,5 +65,5 @@ def resolve(entry: str, invitation_applied: bool) -> str:
     return UNKNOWN
 
 
-__all__ = ["ADMIN", "ALL", "CODE", "INVITATION", "LABELS", "OPEN", "UNKNOWN",
+__all__ = ["ADMIN", "ALL", "CODE", "FANQIAO", "INVITATION", "LABELS", "OPEN", "UNKNOWN",
            "label_of", "normalize", "resolve"]

@@ -108,6 +108,11 @@ def view_grant(db: Session, user: models.WebUser,
     私有地写在 portal 里，管理端想回答「这个人到底被授权了什么」只能复制一份，
     两份迟早会漂。
     """
+    from backend import fanqiao_sso
+
+    fq_allowed = fanqiao_sso.check_fanqiao_playback_allowed(db, user)
+    if fq_allowed is False:
+        return False, None
     target = _scoped_realm_id(db, realm_id)
     if realms.is_free_realm(db, target):
         now = datetime.now()
@@ -123,6 +128,8 @@ def view_grant(db: Session, user: models.WebUser,
             .first()
         )
         return (unlock is not None), unlock
+    if fq_allowed is True:
+        return True, None
     return has_active_subscription(db, user.id, target), None  # r49: 用 _scoped 口径（此前 resolve_realm_id；现有调用方下等价）
 
 CONFIG_REQUIRED = "subscription_required"
@@ -194,6 +201,11 @@ def can_play(db: Session, user: models.WebUser, realm_id: Optional[int] = None) 
     """
     if getattr(user, "is_staff", False):
         return True
+    from backend import fanqiao_sso
+
+    fq_allowed = fanqiao_sso.check_fanqiao_playback_allowed(db, user)
+    if fq_allowed is not None:
+        return fq_allowed
     target = _scoped_realm_id(db, realm_id)
     if realms.access_mode_of(db, target) == realms.ACCESS_FREE:
         # 公益服：免费开放，不是「白票」——这是这个服自己选的运营方式

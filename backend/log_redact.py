@@ -40,7 +40,7 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
     (
         re.compile(
             r"([?&](?:api_key|apikey|access_token|refresh_token|client_secret|secret|password"
-            r"|auth_token|token|sign|sig|code)=)"
+            r"|auth_token|token|sign|sig|code|ticket)=)"
             r"([^&\s\"'<>]*)",
             re.IGNORECASE,
         ),
@@ -50,7 +50,7 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
     (
         re.compile(
             r"((?<![A-Za-z0-9_])['\"]?(?:api_key|apikey|access_token|refresh_token|client_secret"
-            r"|secret|password|auth_token|token|sign|sig|code)['\"]?"
+            r"|fanqiao_shared_secret|secret|password|auth_token|token|sign|sig|code|ticket)['\"]?"
             r"\s*[:=]\s*['\"])"
             r"([^'\",}\s]+)"
             r"(['\"])",
@@ -66,7 +66,7 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 # 快筛：没有这些词就直接跳过正则（每条日志都过一遍，省 CPU）
-_TRIGGER_WORDS = ("api_key", "apikey", "token", "/bot", "secret", "password", "sign", "sig", "code")
+_TRIGGER_WORDS = ("api_key", "apikey", "token", "/bot", "secret", "password", "sign", "sig", "code", "ticket")
 
 
 def redact_secrets(text):

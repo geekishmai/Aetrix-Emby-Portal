@@ -5,6 +5,7 @@ import Toast from '@/components/Toast.vue'
 import AppHeader from '@/components/AppHeader.vue'
 import PanelTabbar from '@/components/panel/PanelTabbar.vue'
 import TgBindModal from '@/components/TgBindModal.vue'
+import Modal from '@/components/ui/Modal.vue'
 import { useToast } from '@/composables/useToast'
 import { useUserStore } from '@/stores/user'
 import { usePanelStore } from '@/stores/panel'
@@ -127,9 +128,34 @@ function handleGlobalTgBound() {
   sessionStorage.setItem(TG_GUIDE_SHOWN_KEY, '1')
 }
 
-onMounted(() => {
+const showSsoEmbySetupGuide = ref(false)
+
+function hasSsoPendingCookie(): boolean {
+  return document.cookie.split(';').some((c) => c.trim().startsWith('aetrix_sso_pending='))
+}
+
+function goOperatorSetup() {
+  showSsoEmbySetupGuide.value = false
+  void router.push('/game/operator')
+}
+
+onMounted(async () => {
   window.addEventListener('tg-not-bound', onTgNotBound)
   userStore.init()
+
+  const wantsSetupQuery = route.query.setup_emby === '1'
+  if (hasSsoPendingCookie() || wantsSetupQuery) {
+    const ssoRes = await userStore.consumeSsoSession()
+    if (wantsSetupQuery) {
+      const nextQuery = { ...route.query }
+      delete nextQuery.setup_emby
+      void router.replace({ query: nextQuery })
+    }
+    if ((ssoRes.ok && ssoRes.setupEmbyNeeded) || (wantsSetupQuery && userStore.isLoggedIn && !userStore.user?.emby_username)) {
+      showSsoEmbySetupGuide.value = true
+    }
+  }
+
   // P0#1：后台重新校验 EA 地址（8001→8002 这类变更 1 小时内自动纠正，不阻塞首屏）
   refreshEmbyBaseUrl()
   // 有登录 token 时后台刷新一次用户信息：购买订阅后 localStorage 里缓存的
@@ -183,6 +209,21 @@ watch(
     <Toast :messages="messages" @remove="remove" />
     <!-- 全局 TG 绑定自动弹窗：新用户注册后自动弹出，已绑定不弹 -->
     <TgBindModal v-model="showGlobalTgBind" @bound="handleGlobalTgBound" />
+    <!-- 帆桥 SSO 首次登录引导：提示前往「接线员」设置播放器接线用户名与播放密码 -->
+    <Modal v-model="showSsoEmbySetupGuide" title="设置播放器接线账号" size="sm">
+      <template #header>
+        <h3 class="sso-guide-title">欢迎来到帆桥影院</h3>
+      </template>
+      <p class="sso-guide-desc">
+        你的观影资格已同步生效。首次在第三方客户端（Infuse、VidHub、SenPlayer 等）连接前，请先设置专属<strong>接线用户名</strong>和<strong>播放密码</strong>。
+      </p>
+      <template #footer>
+        <div class="sso-guide-actions">
+          <button type="button" class="sso-btn-secondary" @click="showSsoEmbySetupGuide = false">稍后再说</button>
+          <button type="button" class="sso-btn-primary" @click="goOperatorSetup">去设置账号密码</button>
+        </div>
+      </template>
+    </Modal>
   </div>
 </template>
 
@@ -206,5 +247,42 @@ watch(
   .page-enter-active {
     transition: none;
   }
+}
+
+.sso-guide-title {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--au-text);
+}
+.sso-guide-desc {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--au-text-2);
+}
+.sso-guide-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--au-space-sm);
+  width: 100%;
+}
+.sso-btn-secondary,
+.sso-btn-primary {
+  padding: var(--au-space-sm) var(--au-space-md);
+  border-radius: var(--au-r-sm);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.sso-btn-secondary {
+  background: var(--au-surface-2);
+  color: var(--au-text-2);
+  border: 1px solid var(--au-border);
+}
+.sso-btn-primary {
+  background: var(--au-primary);
+  color: var(--au-on-primary);
+  border: 1px solid var(--au-primary);
+  font-weight: 500;
 }
 </style>

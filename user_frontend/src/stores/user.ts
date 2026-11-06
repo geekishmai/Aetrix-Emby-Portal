@@ -78,6 +78,21 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  /** 帆桥 SSO 跳转落地：用 HttpOnly 一次性交接 Cookie 换取门户登录态 */
+  async function consumeSsoSession(): Promise<{ ok: boolean; setupEmbyNeeded: boolean }> {
+    loading.value = true
+    try {
+      const response = await authApi.ssoSession()
+      _persist(response)
+      const setupEmbyNeeded = Boolean(response.setup_emby_needed || !response.user?.emby_username)
+      return { ok: true, setupEmbyNeeded }
+    } catch {
+      return { ok: false, setupEmbyNeeded: false }
+    } finally {
+      loading.value = false
+    }
+  }
+
   async function register(
     username: string,
     password: string,
@@ -161,6 +176,7 @@ export const useUserStore = defineStore('user', () => {
     init,
     login,
     loginWithTgToken,
+    consumeSsoSession,
     register,
     fetchUser,
     logout,

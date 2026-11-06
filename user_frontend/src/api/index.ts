@@ -110,8 +110,8 @@ api.interceptors.response.use(
       const isAuthRequest =
         originalRequest?.url?.includes('/api/user/auth/login') ||
         originalRequest?.url?.includes('/api/user/auth/register') ||
-        originalRequest?.url?.includes('/api/user/auth/refresh')
-
+        originalRequest?.url?.includes('/api/user/auth/refresh') ||
+        originalRequest?.url?.includes('/api/user/auth/sso-session')
       if (isAuthRequest) {
         return Promise.reject(error)
       }
@@ -270,6 +270,10 @@ export const authApi = {
   /** bot 一键免密登录：用一次性 token 换登录态 */
   tgLogin: (data: { token: string }) =>
     api.post<never, AuthResponse>('/api/user/auth/tg-login', data),
+
+  /** 帆桥 SSO 落地页一次性换取登录态（消费 HttpOnly 交接 Cookie） */
+  ssoSession: () =>
+    api.post<never, AuthResponse & { first_login?: boolean; setup_emby_needed?: boolean }>('/api/user/auth/sso-session'),
 
   getCurrentUser: () => api.get<never, AuthUser>('/api/user/auth/me'),
 
