@@ -901,6 +901,39 @@ def read_sidecar_text_from(provider, rel: str) -> str:
     return provider.read_text(rel)
 
 
+
+def extract_sidecar_pickcode(
+    provider, rel: Optional[str], entry: Optional["MountEntry"] = None
+) -> tuple[str, int]:
+    """提取 115 旁挂文件（如 .nfo）的不可变 pickcode 与字节大小（零额外 API）。
+
+    仅认 115 系挂载（Pan115Mount / P115SidecarMount）：
+    - sidecar 路径 ``list_dir`` 返回的 ``MountEntry.file_id`` 即为 ``pickcode``；
+    - 进程内 ``Pan115Mount.list_dir`` 在列目录时顺手记入 ``_pick_cache``。
+    非 115 挂载一律返回 ``("", 0)``（其它网盘 file_id 在原地覆盖时可能不变）。
+    """
+    mtype = (getattr(provider, "mount_type", "") or "").strip()
+    pname = (getattr(provider, "provider", "") or "").strip()
+    if mtype not in ("115", "115_sidecar") and pname != "p115":
+        return "", 0
+    size = 0
+    if entry is not None:
+        try:
+            size = max(0, int(getattr(entry, "size", 0) or 0))
+        except (TypeError, ValueError):
+            size = 0
+        fid = str(getattr(entry, "file_id", "") or "").strip()
+        if fid:
+            return fid, size
+    norm_rel = "/" + (rel or "").lstrip("/")
+    for candidate in (provider, getattr(provider, "_inproc", None)):
+        pick_cache = getattr(candidate, "_pick_cache", None)
+        if isinstance(pick_cache, dict):
+            pc = str(pick_cache.get(norm_rel) or "").strip()
+            if pc:
+                return pc, size
+    return "", size
+
 class MountProvider:
     """挂载提供者基类"""
 
@@ -1454,6 +1487,8 @@ class Pan115Mount(MountProvider):
             name = item.get("name") or ""
             child_rel = f"{prefix}/{name}"
             self._cid_cache.setdefault(child_rel, item.get("cid") or "")
+            if not item.get("is_dir") and item.get("pickcode"):
+                self._pick_cache[child_rel] = str(item.get("pickcode") or "")
             entries.append(MountEntry(
                 name=name, rel=child_rel,
                 is_dir=bool(item.get("is_dir")),

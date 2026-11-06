@@ -3894,8 +3894,9 @@ def _nfo_candidates(kind: str, name: str) -> list:
 
 def _read_nfo_cached(ctx: "_ScanContext", scan_file: "ScanFile",
                      local_path: Optional[str] = None,
-                     mount_rel: Optional[str] = None):
-    """读 + 解析一个 NFO（ctx 级缓存，含阴性缓存；异常当没有 NFO）"""
+                     mount_rel: Optional[str] = None,
+                     mount_entry: Optional[Any] = None):
+    """读 + 解析一个 NFO（ctx 级缓存 + 可选 115 pickcode 永久缓存；异常当没有 NFO）"""
     if local_path:
         key = ("local", local_path)
     else:
@@ -3906,6 +3907,22 @@ def _read_nfo_cached(ctx: "_ScanContext", scan_file: "ScanFile",
                else ("mount", scan_file.mount_id, mount_rel))
     if key not in ctx.nfo_cache:
         try:
+            if not local_path:
+                from backend.emby_server import nfo_cache as _nfo_p115_cache
+                if _nfo_p115_cache.enabled():
+                    _pc, _sz = mount_lib.extract_sidecar_pickcode(
+                        scan_file.provider, mount_rel, mount_entry)
+                    if _pc:
+                        def _load_remote_nfo() -> str:
+                            with progress.stage_timer("nfo_read"):
+                                return mount_lib.read_sidecar_text_from(
+                                    scan_file.provider, mount_rel)
+                        _hit, _parsed = _nfo_p115_cache.get_or_load(
+                            _pc, _sz, _load_remote_nfo, nfo_lib.parse_nfo)
+                        if _hit:
+                            progress.note_stage("nfo_pickcode_hit")
+                        ctx.nfo_cache[key] = _parsed
+                        return ctx.nfo_cache[key]
             # v2.42.9：真的读一次才计数（耗时含 NFO 的读 + 解析）——
             # 「nfo_read 次数」与「nfo_hit 次数」的比就是 ctx 缓存的实际复用率
             with progress.stage_timer("nfo_read"):
@@ -3964,31 +3981,47 @@ def _find_nfos(ctx: "_ScanContext", scan_file: "ScanFile", kind: str) -> tuple:
         return None, None, None
     dirpath = scan_file.local_dir if is_local else (scan_file.dir_rel or "/")
 
-    def read_nfo(d: str, fname: str):
-        if is_local:
-            return _read_nfo_cached(ctx, scan_file, local_path=os.path.join(d, fname))
-        return _read_nfo_cached(ctx, scan_file, mount_rel=posixpath.join(d, fname))
-
+    entries_by_name: dict = {}
     if is_local:
         names = set(_list_dir_cached(dirpath))
     else:
-        names = {e.name for e in _mount_dir_entries(ctx, scan_file, dirpath)}
+        entries_by_name = {
+            e.name: e for e in _mount_dir_entries(ctx, scan_file, dirpath)
+        }
+        names = set(entries_by_name)
+
+    def read_nfo(d: str, fname: str, entry: Optional[Any] = None):
+        if is_local:
+            return _read_nfo_cached(ctx, scan_file, local_path=os.path.join(d, fname))
+        return _read_nfo_cached(
+            ctx, scan_file,
+            mount_rel=posixpath.join(d, fname),
+            mount_entry=entry,
+        )
 
     nfo_data = series_nfo_data = season_nfo_data = None
     if kind in ("movie", "episode"):
         for cand in _nfo_candidates(kind, scan_file.name):
             if cand in names:
-                nfo_data = read_nfo(dirpath, cand)
+                nfo_data = read_nfo(dirpath, cand, entries_by_name.get(cand))
                 if nfo_data:
                     break
     elif kind == "series" and "tvshow.nfo" in names:
-        nfo_data = read_nfo(dirpath, "tvshow.nfo")
+        nfo_data = read_nfo(dirpath, "tvshow.nfo", entries_by_name.get("tvshow.nfo"))
     if kind == "episode":
         if "season.nfo" in names:
-            season_nfo_data = read_nfo(dirpath, "season.nfo")
+            season_nfo_data = read_nfo(
+                dirpath, "season.nfo", entries_by_name.get("season.nfo"))
         series_dir = _locate_series_dir(ctx, scan_file, dirpath)
         if series_dir:
-            series_nfo_data = read_nfo(series_dir, "tvshow.nfo")
+            s_entry = None
+            if not is_local:
+                s_entry = next(
+                    (e for e in _mount_dir_entries(ctx, scan_file, series_dir)
+                     if e.name == "tvshow.nfo"),
+                    None,
+                )
+            series_nfo_data = read_nfo(series_dir, "tvshow.nfo", s_entry)
     return nfo_data, series_nfo_data, season_nfo_data
 
 
