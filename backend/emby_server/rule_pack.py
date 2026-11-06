@@ -78,6 +78,7 @@ DEFAULT_STRIP_TERMS = (
     r"dts\s+hd(?:\s+hra?)?(?:\s+\d\s+\d)?", r"dts\s+hd(?:\s+hra?)?\d\s+\d",
     r"dts\s+hdma(?:\s+\d\s+\d)?", r"dts\s+hdma\d\s+\d",
     r"dtshdma(?:\s*\d\s+\d)?", r"dtshdhr(?:\s*\d\s+\d)?", "dtshdhr", "hdma",
+    r"ma[1-9]\s+[01]", r"hr[1-9]\s+[01]",
     r"hd\s+ma\d\s+\d", r"hd\s+ma(?:\s+\d\s+\d)?", r"hd\s+hr(?:\s*\d\s+\d)?", r"truehd\s*\d\s+\d",
     r"ddp\s*\d\s+\d", r"dd\s*\d\s+\d", r"dts\s*\d\s+\d",
     r"eac3\s*\d\s+\d", r"ac3\s*\d\s+\d", r"aac\s*\d\s+\d",
@@ -108,12 +109,15 @@ DEFAULT_STRIP_TERMS = (
     "minihd", "mnhd", "beitai", "chdweb", "chdbits",
     "tagweb", "taghd", "momoweb", "momohd", "ctrlweb", "ctrlhd",
     "enthd", "bathd", "homeweb", "homehd", "hdbweb", "frds",
-    # v5（2026-11-07 运维收官残留 none 实证）：OurTV/HDSWEB/GameHD 等组名与常见蓝光版本词
+    # v5（2026-11-07 运维收官残留 none 实证 + QA CS2 收紧）：
+    # 只收无歧义压制组与多词复合版本词；单字版本形容词（uncut / complete / theatrical /
+    # unrated / mastered / remastered）绝不进全局词表（防误删《Uncut Gems》《A Complete Unknown》），
+    # 改由 scanner 仅在年份之后剥离 + tmdb._REGION_TAIL_RE 尾部次选候选剥离。
     "ourtv", "harestv", "hdsweb", "hdstv", "hhweb", "mweb", "gamehd",
-    "complete", "remastered", "mastered", r"re\s+grade", "regrade",
     r"special\s+edition", r"extended\s+edition", r"extended\s+harder\s+cut",
     r"extened\s+cut", r"extended\s+cut", r"directors?\s+cut",
-    "theatrical", "unrated", "uncut",
+    r"theatrical\s+cut", r"theatrical\s+edition",
+    r"unrated\s+cut", r"unrated\s+edition", r"uncut\s+edition",
     "disc1", "disc2", "disc3", "disc4", "mkv1", "baiduyun",
 )
 

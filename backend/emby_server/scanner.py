@@ -296,12 +296,16 @@ EP_PATTERNS = [
     re.compile(r"[Ss](\d{1,2})\s?[\s._-]*[Ee](\d{1,4})"),
     re.compile(r"(\d{1,2})x(\d{1,4})"),
     re.compile(r"第\s*([一二三四五六七八九十百千万两\d]{1,6})\s*[集话話]"),
-    re.compile(r"\b[Ee][Pp]\.?\s?(\d{1,4})(?!\d)"),
+    # Python Unicode 模式下汉字与 E 同属 \w，\b 在「云海玉弓缘EP17」之间不成立；
+    # 改用 (?<![A-Za-z0-9]) 限定左侧非拉丁字母/数字，使汉字紧贴 EP17 正常命中且不误伤 STEP17/DEEP2。
+    re.compile(r"(?<![A-Za-z0-9])[Ee][Pp]\.?\s?(\d{1,4})(?!\d)"),
 ]
-# 仅剧集库：独立 E05（不带 P，动漫常见）/ 4 位 EP
-# `\b[Ee]` 在 "S01E05" 里（"1E" 间无词边界）不会误命中，SxxEyy 仍走上面。
+# 仅剧集库：独立 E05（不带 P，动漫/港剧常见）及汉字紧贴 E17（如 `云海玉弓缘E17.MP4`）
+# 汉字紧贴裸 E+数字要求右侧直达主干末尾、分隔符或集尾标记（END/v2/集），防误伤 `AE86`、`Wall-E 2`、`E3游戏展`、`E1区` 等带 E 片名。
 EP_PATTERNS_TV = [
-    re.compile(r"\b[Ee][Pp]?\.?\s?(\d{1,4})(?!\d)"),
+    re.compile(r"(?<![A-Za-z0-9])[Ee][Pp]\.?\s?(\d{1,4})(?!\d)"),
+    re.compile(r"(?<![A-Za-z0-9\u4e00-\u9fff])[Ee]\.?\s?(\d{1,4})(?!\d)"),
+    re.compile(r"(?<=[\u4e00-\u9fff])[Ee](\d{1,4})(?=$|[\s.\-_)\]}【\[（(]|[Ee][Nn][Dd]\b|[Vv]\d\b|[集话話期完])"),
 ]
 # 合集区间：S06E27-E28 / S01E26 - E27 / S01E27E28（同一文件含多集）。
 # **必须在 EP_PATTERNS_TV 的独立 E 模式之前命中**：否则 "-E28" 的尾巴
@@ -809,7 +813,7 @@ _VERSION_DOT_PLACEHOLDER = "\ue000"
 _VERSION_DASH_PLACEHOLDER = "\ue001"
 
 _AUDIO_PREFIX_BEFORE_CHANNEL_RE = re.compile(
-    r"(?:ddp?|truehd|dts(?:[-.\s]?hd(?:[.\s]?ma)?)?|hdma|eac3|ac3|aac|flac|opus|pcm|atmos)$",
+    r"(?:ddp?|truehd|dts(?:[-.\s]?hd(?:[.\s]?(?:ma|hr))?)?|(?:hd[.\s_-]?)?(?:ma|hr)|hdma|dtshdhr|eac3|ac3|aac|flac|opus|pcm|atmos)$",
     re.IGNORECASE,
 )
 _CASE_SENSITIVE_GROUP_RE = re.compile(
@@ -818,10 +822,39 @@ _CASE_SENSITIVE_GROUP_RE = re.compile(
 # 压制文件名/目录名末尾以连字符挂载的短组名（如 `-ALT` / `-CHD` / `-Xiaomi` / `-OurTV(1)`）：
 # 在 CLEAN_RE 把 `-` 转空格前精准剥离，既消掉残留尾词，又绝不误伤正文中出现的 Alt / CHD。
 _HYPHEN_TAIL_GROUP_RE = re.compile(
-    r"-(?:ALT|CHD|Xiaomi|GBR|ITA|EUR|CEE|MNHD|FRDS|CTRLWEB|CTRLHD|MOMOWEB|MOMOHD|BATHD|OURTV|HARESTV|HDSWEB|GAMEHD|TAGWEB|TAGHD|CHDWEB|CHDBITS)(?:\(\d+\))?\s*$",
+    r"-(?:ALT|CHD|Xiaomi|GBR|ITA|EUR|CEE|MNHD|FRDS|CTRLWEB|CTRLHD|MOMOWEB|MOMOHD|BATHD|OURTV|HARESTV|HDSWEB|GAMEHD|TAGWEB|TAGHD|CHDWEB|CHDBITS|SPARKS|RARBG|FGT)(?:\(\d+\))?\s*$",
+    re.IGNORECASE,
+)
+# CS2-P1-1：单字版本形容词（uncut / complete / theatrical / unrated / mastered / remastered / extended / re-grade）
+# 只许在「片名之后的 4 位发行年份」右侧剥离，绝不在年份左侧或无年份纯片名上全局删除（保护《Uncut Gems》《A Complete Unknown》）。
+# Unrated 严格按 QA 口径仅放 tmdb._REGION_TAIL_RE 尾部次选候选剥离，不在扫描层剥离。
+_POST_YEAR_EDITION_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:uncut|complete|theatrical|remastered|mastered|extended|re[\s.\-_]?grade)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_SAMPLE_OR_TRAILER_STEM_RE = re.compile(
+    r"(?:^|[.\-_\s])(?:trailer|sample)(?:[.\-_\s]|$)",
     re.IGNORECASE,
 )
 
+
+def _strip_post_year_editions(text: str) -> str:
+    """仅剥离位于最后一个有效发行年份（且其前已有非空片名）之后的单字版本词。"""
+    if not text:
+        return text
+    now_max = datetime.now().year + 2
+    last_year_match = None
+    for m in _YEAR_CAND_RE.finditer(text):
+        y = int(m.group(1))
+        if 1900 <= y <= now_max and m.start() > 0:
+            before = text[: m.start()].strip(" .-_[]()（）【】")
+            if before:
+                last_year_match = m
+    if last_year_match is None:
+        return text
+    head = text[: last_year_match.end()]
+    tail = _POST_YEAR_EDITION_RE.sub(" ", text[last_year_match.end() :])
+    return head + tail
 _DUP_DASH_BEFORE_YEAR_RE = re.compile(
     r"-\s*(\d{1,2})(?=\s*[\(\[【]|\.\s*(?:19|20)\d{2}\b)"
 )
@@ -875,7 +908,8 @@ def clean_name(raw: str, pack=None) -> str:
     name = _CASE_SENSITIVE_GROUP_RE.sub(" ", name)
     # 去掉 115 转存重名目录后缀 `(1)`（仅当紧跟压制组/参数末尾）与连字符挂载的短压制组 `-ALT`/`-CHD`
     name = _HYPHEN_TAIL_GROUP_RE.sub("", name)
-    # 去掉文件名主干末尾的 `[N]` 重复下载标记（如 `... - 1080p [2]`）：下载器
+    # CS2-P1-1：仅在发行年份右侧剥离单字版本词（Complete / Uncut / Theatrical / Unrated / Remastered）
+    name = _strip_post_year_editions(name)
     # 给同名第二个文件打的记号，不是片名。必须在 CLEAN_RE 剥掉 `[]` 之前
     # 整段删除，否则只剩孤立的 `N` 留在片名里（生产实证：「第四公民 2」）。
     name = re.sub(r"\s*\[\s*\d{1,2}\s*\]\s*$", "", name)
@@ -4113,7 +4147,12 @@ def _find_nfos(ctx: "_ScanContext", scan_file: "ScanFile", kind: str) -> tuple:
             # 多部曲合集目录（同目录含 >=2 个视频文件，或目录名带年份区间/合集标记）：
             # 严禁回退读取共享的通用 `movie.nfo`，否则会把整包续集全部绑向同一部电影触发 year_mismatch。
             folder_leaf = os.path.basename(dirpath.rstrip("/\\"))
-            video_cnt = sum(1 for fn in names if os.path.splitext(fn)[1].lower() in VIDEO_EXTS)
+            video_cnt = sum(
+                1
+                for fn in names
+                if os.path.splitext(fn)[1].lower() in VIDEO_EXTS
+                and not _SAMPLE_OR_TRAILER_STEM_RE.search(os.path.splitext(fn)[0])
+            )
             if video_cnt >= 2 or is_multi_movie_collection_dir(folder_leaf):
                 cands = [c for c in cands if c.lower() != "movie.nfo"]
         for cand in cands:

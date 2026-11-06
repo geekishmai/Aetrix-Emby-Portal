@@ -128,7 +128,7 @@ def consolidate_tv_pseudo_series(
                 sno = int(parsed["season"])
                 ep_no = int(parsed["episode"])
                 if sno not in season_cache:
-                    s_guid = sc.item_guid(f"{key_path}#S{sno:02d}")
+                    s_guid = sc.item_guid(f"{target_guid}:S{sno:02d}")
                     s_row = db.query(em.MediaItem).filter_by(guid=s_guid).first()
                     if s_row is None:
                         s_row = em.MediaItem(
@@ -150,7 +150,7 @@ def consolidate_tv_pseudo_series(
                 pseudo_s.parent_id = season_row.id
                 pseudo_s.season_number = sno
                 pseudo_s.episode_number = ep_no
-                pseudo_s.name = f"{series_title} S{sno}E{ep_no:04d}"
+                pseudo_s.name = sc._episode_display_name(series_title, sno, ep_no)
                 pseudo_s.enrich_status = "pending"
                 pseudo_s.metadata_source = None
 
@@ -238,7 +238,7 @@ def consolidate_tv_pseudo_series(
                     sno = ep.season_number if ep.season_number is not None else 1
                     target_season = primary_seasons.get(sno)
                     if target_season is None:
-                        s_guid = sc.item_guid(f"{primary.guid}#S{sno:02d}")
+                        s_guid = sc.item_guid(f"{primary.guid}:S{sno:02d}")
                         target_season = db.query(em.MediaItem).filter_by(guid=s_guid).first()
                         if target_season is None:
                             target_season = em.MediaItem(
@@ -256,6 +256,20 @@ def consolidate_tv_pseudo_series(
                         primary_seasons[sno] = target_season
                     ep.series_id = primary.id
                     ep.parent_id = target_season.id
+                dup_seasons = (
+                    db.query(em.MediaItem)
+                    .filter(
+                        em.MediaItem.series_id == dup.id,
+                        em.MediaItem.item_type == "season",
+                        em.MediaItem.deleted_at.is_(None),
+                    )
+                    .all()
+                )
+                for ds in dup_seasons:
+                    ts_match = primary_seasons.get(ds.season_number)
+                    if ts_match is not None:
+                        ds.merged_into_id = ts_match.id
+                    ds.is_hidden = True
                 dup.merged_into_id = primary.id
                 dup.is_hidden = True
 
