@@ -587,3 +587,100 @@ def test_startup_warning_never_raises(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         warn_public_url_on_startup()
     assert any("域名守卫校验失败" in r.getMessage() for r in caplog.records)
+
+
+# ==================== 多域名各自走流（Caddy / Cloudflare → aetrix-web 172.21.0.0/16 → aetrix-api） ====================
+
+def test_nginx_conf_maps_preserve_upstream_forwarded_proto_and_host():
+    """docker/nginx.conf 必须用 map 优先透传上游 Caddy 的 X-Forwarded-Proto / X-Forwarded-Host，缺失才回退 $scheme / $host。"""
+    import pathlib
+    import re
+
+    conf = (pathlib.Path(__file__).resolve().parent.parent / "docker" / "nginx.conf").read_text(encoding="utf-8")
+    proto_map = re.search(r"map\s+\$http_x_forwarded_proto\s+\$forwarded_proto\s*\{(.*?)\}", conf, re.S)
+    host_map = re.search(r"map\s+\$http_x_forwarded_host\s+\$forwarded_host\s*\{(.*?)\}", conf, re.S)
+    assert proto_map, "缺少 $http_x_forwarded_proto -> $forwarded_proto 的 map 定义"
+    assert host_map, "缺少 $http_x_forwarded_host -> $forwarded_host 的 map 定义"
+    assert "default $http_x_forwarded_proto;" in proto_map.group(1)
+    assert re.search(r'""\s+\$scheme;', proto_map.group(1))
+    assert "default $http_x_forwarded_host;" in host_map.group(1)
+    assert re.search(r'""\s+\$host;', host_map.group(1))
+
+    for loc in ("/api/", "/sso/", "/emby/", "/embyhttp"):
+        m = re.search(rf"location\s+{re.escape(loc)}\s*\{{(.*?)\n    \}}", conf, re.S)
+        assert m, f"找不到 location {loc}"
+        block = m.group(1)
+        assert "proxy_set_header X-Forwarded-Proto $forwarded_proto;" in block, f"{loc} 未用 $forwarded_proto"
+        assert "proxy_set_header X-Forwarded-Host $forwarded_host;" in block, f"{loc} 未用 $forwarded_host"
+        assert "proxy_set_header X-Forwarded-Proto $scheme;" not in block, f"{loc} 仍写死 $scheme"
+
+
+def test_multi_domain_wan_address_and_playback_info_each_match_request_domain_https(monkeypatch, app, seed, token):
+    """去掉 EMBY_PUBLIC_URL 后，经 web 容器（172.21.0.6）转发的三个域名（含 Cloudflare 橙云与灰云直连）
+    各自请求 System/Info 与 PlaybackInfo（开启默认缓存 TTL）时，WanAddress、DirectPlayUrl、
+    DirectStreamUrl 与字幕 DeliveryUrl 均严格等于本次请求的 https://<域名>，互不串流。
+    """
+    _clear_public_env(monkeypatch)
+    # 开启缓存（300s），同时验证同一条目在三个域名连续请求时不会因缓存串回上一个域名
+    monkeypatch.setenv("PLAYBACKINFO_CACHE_TTL", "300")
+
+    domains = (
+        # (域名, 是否经 Cloudflare 橙云：CF 场景下 Caddy 透传 X-Forwarded-Proto=https，Host 为请求域名，X-Forwarded-Host 由 nginx map 用 $host 补齐或为空)
+        ("v2.fluxquata.com", False),
+        ("emby.fluxquata.com", True),
+        ("emby.fanqiao.net", True),
+    )
+
+    for domain, via_cloudflare in domains:
+        expected_base = f"https://{domain}"
+        other_domains = [d for d, _ in domains if d != domain]
+        extra_headers = {
+            "Host": domain,
+            "X-Forwarded-Proto": "https",
+        }
+        if via_cloudflare:
+            extra_headers["CF-Visitor"] = '{"scheme":"https"}'
+            extra_headers["CF-Connecting-IP"] = "198.51.100.77"
+            # 覆盖两种上游头形态：emby.fluxquata.com 验证仅靠 Host + X-Forwarded-Proto（Caddy 信任 CF 时不补 XFH），
+            # emby.fanqiao.net 验证 nginx map 补上 X-Forwarded-Host=$host 后的形态
+            if domain == "emby.fanqiao.net":
+                extra_headers["X-Forwarded-Host"] = domain
+        else:
+            extra_headers["X-Forwarded-Host"] = domain
+
+        info, play = _playback(
+            app,
+            token,
+            seed["movie"],
+            client_host="172.21.0.6",  # compose 内网 aetrix-web 容器 IP
+            base_url=f"http://{domain}",
+            extra_headers=extra_headers,
+        )
+        assert info.status_code == 200, info.text
+        info_body = info.json()
+        assert info_body["WanAddress"] == expected_base
+        assert info_body["LocalAddress"] == expected_base
+
+        assert play.status_code == 200, play.text
+        play_body = play.json()
+        src = play_body["MediaSources"][0]
+        for key in ("DirectStreamUrl", "DirectPlayUrl"):
+            assert src[key].startswith(expected_base + "/"), (domain, key, src[key])
+            assert not src[key].startswith("http://"), src[key]
+            for other in other_domains:
+                assert other not in src[key], f"{domain} 串入了 {other}: {src[key]}"
+
+        deliveries = [
+            st["DeliveryUrl"]
+            for st in src["MediaStreams"]
+            if isinstance(st, dict) and st.get("DeliveryUrl")
+        ]
+        assert deliveries, src["MediaStreams"]
+        for url in deliveries:
+            assert url.startswith(expected_base + "/"), (domain, url)
+            for other in other_domains:
+                assert other not in url, f"字幕 DeliveryUrl 缓存串入 {other}: {url}"
+
+        for url in _abs_urls(play_body):
+            assert url.startswith(expected_base), (domain, url)
+            assert not url.startswith("http://"), url

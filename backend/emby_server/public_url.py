@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 from urllib.parse import urlsplit, urlunsplit
@@ -26,7 +27,9 @@ from starlette.requests import Request
 logger = logging.getLogger(__name__)
 
 _HTTP = ("http://", "https://")
-
+# 生产 compose 内网子网（aetrix-web → aetrix-api，与 backend/main.py::_DEFAULT_HEALTH_FULL_CIDRS 同口径）：
+# aetrix-api 不向宿主暴露公网端口（仅 expose 8000），直连它的 web 容器位于 172.21.0.0/16。
+_COMPOSE_WEB_SUBNET = ipaddress.ip_network("172.21.0.0/16")
 
 def configured_public_url() -> str:
     """部署方写明的对外地址。不是 http(s) 就当没配（避免把残缺字符串下发给播放器）。"""
@@ -122,11 +125,20 @@ def _peer_host(request: Request) -> str:
 
 
 def _peer_in_forwarded_allow_range(ip: str) -> bool:
-    """直连 IP 是否允许采信转发头来拼公开 URL。与域名守卫同一份点名名单，不含 ``*``。"""
+    """直连 IP 是否允许采信转发头来拼公开 URL。
+
+    除域名守卫同源名单（回环、TRUSTED_PROXIES、FORWARDED_ALLOW_IPS，不含 ``*``）外，
+    默认接受生产 compose 子网 ``172.21.0.0/16`` 内 web 容器转发来的协议/主机头。
+    """
     from backend.domain_guard import peer_honors_forwarded_headers
 
-    return peer_honors_forwarded_headers(ip)
-
+    if peer_honors_forwarded_headers(ip):
+        return True
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.version == 4 and addr in _COMPOSE_WEB_SUBNET
 
 def warn_public_url_on_startup() -> None:
     """校验 ``EMBY_PUBLIC_URL``。不合规只记 WARNING，绝不因此拒绝启动。

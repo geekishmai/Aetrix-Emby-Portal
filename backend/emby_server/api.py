@@ -6086,7 +6086,8 @@ async def playback_info(
             profile_fp = hashlib.md5(
                 json.dumps(device_profile, sort_keys=True, ensure_ascii=False).encode("utf-8")
             ).hexdigest()[:12]
-            cache_key = f"pi:{item.guid}:{user.id}:{profile_fp}:{max_bitrate // 1000}"
+            base_fp = hashlib.md5((base or "").encode("utf-8")).hexdigest()[:8]
+            cache_key = f"pi:{item.guid}:{user.id}:{profile_fp}:{max_bitrate // 1000}:{base_fp}"
             from backend.database import CacheManager
             # S4：redis-py 是同步客户端，Redis 故障时一次 get 最长卡 socket 超时——放线程池
             hit = await run_db(CacheManager.get, cache_key)

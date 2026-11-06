@@ -314,7 +314,7 @@ TRUSTED_PROXIES=172.18.0.0/16
 
 `172.18.0.0/16` 同时盖住网关（常见 `172.18.0.1`）和同一座桥上的其它容器。只把 `172.18.0.1` 写进 `FORWARDED_ALLOW_IPS` 时，只覆盖「经宿主机端口、docker-proxy 进来」的那一跳；`aetrix-web` 在 Docker 网络里直连 `aetrix-api` 时，对端是网页容器自己的地址，不在这一条里。
 
-本机 Nginx 反代到 `127.0.0.1` 时，回环默认就在 `TRUSTED_PROXIES` 里，不必再加网段。仓库自带的 `docker/nginx.conf` 只 `listen 80`，并且 `proxy_set_header X-Forwarded-Proto $scheme`：网页容器自己看到的是 http，它转发给 API 的协议头也是 http。前面的 Cloudflare 或宿主机 Nginx 即使已经终结了 TLS，这一跳也会把协议盖成 http。这种拓扑下，信任 `172.18.0.0/16` 得到的播放地址仍是 `http://` 加当时的 Host。要 https 播放地址，设置上一节的 `EMBY_PUBLIC_URL`。
+本机 Nginx 反代到 `127.0.0.1` 时，回环默认就在 `TRUSTED_PROXIES` 里，不必再加网段。仓库自带的 `docker/nginx.conf` 用 `map` 优先透传上游反代（如宿主机 Caddy / Nginx）传入的 `X-Forwarded-Proto` 与 `X-Forwarded-Host`，仅在缺失时才回退本容器的 `$scheme` 与 `$host`；同时 `public_url` 默认信任生产 Compose 子网 `172.21.0.0/16` 内 `aetrix-web` 容器的转发头（自定义其它 Docker 子网仍需写入 `TRUSTED_PROXIES` 或 `FORWARDED_ALLOW_IPS`）。**多域名各自走流上线步骤**（如 `v2.fluxquata.com`、`emby.fluxquata.com`、`emby.fanqiao.net` 共用同一后端且各自按请求域名回流）：上线前先备份 `/opt/aetrix/.env`，将 `.env` 中的 `EMBY_PUBLIC_URL=...` **改为空值（`EMBY_PUBLIC_URL=`）或在行首加 `# ` 注释掉（只改值或注释，切勿删行，以免与启动自愈追加项冲突）**，随后重建并重启 `aetrix-web` 与 `aetrix-api`。
 
 不要写 `FORWARDED_ALLOW_IPS=*`。`*` 会让任意一个直连方用 `X-Forwarded-For` 伪造客户端 IP：限流按这个 IP 分桶，按客户端 IP 做的访问判断也会跟着被绕过；公开地址的 scheme / Host 同样能被改掉。现在 `*` 在域名守卫、公开 URL 和启动器里都被丢掉，每个进程只记一次 WARNING。`serve.py`、`serve_emby.py`、`backend/main.py`、`emby_api/main.py` 都把去掉 `*` 之后的名单显式传给 uvicorn，不让 uvicorn 自己读到环境变量里的 `*`。这一项只剩 `*`、或根本没写时，uvicorn 只信回环 `127.0.0.1,::1`。同一行里的精确 IP 和 CIDR 仍然有效。`TRUSTED_PROXIES`（默认回环）和内置 Cloudflare 网段不靠这个 `*`，写 `*` 也不会取消它们。写错的网段会被忽略，不能用 `*` 代替网段。
 
@@ -328,7 +328,7 @@ TRUSTED_PROXIES=172.18.0.0/16
 
 - 启动时若设置了 `EMBY_PUBLIC_URL`，却不是以 `https://` 开头（大小写不敏感），打一条 WARNING，服务照常启动。`http://…` 运行时仍然使用，不会因为这条警告被丢掉。字面不是 `http://` 或 `https://` 开头的值，运行时当成没配。未设置不告警。
 - 域名守卫的允许名单分两步：管理后台「流媒体加速」开关打开 **并且** 填了加速域名时，用那份域名；这两项没有同时满足时，才看环境变量 `ENFORCE_DOMAIN`。两边都空则守卫关闭，请求原样放行。名单非空时，启动再检查 `EMBY_PUBLIC_URL` 的主机在不在里面；不在只打 WARNING，地址照样下发。真正的拦截在请求上：Host 不在名单里返回 403，所以客户端要连的域名得在这份名单里。这是域名守卫，不是播放防盗链的 Referer 白名单；Referer 白名单不参与 `EMBY_PUBLIC_URL` 的启动检查，空名单等于不检查 Referer。
-- PlaybackInfo 把 MediaSource（含字幕 `DeliveryUrl` 里的基址）缓存 `PLAYBACKINFO_CACHE_TTL` 秒，默认 300，设 `0` 关闭。缓存键是条目、用户、设备 profile 指纹和码率上限，不含对外基址。`DirectStreamUrl` / `DirectPlayUrl` 在读缓存之后按**当次**基址重拼，改地址并重启后这两条下次请求就是新基址（转码删除后不再有 `TranscodingUrl`）。字幕 `DeliveryUrl` 留在缓存里的那份仍可能是旧基址，要等这次 TTL 结束。Redis 里的缓存跨重启还在。
+- PlaybackInfo 把 MediaSource（含字幕 `DeliveryUrl` 里的基址）缓存 `PLAYBACKINFO_CACHE_TTL` 秒，默认 300，设 `0` 关闭。缓存键包含条目、用户、设备 profile 指纹、码率上限与当次对外基址指纹，多域名并存时各域名独立命中缓存，字幕 `DeliveryUrl` 与 `DirectStreamUrl` / `DirectPlayUrl` 均严格等于本次请求域名。
 
 分离部署时，播放地址在出协议的进程上算，那是 EA；账号卡在 EM 进程里算（`portal.resolve_emby_base_url` 读到 `EMBY_PUBLIC_URL` 的那一步）。EA 不挂门户路由（`emby_api/main.py` 只挂协议面、搜索、挂载体检和节点身份），所以 EA 环境里的 `EMBY_PUBLIC_URL` 不会出现在账号卡上。两边都要设这个变量：Compose 的同一份 `.env` 会同时进 EM 和 EA；两台机器则各写一份，都只填根地址。EM 上若已经填了「服对外地址」或「服务入口」，账号卡可以不靠 EM 的这个变量；EA 的播放地址仍然要靠 EA 自己的 `EMBY_PUBLIC_URL`（或 EA 前面那一跳可信反代的转发头）。详见 [EA 网关部署 · 客户端接入](./deploy-ea.md#6-客户端接入)。
 
