@@ -1123,6 +1123,14 @@ def _auto_migrate():
             ("content_hash_algo", "VARCHAR(16)", "NULL"),
             ("identity_json", "TEXT", "NULL"),
         ]),
+        # 海报墙增强（2026-11-06 P1）：emby_items 新增透明 PNG Logo 与 16:9 横卡 Thumb 列。
+        # 老库补列后为 NULL（ImageTags 不发 Logo/Thumb，/Images/Logo 返回 404），兼容无损。
+        ("emby_items", [
+            ("logo_path", "VARCHAR(1024)", "NULL"),
+            ("logo_image_url", "VARCHAR(1024)", "NULL"),
+            ("thumb_path", "VARCHAR(1024)", "NULL"),
+            ("thumb_image_url", "VARCHAR(1024)", "NULL"),
+        ]),
         # 阶段 8 PR-1（2026-10-25）：命令表加 payload（命令参数 JSON 文本，
         # seek 的目标 ticks 等）。老库补列后为 NULL（= 无参数命令），
         # 读数按无参数处理，行为与升级前一致；create_all 不改已建的表，

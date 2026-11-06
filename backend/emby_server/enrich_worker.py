@@ -2930,6 +2930,11 @@ def _enrich_apply(db, item: Any, fetched: dict) -> None:
     except Exception as exc:  # noqa: BLE001
         # r46补遗：片长缺失原来完全无痕（连日志都没有）
         logger.debug("apply_runtime 失败 id=%s: %s", getattr(item, "id", "?"), exc)
+    try:
+        from backend.emby_server.tmdb import apply_detail_artwork as _apply_art
+        _apply_art(item, fetched.get("tmdb_details"))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("apply_detail_artwork 失败 id=%s: %s", getattr(item, "id", "?"), exc)
 
     # 单集 TMDB 数据（v2.50.0）：标题/简介/剧照
     # 在父级图片回退之前应用——有专属剧照的集用自己的，没有的才回退

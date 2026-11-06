@@ -361,12 +361,12 @@ def test_views_virtual_svg_gets_placeholder_aspect(client, token, seed):
 
 
 def test_views_real_libraries_unchanged(client, token, seed):
-    """真实库不受影响：有 cover_path 的仍用旧 tag + 0.6666667；无
+    """真实库：有 cover_path 的沿用旧 tag + 16:9 宽高比（1.7777778）；无
     cover_path 的仍无 Primary 标记、无宽高比。"""
     entries = _views_entries(client, token, seed)
     with_cover = entries[seed["real_with_cover"]]
     assert with_cover["ImageTags"]["Primary"] == "1"  # 文件不存在 → 旧 tag 回退
-    assert with_cover["PrimaryImageAspectRatio"] == pytest.approx(0.6666667)
+    assert with_cover["PrimaryImageAspectRatio"] == pytest.approx(1.7777778)
     no_cover = entries[seed["real_no_cover"]]
     assert no_cover["ImageTags"] == {}
     assert "PrimaryImageAspectRatio" not in no_cover

@@ -1062,26 +1062,145 @@ def _db_keys(db=None) -> list[str]:
 _MISS = object()
 
 
+TMDB_DETAIL_APPEND = "alternative_titles,external_ids,credits,images"
+TMDB_IMAGE_LANGUAGES = "zh-CN,zh,cn,tw,hk,ja,en,null"
+
+
+def _image_vote_sort_key(entry: dict) -> tuple[float, int, int]:
+    try:
+        va = float(entry.get("vote_average") or 0.0)
+    except (TypeError, ValueError):
+        va = 0.0
+    try:
+        vc = int(entry.get("vote_count") or 0)
+    except (TypeError, ValueError):
+        vc = 0
+    try:
+        w = int(entry.get("width") or 0)
+    except (TypeError, ValueError):
+        w = 0
+    return (va, vc, w)
+
+
+def _image_lang_tier(entry: dict, orig_lang: str) -> int:
+    """语言优先级分档（越小越优先）：
+    0=简体中文(zh-CN/zh/cn) → 1=繁体中文(TW/HK) → 2=影片原语言 → 3=英文 → 4=无语言/其他。
+    """
+    lang = str(entry.get("iso_639_1") or "").strip().lower()
+    region = str(entry.get("iso_3166_1") or "").strip().upper()
+    if lang in ("zh-cn", "cn") or (lang == "zh" and region not in ("TW", "HK")):
+        return 0
+    if lang in ("zh-tw", "zh-hk", "tw", "hk") or (lang == "zh" and region in ("TW", "HK")):
+        return 1
+    if orig_lang and lang == orig_lang:
+        return 2
+    if lang == "en":
+        return 3
+    return 4
+
+
+def pick_logo_path(details: Optional[dict]) -> Optional[str]:
+    """从 ``details.images.logos`` 选透明 PNG ClearLogo（排除 .svg 保证全客户端解码兼容）。"""
+    if not isinstance(details, dict):
+        return None
+    logos = ((details.get("images") or {}).get("logos")) or []
+    orig_lang = str(details.get("original_language") or "").strip().lower()
+    candidates = []
+    for item in logos:
+        if not isinstance(item, dict):
+            continue
+        fp = str(item.get("file_path") or "").strip()
+        if not fp or not fp.lower().endswith(".png"):
+            continue
+        candidates.append(item)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda it: (
+            _image_lang_tier(it, orig_lang),
+            tuple(-v for v in _image_vote_sort_key(it)),
+        )
+    )
+    return str(candidates[0].get("file_path") or "").strip() or None
+
+
+def pick_textless_backdrop_path(details: Optional[dict]) -> Optional[str]:
+    """优先从 ``details.images.backdrops`` 选无字纯净背景（``iso_639_1`` 为空/null），
+    避免背景自带花字与叠加透明 Logo 打架；无候选时回退 ``details.backdrop_path``。
+    """
+    if not isinstance(details, dict):
+        return None
+    backdrops = ((details.get("images") or {}).get("backdrops")) or []
+    textless = []
+    for item in backdrops:
+        if not isinstance(item, dict):
+            continue
+        fp = str(item.get("file_path") or "").strip()
+        if not fp:
+            continue
+        lang = str(item.get("iso_639_1") or "").strip().lower()
+        if lang in ("", "null", "xx"):
+            textless.append(item)
+    if textless:
+        hd = [it for it in textless if int(it.get("width") or 0) >= 1280]
+        pool = hd if hd else textless
+        pool.sort(key=_image_vote_sort_key, reverse=True)
+        chosen = str(pool[0].get("file_path") or "").strip()
+        if chosen:
+            return chosen
+    fallback = str(details.get("backdrop_path") or "").strip()
+    return fallback or None
+
+
+def pick_thumb_path(details: Optional[dict]) -> Optional[str]:
+    """从 ``details.images.backdrops`` 选带片名语言的 16:9 横卡图（优先简中→繁中→原语→英文）。"""
+    if not isinstance(details, dict):
+        return None
+    backdrops = ((details.get("images") or {}).get("backdrops")) or []
+    orig_lang = str(details.get("original_language") or "").strip().lower()
+    titled = []
+    for item in backdrops:
+        if not isinstance(item, dict):
+            continue
+        fp = str(item.get("file_path") or "").strip()
+        lang = str(item.get("iso_639_1") or "").strip().lower()
+        if not fp or lang in ("", "null", "xx"):
+            continue
+        tier = _image_lang_tier(item, orig_lang)
+        if tier < 4:
+            titled.append((tier, item))
+    if not titled:
+        return None
+    titled.sort(
+        key=lambda pair: (pair[0], tuple(-v for v in _image_vote_sort_key(pair[1])))
+    )
+    return str(titled[0][1].get("file_path") or "").strip() or None
+
+
 def image_specs(*payloads) -> list[tuple[str, str]]:
     """一次刮削要落的图片 ``(kind, url)`` 列表——IO 阶段按这个预热，写库阶段按这个落字段
 
     必须是单一口径：``_set_image`` 在写事务里**不再下载**，所以预热要看**同一份** URL，
-    否则本地化会静默失效（w500 海报 / w1280 背景这两个尺寸不要在任何地方再拼一遍）。
+    否则本地化会静默失效（w500 海报与 Logo / w1280 无字背景 / w780 横卡 Thumb）。
     """
     out: list[tuple[str, str]] = []
-    # 图片地址走**可配的 CDN 镜像**：境内直连 image.tmdb.org 不稳时，单独改这一项就行
     base = image_base()
     for data in payloads:
         if not data:
             continue
         poster = data.get("poster_path")
-        backdrop = data.get("backdrop_path")
+        backdrop = pick_textless_backdrop_path(data)
+        logo = pick_logo_path(data)
+        thumb = pick_thumb_path(data)
         if poster:
             out.append(("Primary", f"{base}/w500{poster}"))
         if backdrop:
             out.append(("Backdrop", f"{base}/w1280{backdrop}"))
+        if logo:
+            out.append(("Logo", f"{base}/w500{logo}"))
+        if thumb:
+            out.append(("Thumb", f"{base}/w780{thumb}"))
     return out
-
 
 def prewarm_images(*payloads, extra=()) -> int:
     """IO 阶段把这一批刮削要落的图先下到本地（写库阶段只落字段，v2.42.9）
@@ -1132,6 +1251,13 @@ def _has_credits(data) -> bool:
         return True
     return isinstance(data, dict) and isinstance(data.get("credits"), dict)
 
+
+
+def _has_images(data) -> bool:
+    """details 载荷是否包含 ``images`` 扩展块（阴性缓存 None 按已完备计）。"""
+    if data is None:
+        return True
+    return isinstance(data, dict) and isinstance(data.get("images"), dict)
 
 _CJK_ORIGINAL_LANGS = {"zh", "cn"}
 _HAN_RE = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -1234,6 +1360,10 @@ def _set_image(item: emby_models.MediaItem, kind: str, url: str) -> None:
     """
     if kind == "Backdrop":
         item.backdrop_image_url = url
+    elif kind == "Logo":
+        item.logo_image_url = url
+    elif kind == "Thumb":
+        item.thumb_image_url = url
     else:
         item.primary_image_url = url
     local = image_store.localize(url, allow_download=False)
@@ -1241,8 +1371,63 @@ def _set_image(item: emby_models.MediaItem, kind: str, url: str) -> None:
         return
     if kind == "Backdrop":
         item.backdrop_path = local
+    elif kind == "Logo":
+        item.logo_path = local
+    elif kind == "Thumb":
+        item.thumb_path = local
     else:
         item.poster_path = local
+
+
+def apply_detail_artwork(
+    item: emby_models.MediaItem,
+    data: Optional[dict],
+    *,
+    upgrade_backdrop: bool = False,
+) -> list[str]:
+    """从 ``details``（含 ``images``）补齐条目的透明 Logo、中文横版 Thumb 与无字 Backdrop。
+
+    默认只填空缺；``upgrade_backdrop=True``（存量回填用）时，若 ``images.backdrops``
+    存在无字纯净背景且当前条目无用户本地自定义背景图，则将默认带字背景升级为无字背景。
+    返回实际改动的字段名列表。
+    """
+    if not isinstance(data, dict):
+        return []
+    base = image_base()
+    changed: list[str] = []
+
+    logo_rel = pick_logo_path(data)
+    if logo_rel and not (getattr(item, "logo_path", None) or getattr(item, "logo_image_url", None)):
+        _set_image(item, "Logo", f"{base}/w500{logo_rel}")
+        changed.append("logo_image_url")
+
+    thumb_rel = pick_thumb_path(data)
+    if thumb_rel and not (getattr(item, "thumb_path", None) or getattr(item, "thumb_image_url", None)):
+        _set_image(item, "Thumb", f"{base}/w780{thumb_rel}")
+        changed.append("thumb_image_url")
+
+    backdrop_rel = pick_textless_backdrop_path(data)
+    if backdrop_rel:
+        new_bd_url = f"{base}/w1280{backdrop_rel}"
+        cur_bd_local = getattr(item, "backdrop_path", None) or ""
+        cur_bd_url = getattr(item, "backdrop_image_url", None) or ""
+        if not (cur_bd_local or cur_bd_url):
+            _set_image(item, "Backdrop", new_bd_url)
+            changed.append("backdrop_image_url")
+        elif upgrade_backdrop and cur_bd_url != new_bd_url:
+            has_custom_local = bool(cur_bd_local and not image_store.is_cached_path(cur_bd_local))
+            has_textless_pool = any(
+                isinstance(b, dict)
+                and str(b.get("file_path") or "").strip() == backdrop_rel
+                and str(b.get("iso_639_1") or "").strip().lower() in ("", "null", "xx")
+                for b in (((data.get("images") or {}).get("backdrops")) or [])
+            )
+            if has_textless_pool and not has_custom_local:
+                item.backdrop_path = None
+                _set_image(item, "Backdrop", new_bd_url)
+                changed.append("backdrop_image_url")
+
+    return changed
 
 
 def extract_air_dates(data: dict) -> tuple[Optional[int], Optional[datetime]]:
@@ -2019,43 +2204,48 @@ class TmdbClient:
             })
         return out
 
-    def details(self, tmdb_id: str, kind: str) -> Optional[dict]:
-        """详情（补 IMDb Id 与多别名）——只在条目缺这两项时调用。
+    def details(self, tmdb_id: str, kind: str,
+                *, require_images: bool = False) -> Optional[dict]:
+        """详情（含 alternative_titles / external_ids / credits / images，单次请求拿全）。
 
-        两级缓存同 ``_search_raw``（L1 300 秒 → L2 磁盘 30 天，按 id 键；
-        语言同样是维度：首选语言变了就按新语言重新拉，不会串味）。
-
-        v2.51.0：``append_to_response`` 带上 ``credits``——演员表和详情**一次请求**
-        拿全，不新增请求、不新增限流器（走同一个令牌桶）。升级前缓存的老载荷没有
-        credits 键，读到时视为过期重拉一次（见 ``_has_credits``）。
+        两级缓存同 ``_search_raw``（L1 300 秒 → L2 磁盘 30 天，按 id 键）。
+        ``include_image_language=zh-CN,zh,cn,tw,hk,ja,en,null`` 同请求捎回多语种
+        透明 Logo、无字纯净 Backdrop 与带字横卡 Thumb，**零额外 TMDB 请求**。
+        ``require_images=True``（修图/存量回填用）时若命中升级前不含 ``images`` 键的
+        旧缓存则自动穿透重拉并覆盖缓存。
         """
+        def _ok(payload) -> bool:
+            return _has_credits(payload) and (not require_images or _has_images(payload))
+
         endpoint = "tv" if kind == "series" else "movie"
         lang = preferred_language()
         key = ("details", endpoint, str(tmdb_id), lang)
         cached = self._cache_get(key)
-        if cached is not _MISS and _has_credits(cached):
+        if cached is not _MISS and _ok(cached):
             return cached
         hit, data = tmdb_cache.load_details(endpoint, str(tmdb_id), lang)
-        if hit and _has_credits(data):
+        if hit and _ok(data):
             progress.note_stage("tmdb_disk_hit")
             self._cache_put(key, data)
             return data
         with tmdb_cache.single_flight(key):
             cached = self._cache_get(key)
-            if cached is not _MISS and _has_credits(cached):
+            if cached is not _MISS and _ok(cached):
                 return cached
             hit, data = tmdb_cache.load_details(endpoint, str(tmdb_id), lang)
-            if hit and _has_credits(data):
+            if hit and _ok(data):
                 progress.note_stage("tmdb_disk_hit")
                 self._cache_put(key, data)
                 return data
-            data = self._get(f"/{endpoint}/{tmdb_id}",
-                             {"language": lang,
-                              "append_to_response": "alternative_titles,external_ids,credits"})
+            data = self._get(
+                f"/{endpoint}/{tmdb_id}",
+                {
+                    "language": lang,
+                    "append_to_response": TMDB_DETAIL_APPEND,
+                    "include_image_language": TMDB_IMAGE_LANGUAGES,
+                },
+            )
             if isinstance(data, dict) and "id" in data:
-                # 真实详情载荷必带 id：错误体 {"success": False, ...} 不写 L2，
-                # 免得磁盘积错误体——读路径虽有 _has_credits 守卫不会误服，
-                # 但每次都会穿透重打网络。
                 tmdb_cache.save_details(endpoint, str(tmdb_id), data, lang, raw=data)
             self._cache_put(key, data)
             return data
@@ -2493,7 +2683,7 @@ class TmdbClient:
         """
         if not item.tmdb_id:
             return False
-        data = self.details(str(item.tmdb_id), kind)
+        data = self.details(str(item.tmdb_id), kind, require_images=True)
         # 修复路径同样是「先落盘再落字段」：写库阶段不发 HTTP（见 _set_image）
         image_store.prewarm(url for _kind, url in image_specs(data))
         return self.apply_images(item, data)

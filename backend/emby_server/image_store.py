@@ -859,7 +859,13 @@ def referenced_basenames(db) -> set:
     last_id = 0
     while True:
         rows = db.execute(
-            select(em.MediaItem.id, em.MediaItem.poster_path, em.MediaItem.backdrop_path)
+            select(
+                em.MediaItem.id,
+                em.MediaItem.poster_path,
+                em.MediaItem.backdrop_path,
+                em.MediaItem.logo_path,
+                em.MediaItem.thumb_path,
+            )
             .where(em.MediaItem.id > last_id)
             .order_by(em.MediaItem.id)
             .limit(5000)
@@ -867,11 +873,10 @@ def referenced_basenames(db) -> set:
         if not rows:
             break
         last_id = rows[-1][0]
-        for _id, poster, backdrop in rows:
-            for path in (poster, backdrop):
+        for _id, poster, backdrop, logo, thumb in rows:
+            for path in (poster, backdrop, logo, thumb):
                 if is_cached_path(path):
                     found.add(os.path.basename(path))
-
     last_id = 0
     while True:
         rows = db.execute(
@@ -1126,8 +1131,12 @@ def backfill_thumbnails(db, batch_size: int = _BACKFILL_BATCH,
     batch = max(1, min(batch_size, 2000))
     while result["processed"] < batch and time.time() < deadline:
         rows = db.execute(
-            select(em.MediaItem.id, em.MediaItem.poster_path,
-                   em.MediaItem.backdrop_path)
+            select(
+                em.MediaItem.id,
+                em.MediaItem.poster_path,
+                em.MediaItem.backdrop_path,
+                em.MediaItem.thumb_path,
+            )
             .where(em.MediaItem.id > last_id)
             .order_by(em.MediaItem.id)
             .limit(500)
@@ -1135,11 +1144,12 @@ def backfill_thumbnails(db, batch_size: int = _BACKFILL_BATCH,
         if not rows:
             result["done"] = True
             break
-        for _id, poster, backdrop in rows:
+        for _id, poster, backdrop, thumb in rows:
             last_id = _id
             result["processed"] += 1
             made = False
-            for path in (poster, backdrop):
+            # Logo 是透明 PNG，不进 RGB JPEG 缩略图管线（否则丢失 alpha 通道）
+            for path in (poster, backdrop, thumb):
                 if not path or not is_cached_path(path):
                     continue
                 if not os.path.isfile(path):
