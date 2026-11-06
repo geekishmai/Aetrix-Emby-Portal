@@ -2348,6 +2348,10 @@ def _enrich_fetch_tmdb_post(result: dict, item: Any, tmdb_ctx: dict,
             elif _gate_evidence is not None:
                 _reason = _reject_reason_for_item(
                     _gate_evidence, kind, item)
+                if not _reason and isinstance(_gate_hit, dict) and _gate_hit.get("_latin_cjk_alias_query"):
+                    from backend.emby_server.tmdb import latin_alt_title_matches as _latin_alt_ok
+                    if not _latin_alt_ok(_gate_evidence, str(_gate_hit["_latin_cjk_alias_query"])):
+                        _reason = "latin_alias_unverified"
                 if _reason:
                     logger.warning(
                         "绑定复核门拒绝 id=%s name=%r tmdb_id=%s reason=%s "

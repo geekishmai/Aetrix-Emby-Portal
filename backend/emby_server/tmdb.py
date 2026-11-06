@@ -332,15 +332,16 @@ def _retry_after_seconds(resp) -> Optional[float]:
 
 # 发行/压制/碟片/字幕类标签：只出现在文件名里，不属于标题
 _CASE_SENSITIVE_QUERY_GROUP_RE = re.compile(
-    r"(?:\b[A-Za-z0-9_]+@[A-Za-z0-9_]+\b|\bbeAst\b)"
+    r"(?:(?<![A-Za-z0-9])[A-Za-z0-9_]*@[A-Za-z0-9_]+\b|\bbeAst\b)"
 )
 _QUERY_JUNK_RE = re.compile(r"""(?ix)
-      \b(dual|ddp?[.\s]?\d[.\s]?\d|dd[.\s]?\d[.\s]?\d|dts(?:[-\s]?hd(?:[.\s]?ma|[.\s]?hra?)?)?(?:[.\s]?\d[.\s]?\d)?|dtshd(?:ma)?(?:[.\s]?\d[.\s]?\d)?|hdma(?:[.\s]?\d[.\s]?\d)?|hd\s+ma(?:\s+\d[\s.]\d)?|atmos|truehd(?:[.\s]?\d[.\s]?\d)?|(?:eac3|ac3|aac|flac)(?:[.\s]?\d[.\s]?\d)?|(?:[2-9]|multi|dual|2ual)audios?)\b
-    | \b([hx]?\s?264|[hx]?\s?265|hevc|avc|bdc|bluray|blu-ray|web-?dl|webrip|hdtv|dvdrip|bdrip|bdmv|remux|sdr|pgs)\b
+      \b(dual|daudio|triaudio|quadraudio|ddp?[.\s]?\d[.\s]?\d|dd[.\s]?\d[.\s]?\d|dts(?:[-\s]?hd(?:[.\s]?ma|[.\s]?hra?)?)?(?:[.\s]*\d[.\s]\d)?|dtshd(?:ma|hr)?(?:[.\s]*\d[.\s]\d)?|hdma(?:[.\s]*\d[.\s]\d)?|hd\s+ma(?:\s*\d[\s.]\d)?|hd\s+hr(?:\s*\d[\s.]\d)?|(?:ma|hr)\s*[1-9][.\s][01]|atmos|truehd(?:[.\s]*\d[.\s]\d)?|(?:eac3|ac3|aac|flac)(?:[.\s]?\d[.\s]\d)?|(?:[2-9]|multi|dual|2ual)audios?)\b
+    | \b([hx]?\s?264|[hx]?\s?265|hevc|avc|av1|dovi|ultrahd|bdc|bluray|blu-ray|web-?dl|webrip|hdtv|dvdrip|bdrip|bdmv|remux|sdr|pgs)\b
     | \b(1080[ip]|720p|480p|2160p|4k|8k|(?:8|10|12)bit)\b
-    | \b(s\d{1,2}e\d{1,3}|e\d{1,3}|ep\d{1,3}|d[12]|disc\s?\d|cd[12])\b
+    | \b(s\d{1,2}e\d{1,3}|e\d{1,3}|ep\d{1,3}|d[12]|disc\s?\d|cd[12]|mkv1|baiduyun)\b
     | (原盘|中字|简繁\w{0,3}|繁中|简中|粤语|国语|双语|高码率|重制版|蓝光|特效|花絮|熟肉|生肉)
-    | \b(2d3d|ttg|ddp|adweb|minihd|mnhd|beitai|chdweb|chdbits|tagweb|taghd|momoweb|momohd|ctrlweb|ctrlhd|enthd|bathd|homeweb|homehd|hdbweb|frds)\b
+    | \b(2d3d|ttg|ddp|adweb|minihd|mnhd|beitai|chdweb|chdbits|tagweb|taghd|momoweb|momohd|ctrlweb|ctrlhd|enthd|bathd|homeweb|homehd|hdbweb|frds|ourtv|harestv|hdsweb|hdstv|hhweb|mweb|gamehd)\b
+    | \b(special\s+edition|extended\s+edition|extended\s+harder\s+cut|extened\s+cut|extended\s+cut|directors?\s+cut|theatrical\s+cut|theatrical\s+edition|unrated\s+cut|unrated\s+edition|uncut\s+edition)\b
     | (?<=[\s\-_\[\(（【])(?:ma|hd|hk|tw|us|gb)(?=[\s\-_\)\)）】]|$)
 """)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ffー]+")
@@ -366,8 +367,11 @@ _YEAR_TAIL_RE = re.compile(
     re.IGNORECASE,
 )
 _REGION_TAIL_RE = re.compile(
-    r"\s+[\[\(（【]?\s*(?:hktv|hk|tw|us|gb|kr|jp|cn|gl|cee|dc|alt|chd|xiaomi|"
-    r"2d3d|3d|avc|hevc|ma|hd|sdr|pgs|ttg|adweb|minihd|beitai|chdweb|"
+    r"\s+[\[\(（【]?\s*(?:hktv|hk|tw|us|gb|gbr|ita|eur|kr|jp|cn|gl|cee|dc|alt|chd|xiaomi|sparks|rarbg|fgt|"
+    r"2d3d|3d|avc|hevc|av1|dovi|ultrahd|ma|hd|sdr|pgs|ttg|adweb|minihd|mnhd|beitai|chdweb|chdbits|"
+    r"tagweb|taghd|momoweb|momohd|ctrlweb|ctrlhd|enthd|bathd|homeweb|homehd|hdbweb|frds|"
+    r"ourtv|harestv|hdsweb|hdstv|hhweb|mweb|gamehd|"
+    r"uncut|complete|theatrical|unrated|remastered|mastered|extended|regrade|re[\s\-]grade|"
     r"1080p|2160p|4k|uhd|remux|web[\s\-]?dl|blu[\s\-]?ray)\s*[\]\)）】]?\s*$",
     re.IGNORECASE,
 )
@@ -770,6 +774,76 @@ def _cjk_alias_rank(query, variants, year, hit):
         return 0
 
 
+def latin_alt_title_matches(details: Optional[dict], query: str) -> bool:
+    """CS2-P1-2：核对 TMDB details 已捎回的 alternative_titles 是否确有与纯拉丁 query 归一化精确相等的拉丁别名。
+
+    - 零额外请求：`TmdbClient.details()` 单次请求已包含 `append_to_response=alternative_titles`（且带 L1/L2 缓存）；
+    - 张艺谋《英雄》(id=79) 的 `alternative_titles.titles` 含 `"Hero"` → `_norm_text("Hero") == "hero"` 放行；
+    - 外语片带未知尾巴或同年偶然撞上中日韩原产片时，`alternative_titles` 无该拉丁名 → 拒绝（落回 NFO 兜底）。
+    """
+    if not isinstance(details, dict):
+        return False
+    if not query or _CJK_RE.search(query):
+        return False
+    nq = _norm_text(query)
+    if len(nq) < 3 or not re.search(r"[a-z]", nq):
+        return False
+
+    raw_titles: list[str] = []
+    for k in ("title", "name", "original_title", "original_name"):
+        v = details.get(k)
+        if isinstance(v, str) and v.strip():
+            raw_titles.append(v)
+    alt = details.get("alternative_titles")
+    if isinstance(alt, dict):
+        for bucket in ("titles", "results"):
+            for entry in alt.get(bucket) or []:
+                if isinstance(entry, dict):
+                    t = entry.get("title")
+                    if isinstance(t, str) and t.strip():
+                        raw_titles.append(t)
+
+    for cand in raw_titles:
+        if _CJK_RE.search(cand) or not re.search(r"[A-Za-z]", cand):
+            continue
+        if _norm_text(cand) == nq:
+            return True
+    return False
+
+
+def _latin_to_cjk_alias_rank(query, names, year, hit):
+    """Tier 1.2 对称初筛：纯拉丁查询 + 年份硬相等 + 中日韩原语种无拉丁主标题。
+
+    注意（CS2-P1-2）：初筛入围仅允许进入详情核验，**必须**经 `latin_alt_title_matches(details, query)`
+    确认 `details.alternative_titles` 存在精确相等的拉丁别名后才可采纳；若 `hit` 本身已携带
+    `alternative_titles` 字段则当场核验，否则由 `TmdbClient.search()` 与 `enrich_worker` 复核门用
+    缓存 `details` 核验，未通过一律拦截。
+    """
+    if not year:
+        return None
+    hy = (hit.get("first_air_date") or hit.get("release_date") or "")[:4]
+    if not hy or hy != str(year):
+        return None
+    if _CJK_RE.search(query or ""):
+        return None
+    nq = _norm_text(query)
+    if len(nq) < 3 or not re.search(r"[a-z]", nq):
+        return None
+    cjk_native = (
+        (hit.get("original_language") or "") in ("zh", "cn", "yue", "ja", "ko")
+        or any(c in ("CN", "TW", "HK", "JP", "KR") for c in (hit.get("origin_country") or []))
+    )
+    if not cjk_native:
+        return None
+    if any(re.search(r"[a-z]", n) for n in names):
+        return None
+    if isinstance(hit.get("alternative_titles"), dict):
+        if not latin_alt_title_matches(hit, query):
+            return None
+    try:
+        return int(hit.get("popularity") or 0)
+    except (TypeError, ValueError):
+        return 0
 def _confirm_year(score, year, hit):
     """年份二次确认：用解析出的年份（调用方传入），而不是从名字里正则挖。
 
@@ -819,6 +893,9 @@ def _hit_score(raw_name, query, hit, fuzzy_ok=True, year=None):
         return None
     latin_ok = all(any(w in hn for hn in names) for w in _latin_words(query))
     if not latin_ok:
+        t12_en = _latin_to_cjk_alias_rank(query, names, year, hit)
+        if t12_en is not None:
+            return _confirm_year((1.2, t12_en), year, hit)
         return None
     raw_norm = _norm_text(raw_name)
     best = None
@@ -2084,7 +2161,7 @@ class TmdbClient:
         # 外层：语言 fallback 链；内层：查询候选
         # 首选语言先走完所有候选，无命中才换语言（省请求）
         for lang in language_fallback_chain():
-            best = None  # (tier, rank, hit)：跨候选、跨结果取全局最可信
+            best = None  # (tier, rank, hit, latin_cjk_query)
             transient: Optional[Exception] = None
             saw_results = False
             for query, fuzzy_ok in _cands(name, year):
@@ -2109,6 +2186,14 @@ class TmdbClient:
                     saw_results = True
                 for hit in results[:10]:
                     sc = _hit_score(name, query, hit, fuzzy_ok, year=year)
+                    is_latin_cjk = False
+                    if (
+                        sc is not None
+                        and isinstance(sc, tuple)
+                        and sc[0] == 1.2
+                        and not _CJK_RE.search(query or "")
+                    ):
+                        is_latin_cjk = True
                     if sc is None and loose_query and query == loose_query:
                         # Q3 宽松精确：仅当宽松归一化后与 hit 任一标题完全相等
                         # 才接受为 Tier 2 命中；绝不接受模糊（保持"绝不写错"）。
@@ -2122,8 +2207,32 @@ class TmdbClient:
                         ):
                             sc = _confirm_year(
                                 (2, len(loose_query)), year, hit)
+                    if is_latin_cjk:
+                        # CS2-P1-2：仅靠同年中日韩条目初筛入围时，用带 L1/L2 缓存的 details.alternative_titles
+                        # 核对确有与 query 精确相等的拉丁别名才放行（命中后 enrich_worker 复读直接走 L1 缓存，0 额外请求；
+                        # 偶然撞词当场剔除，继续尝试后续候选/语言或回落 NFO 兜底）。
+                        hit_id = str(hit.get("id") or "").strip()
+                        if not hit_id:
+                            continue
+                        if isinstance(hit.get("alternative_titles"), dict):
+                            det = hit
+                        else:
+                            try:
+                                det = self.details(hit_id, kind)
+                            except TmdbTransientError as exc:
+                                transient = transient or exc
+                                continue
+                            except Exception:  # noqa: BLE001
+                                det = None
+                        if not latin_alt_title_matches(det, query):
+                            continue
                     if sc and (best is None or sc > best[:2]):
-                        best = (sc[0], sc[1], hit)
+                        tagged_hit = (
+                            {**hit, "_latin_cjk_alias_query": query}
+                            if is_latin_cjk
+                            else hit
+                        )
+                        best = (sc[0], sc[1], tagged_hit)
             if best:
                 return best[2]
             if year and not saw_results:

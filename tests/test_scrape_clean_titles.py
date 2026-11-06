@@ -184,8 +184,8 @@ class TestRulePackV2:
     这里只锁定 v2 行为在 v3 下不回退。"""
 
     def test_pack_version_is_v2(self):
-        assert rp.PACK_VERSION == "v4"
-        assert rp.default_pack().version == "v4"
+        assert rp.PACK_VERSION == "v5"
+        assert rp.default_pack().version == "v5"
         # v2 行为在现行版下保持：adweb/声道词仍被剥
         pack = rp.RulePack()
         assert pack.strip("Film ADWeb 1080p").strip() == "Film"
