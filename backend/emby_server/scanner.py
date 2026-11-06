@@ -316,6 +316,27 @@ EP_RANGE_RES = [
 # 仅剧集库：绝对集数（动漫常见 `Frieren - 28`）。
 # 要求分隔符 + 锚定末尾；年份段位 (1900-2099) 让位给年份解析；不与已匹配段重叠。
 _ABS_EP_RE = re.compile(r"[\s\-_.](\d{1,4})\s*$")
+# 仅剧集库：按播出日期命名的综艺/日播节目单集（如 `快乐大本营.Happy.Camp.20190105.1080p...mp4`
+# 或 `2019.01.05` / `2019-01-05`）。解析为 season=YYYY（父目录显式季号优先）、episode=MMDD。
+_TV_DATE_EP_RE = re.compile(
+    r"(?<!\d)((?:19|20)\d{2})(?:[.\-_](0[1-9]|1[0-2])[.\-_](0[1-9]|[12]\d|3[01])|(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01]))(?!\d)"
+)
+# 多部曲电影合集目录判定（如 `终结者四部曲...1984-2009...-beAst`、`[黑客帝国1-3合集]...1999-2003...`）：
+# 电影在此类目录内只认单文件自身年份与同名 `<stem>.nfo`，禁止回退取目录年份区间或共享 `movie.nfo`。
+_MULTI_MOVIE_COLLECTION_DIR_RE = re.compile(
+    r"(?:19|20)\d{2}\s*[-~–—]\s*(?:19|20)\d{2}"
+    r"|合集|[二三四五六七八九十2-9]\s*部曲"
+    r"|\[\s*[^\]]*\d+\s*[-~]\s*\d+[^\]]*\]"
+    r"|\b(?:trilogy|quadrilogy|tetralogy|pentalogy|anthology|complete\s+collection)\b",
+    re.IGNORECASE,
+)
+
+
+def is_multi_movie_collection_dir(folder_name: str) -> bool:
+    """判定目录名是否为包含多部电影/续集的合集目录。"""
+    if not folder_name:
+        return False
+    return bool(_MULTI_MOVIE_COLLECTION_DIR_RE.search(folder_name))
 
 # 只有季号（季包 / 中文命名）: S09 / Season 9 / 第九季 / 第9季
 # 注意：裸 S09 只在剧集库里启用，否则 "S1m0ne" 这类片名会被误判成第 1 季。
@@ -373,7 +394,7 @@ def _overlaps(a0: int, a1: int, span) -> bool:
     return a0 < s1 and s0 < a1
 
 
-def _extract_year(stem: str, folder: str, exclude_spans=()) -> Optional[int]:
+def _extract_year(stem: str, folder: str, exclude_spans=(), allow_collection_folder: bool = True) -> Optional[int]:
     """从文件名 stem、目录名 folder 提取年份。
 
     旧 YEAR_RE 的两个 bug：
@@ -409,7 +430,7 @@ def _extract_year(stem: str, folder: str, exclude_spans=()) -> Optional[int]:
         return out
 
     cands = _cands(stem, exclude_spans)
-    if not cands:
+    if not cands and (allow_collection_folder or not is_multi_movie_collection_dir(folder)):
         cands = _cands(folder)
     if not cands:
         return None
@@ -792,7 +813,13 @@ _AUDIO_PREFIX_BEFORE_CHANNEL_RE = re.compile(
     re.IGNORECASE,
 )
 _CASE_SENSITIVE_GROUP_RE = re.compile(
-    r"(?:\b[A-Za-z0-9_]+@[A-Za-z0-9_]+\b|\bbeAst\b)"
+    r"(?:(?<![A-Za-z0-9])[A-Za-z0-9_]*@[A-Za-z0-9_]+\b|\bbeAst\b)"
+)
+# 压制文件名/目录名末尾以连字符挂载的短组名（如 `-ALT` / `-CHD` / `-Xiaomi` / `-OurTV(1)`）：
+# 在 CLEAN_RE 把 `-` 转空格前精准剥离，既消掉残留尾词，又绝不误伤正文中出现的 Alt / CHD。
+_HYPHEN_TAIL_GROUP_RE = re.compile(
+    r"-(?:ALT|CHD|Xiaomi|GBR|ITA|EUR|CEE|MNHD|FRDS|CTRLWEB|CTRLHD|MOMOWEB|MOMOHD|BATHD|OURTV|HARESTV|HDSWEB|GAMEHD|TAGWEB|TAGHD|CHDWEB|CHDBITS)(?:\(\d+\))?\s*$",
+    re.IGNORECASE,
 )
 
 _DUP_DASH_BEFORE_YEAR_RE = re.compile(
@@ -846,11 +873,12 @@ def clean_name(raw: str, pack=None) -> str:
 
     name = _VERSION_TOKEN_RE.sub(_protect_version_token, name)
     name = _CASE_SENSITIVE_GROUP_RE.sub(" ", name)
+    # 去掉 115 转存重名目录后缀 `(1)`（仅当紧跟压制组/参数末尾）与连字符挂载的短压制组 `-ALT`/`-CHD`
+    name = _HYPHEN_TAIL_GROUP_RE.sub("", name)
     # 去掉文件名主干末尾的 `[N]` 重复下载标记（如 `... - 1080p [2]`）：下载器
     # 给同名第二个文件打的记号，不是片名。必须在 CLEAN_RE 剥掉 `[]` 之前
     # 整段删除，否则只剩孤立的 `N` 留在片名里（生产实证：「第四公民 2」）。
     name = re.sub(r"\s*\[\s*\d{1,2}\s*\]\s*$", "", name)
-    # 去掉 `-N` 重复标记（多版本/重复下载，非片名），两种位置：
     # ① 字符串末尾（`WEB-DL-3`，既有行为）；② 紧跟年份段之前
     # （`月球叛军2：烙印之人-2 (2024)` 的 `-2`，生产实证曾入库成
     # 「月球叛军2：烙印之人 2」）。
@@ -952,7 +980,7 @@ def parse_media_filename(path: str, library_type: str, pack=None) -> dict:
     ep_matched_in_folder = False
     match_span: Optional[tuple[int, int]] = None
     abs_ep_span: Optional[tuple[int, int]] = None
-
+    date_ep_span: Optional[tuple[int, int]] = None
     def _to_num(g: str) -> Optional[int]:
         g = (g or "").strip()
         if not g:
@@ -1023,6 +1051,26 @@ def parse_media_filename(path: str, library_type: str, pack=None) -> dict:
             match_span = (m.start(), m.end())
             break
 
+    # 2a) 日期型单集（仅剧集库）：综艺/日播节目常见 `快乐大本营.Happy.Camp.20190105.1080p...mp4`
+    # 若不识别会因 season=None 在 tvshows 库被拆成 52 个独立伪 series（生产库 6 实证）。
+    if episode is None and is_tv and not ep_matched_in_folder:
+        for dm in _TV_DATE_EP_RE.finditer(stem):
+            if _overlaps(dm.start(), dm.end(), match_span):
+                continue
+            yyyy = int(dm.group(1))
+            mm = int(dm.group(2) or dm.group(4))
+            dd = int(dm.group(3) or dm.group(5))
+            try:
+                datetime(yyyy, mm, dd)
+            except ValueError:
+                continue
+            if 1950 <= yyyy <= datetime.now().year + 2:
+                if season is None:
+                    season = yyyy
+                episode = mm * 100 + dd
+                date_ep_span = (dm.start(), dm.end())
+                break
+
     # 2b) 绝对集数（仅剧集库）：动漫 `Frieren - 28` 这类无 E 标记的写法。
     # 必须在季号匹配之后：`The 100 Season 1` 的 "1" 是季号，不能被当成集号
     #（用 _overlaps 排除已匹配段）。
@@ -1036,8 +1084,6 @@ def parse_media_filename(path: str, library_type: str, pack=None) -> dict:
                     season = 1
                 episode = n
                 abs_ep_span = (m.start(), m.end())
-
-    # A3（缺集普查 2026-10-19）：季号兜底。文件名没给显式季号（裸 E05 /
     # 绝对集数只给了默认的 season=1）时，看父目录名有没有确定的季号。
     # 只认既有可解析形态（Season 1 / S01 / 第1季…），目录名含糊（无值或
     # 多个不同值）时不动——宁漏勿错标。显式季号永远优先，不会被覆盖。
@@ -1056,12 +1102,14 @@ def parse_media_filename(path: str, library_type: str, pack=None) -> dict:
     # 坐标；此时必须从 stem 挖，否则会把 stem 坐标的 span 切在 folder 文本
     # 上（实证："Season 3/Frieren - 28" 的名被挖成 "Season 3" 而不是
     # "Frieren"，单集展示名变成 "Season 3 S03E28"）。
-    target = folder if (matched_in_folder and abs_ep_span is None) else stem
+    target = folder if (matched_in_folder and abs_ep_span is None and date_ep_span is None) else stem
     dig_spans = []
     if match_span and not matched_in_folder:
         dig_spans.append(match_span)
     if abs_ep_span:
         dig_spans.append(abs_ep_span)
+    if date_ep_span:
+        dig_spans.append(date_ep_span)
     raw_name = target
     for s0, s1 in sorted(dig_spans, reverse=True):
         raw_name = f"{raw_name[:s0]} {raw_name[s1:]}".strip()
@@ -1072,10 +1120,10 @@ def parse_media_filename(path: str, library_type: str, pack=None) -> dict:
     )
 
     # 年份：排除集号匹配段，避免 S01E2019 的 2019 被当成年份
-    #（_extract_year 内部已处理 stem→folder 回退；exclude 只作用于 stem 坐标）
+    #（电影在多部曲合集目录内只认单文件年份，禁止从合集目录名取年份区间）
     year_spans = [s for s in (match_span if not matched_in_folder else None,
-                             abs_ep_span) if s]
-    year = _extract_year(stem, folder, exclude_spans=year_spans)
+                             abs_ep_span, date_ep_span) if s]
+    year = _extract_year(stem, folder, exclude_spans=year_spans, allow_collection_folder=is_tv)
     if year:
         name_part = _strip_year(name_part, year)
     elif name_part:
@@ -3309,37 +3357,94 @@ _SEASON_DIR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 长剧 PT 分卷子目录（生产库 6 实证：`A.Chinese.Immortal.Story.part1.2014.Complete.4K.WEB-DL...-OurTV`、
+# `Negotiations.Sweetheart.part1..part5`、`New.Legend.of.Chu.Liu.Xiang.part1..part2`）：
+# 仅当目录名同时带年份或剧集压制特征时视为分卷目录，避免误伤正经英文剧名。
+_TV_PART_TOKEN_RE = re.compile(
+    r"(?:[.\s_\-]+)(?:part|pt|vol)\s*\.?\s*([1-9]\d?)(?=[.\s_\-(]|$)",
+    re.IGNORECASE,
+)
+_TV_RELEASE_HINT_RE = re.compile(
+    r"(?:\b(?:19|20)\d{2}\b|\b(?:complete|web[\s.\-]?dl|webrip|hdtv|bluray|1080p|2160p|720p|4k|[hx]\.?26[45]|hevc|ourtv|hdsweb|hhweb|adweb)\b)",
+    re.IGNORECASE,
+)
+_GENERIC_LIBRARY_DIR_NAMES = frozenset({
+    "", "/", "媒体库", "电视剧", "剧集", "国产剧", "欧美剧", "日韩剧", "港台剧",
+    "综艺", "动漫", "番剧", "纪录片", "tv", "tvshows", "series", "shows",
+})
+_SERIES_DIR_META_NOISE_RE = re.compile(
+    r"(?:(?:19|20)\d{2}\s*年?合集|全\s*\d+\s*[集期部话](?:\s*(?:导演|主演)[：:\s][^.]+)?)",
+    re.IGNORECASE,
+)
+
+
+def _latin_key_tokens(text: str) -> set[str]:
+    stop = {
+        "complete", "web", "dl", "webrip", "hdtv", "bluray", "1080p", "2160p", "720p",
+        "4k", "h264", "h265", "x264", "x265", "hevc", "aac", "ourtv", "hdsweb", "adweb",
+        "the", "and", "of", "in", "to", "a",
+    }
+    words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", text or "")]
+    return {w for w in words if w not in stop and not re.fullmatch(r"(?:part|pt|vol)\d*", w)}
+
+
+def _canonical_tv_series_dir(dir_path: str, is_posix: bool = True) -> tuple[str, str]:
+    """统一归一剧集目录路径与目录显示名（同时服务 _series_guid_of 与 _series_name_of）。
+
+    1. Season 01 / S01 / 第1季 → 上溯父目录；
+    2. PT 分卷目录（如 `xxx.part1.2014.Complete...`）：
+       - 若父目录非媒体库根目录且与当前分卷共享英文词干或同片名（如 `剑侠.A.Chinese.Immortal.Story.2014...`），
+         直接上溯到父目录（既合并 part1..part6，又拿回父目录的中文剧名）；
+       - 否则（平铺在库根下的 `Negotiations.Sweetheart.part1..5`，或误套在其它剧目录里的
+         `传奇大掌柜.../New.Legend.of.Chu.Liu.Xiang.part1..2`），在原层级剥除 `.partN` 生成规范虚拟目录键，
+         使同一部剧的各分卷合并为一个 series，且绝不误并进无关父剧。
+    """
+    sep_mod = posixpath if is_posix else os.path
+    d = (dir_path or ("/" if is_posix else "")).rstrip("/\\") or ("/" if is_posix else "")
+    leaf = sep_mod.basename(d)
+    parent_dir = sep_mod.dirname(d) or ("/" if is_posix else "")
+    parent_name = sep_mod.basename(parent_dir)
+
+    if _SEASON_DIR_RE.match(leaf):
+        target_dir = parent_dir if parent_dir else d
+        target_name = parent_name or leaf
+        return target_dir, target_name
+
+    if _TV_PART_TOKEN_RE.search(leaf) and _TV_RELEASE_HINT_RE.search(leaf):
+        stripped_leaf = _TV_PART_TOKEN_RE.sub(".", leaf)
+        stripped_leaf = re.sub(r"\.{2,}", ".", stripped_leaf).strip(" ._-")
+        # 剥掉外层目录可能带的 115 重复后缀 `(1)` 再比对词干
+        clean_parent = re.sub(r"\(\d+\)\s*$", "", parent_name).strip()
+        if clean_parent.lower() not in _GENERIC_LIBRARY_DIR_NAMES:
+            leaf_tokens = _latin_key_tokens(stripped_leaf)
+            parent_tokens = _latin_key_tokens(clean_parent)
+            shared = leaf_tokens & parent_tokens
+            if (len(shared) >= 2) or (len(shared) == 1 and len(next(iter(shared))) >= 5):
+                return parent_dir, clean_parent
+        canon_dir = sep_mod.join(parent_dir, stripped_leaf) if parent_dir else stripped_leaf
+        return canon_dir, stripped_leaf
+
+    return d, re.sub(r"\([1-9]\)\s*$", "", leaf).strip() or leaf
+
 
 def _series_name_of(scan_file: "ScanFile", parsed: dict, pack=None) -> str:
-    """从剧集目录推导 series 名，绝不从 episode 文件名猜剧名。
-
-    远端路径通常是 ``剧名/Season 1/file S01E01.mkv``；本机路径同理。
-    没有 Season 目录时取文件所在目录。目录名里的年份、发布标签由同一套
-    ``_tidy_name`` 清洗；若目录名异常为空，才退回解析出的文件名。
-    """
+    """从剧集目录推导 series 名，绝不从 episode 文件名猜剧名。"""
     if scan_file.local_dir:
-        directory = scan_file.local_dir.rstrip("/\\")
-        parent = os.path.basename(os.path.dirname(directory))
-        leaf = os.path.basename(directory)
-        directory_name = parent if _SEASON_DIR_RE.match(leaf) else leaf
+        _canon_dir, directory_name = _canonical_tv_series_dir(scan_file.local_dir, is_posix=False)
     else:
-        directory = (scan_file.dir_rel or "/").rstrip("/") or "/"
-        leaf = posixpath.basename(directory)
-        parent = posixpath.basename(posixpath.dirname(directory))
-        directory_name = parent if _SEASON_DIR_RE.match(leaf) else leaf
+        _canon_dir, directory_name = _canonical_tv_series_dir(scan_file.dir_rel or "/", is_posix=True)
 
+    directory_name = _SERIES_DIR_META_NOISE_RE.sub(" ", directory_name)
     name = _tidy_name(directory_name, pack=pack)
     year = parsed.get("year")
     if year and str(year) in name:
         name = _strip_year(name, year)
     elif not year:
-        # 目录名是剧名的权威来源，年份常常只写在目录名尾巴上
-        # （「泪之女王 (2024)/Season 1/…」）：集文件名里解析不到年份时，
-        # 从这里剥出来回填 parsed["year"]（建 series 行时写进年份栏），
-        # 名字里不再带年份（2026-10-20 用户亲令：名字后面不要带年份）。
         name, trailing_year = _split_trailing_year(name)
         if trailing_year is not None:
             parsed["year"] = trailing_year
+    # 若整理后仍为中英双语拼接（如 `快乐大本营 Happy Camp`、`剑侠 A Chinese Immortal Story`），保留给 TMDB 多候选，
+    # 或若为空则回退 parsed["name"]
     return (
         name
         or _tidy_name(parsed.get("name") or "", pack=pack)
@@ -3348,32 +3453,19 @@ def _series_name_of(scan_file: "ScanFile", parsed: dict, pack=None) -> str:
 
 
 def _series_guid_of(scan_file: "ScanFile") -> str:
-    """剧集条目的 guid（由剧集目录推导）
-
-    - 本机：文件目录的父目录（Season 子目录结构；与旧实现一致）
-    - 远端：dir_rel 本身是季目录（Season 01 / S01 / 第1季）时取其父目录，
-      否则取 dir_rel 本身——与本机分支同口径。旧实现对远端直接取文件目录，
-      会把同一部剧的各季拆成多个剧集条目。
-    """
+    """剧集条目的 guid（由规范化后的剧集目录推导，自动合并 Season 子目录与 part1..partN 分卷目录）"""
     dirpath = scan_file.local_dir
     if dirpath:
-        series_dir = os.path.dirname(dirpath.rstrip("/")) if dirpath else ""
-        return item_guid(series_dir or (os.path.dirname(scan_file.stored_path) or scan_file.stored_path))
-    # BYOS P3：绑定扫描没有挂载 id，远端分支的 mount_path(None, d) 会产
-    # 出 ``mount://None/...``——同剧在不同绑定下会撞同一个剧集 guid、跨
-    # 用户串剧。绑定路径自带绑定 id，直接按入库路径的目录段推导剧集
-    # guid（季目录逻辑与远端分支同口径），分账天然成立。
+        canon_dir, _ = _canonical_tv_series_dir(dirpath, is_posix=False)
+        return item_guid(canon_dir or (os.path.dirname(scan_file.stored_path) or scan_file.stored_path))
     stored = getattr(scan_file, "stored_path", "") or ""
     if stored.startswith("byos://"):
-        d = os.path.dirname(stored.rstrip("/")) or "/"
-        if _SEASON_DIR_RE.match(os.path.basename(d)):
-            d = posixpath.dirname(d) or "/"
-        return item_guid(d)
+        d = posixpath.dirname(stored.rstrip("/")) or "/"
+        canon_dir, _ = _canonical_tv_series_dir(d, is_posix=True)
+        return item_guid(canon_dir)
     d = (scan_file.dir_rel or "/").rstrip("/") or "/"
-    if _SEASON_DIR_RE.match(os.path.basename(d)):
-        d = posixpath.dirname(d) or "/"
-    return item_guid(mount_lib.mount_path(scan_file.mount_id, d))
-
+    canon_dir, _ = _canonical_tv_series_dir(d, is_posix=True)
+    return item_guid(mount_lib.mount_path(scan_file.mount_id, canon_dir))
 
 def _library_exists(db: Session, lib_id: int) -> bool:
     """媒体库是否还在（扫描可能跑很久，期间库可能被删）"""
@@ -4016,7 +4108,15 @@ def _find_nfos(ctx: "_ScanContext", scan_file: "ScanFile", kind: str) -> tuple:
 
     nfo_data = series_nfo_data = season_nfo_data = None
     if kind in ("movie", "episode"):
-        for cand in _nfo_candidates(kind, scan_file.name):
+        cands = _nfo_candidates(kind, scan_file.name)
+        if kind == "movie":
+            # 多部曲合集目录（同目录含 >=2 个视频文件，或目录名带年份区间/合集标记）：
+            # 严禁回退读取共享的通用 `movie.nfo`，否则会把整包续集全部绑向同一部电影触发 year_mismatch。
+            folder_leaf = os.path.basename(dirpath.rstrip("/\\"))
+            video_cnt = sum(1 for fn in names if os.path.splitext(fn)[1].lower() in VIDEO_EXTS)
+            if video_cnt >= 2 or is_multi_movie_collection_dir(folder_leaf):
+                cands = [c for c in cands if c.lower() != "movie.nfo"]
+        for cand in cands:
             if cand in names:
                 nfo_data = read_nfo(dirpath, cand, entries_by_name.get(cand))
                 if nfo_data:
