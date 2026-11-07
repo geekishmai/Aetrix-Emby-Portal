@@ -17,7 +17,7 @@
 import type { AxiosRequestConfig } from 'axios'
 import { shallowRef } from 'vue'
 import api from '@/api'
-import { embyApiKeyRef, getEmbyApiKey, setEmbyApiKey, withImageKey } from '@/api/imageKey'
+import { embyApiKeyRef, getEmbyApiKey, setEmbyApiKey, shareAccountCardFlight, withImageKey } from '@/api/imageKey'
 
 export interface EmbyViewPermissionInfo {
   granted: boolean
@@ -149,12 +149,13 @@ interface ServerCardBootstrap {
 function fetchEmbyBase(): Promise<string> {
   if (!embyBasePromise) {
     // PA-054：同 getAccountCard，把手里那把图片 key 带回去复用（见 imageKey）。
-    const currentKey = getEmbyApiKey()
-    embyBasePromise = api
-      .get<never, ServerCardBootstrap>(
+    embyBasePromise = shareAccountCardFlight(() => {
+      const currentKey = getEmbyApiKey()
+      return api.get<never, ServerCardBootstrap>(
         '/api/user/emby/server',
         currentKey ? { headers: { 'X-Web-Image-Key': currentKey } } : undefined,
       )
+    })
       .then((card) => {
         const vp = card?.view_permission
         const nextKey = (card?.emby_api_key || '').trim()

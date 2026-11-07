@@ -3,7 +3,7 @@
     <div class="v4-page v4-account-page">
       <!-- 日志头：紧凑账号头（戳记行带网盘快捷入口；头像+用户名+身份徽章一行） -->
       <div class="v4-loghead">
-        <div v-if="providersEnabled" class="acct-stamp-row">
+        <div v-if="providersEnabled && hasProvider('drive')" class="acct-stamp-row">
           <a class="acct-drive-link" href="#my-drive" @click.prevent="goToMyDrive">去我的网盘绑定 →</a>
         </div>
         <div class="acct-head">
@@ -1277,8 +1277,8 @@ watch(providersLoaded, (loaded) => {
 }
 .acct-stamp-row .v4-stamp { margin-bottom: 0; }
 .acct-drive-link {
-  font-size: 12px;
-  color: var(--au-primary, #016a71);
+  font-size: 12.5px;
+  color: #c3f53c;
   text-decoration: none;
   padding: 6px 0;
   white-space: nowrap;
@@ -1286,30 +1286,33 @@ watch(providersLoaded, (loaded) => {
 .acct-head {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 14px;
 }
-.acct-avatar { margin-top: 1px; }
 .acct-avatar {
-  width: 38px;
-  height: 38px;
+  margin-top: 2px;
+  width: 42px;
+  height: 42px;
   flex: none;
-  border-radius: 50%;
-  background: var(--ink);
-  color: var(--paper, #f6f1e7);
+  border-radius: 2px;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  color: #c3f53c;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 800;
 }
 .acct-head-main { flex: 1; min-width: 0; }
 .acct-badge {
   flex: none;
   padding: 3px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--au-primary, #016a71);
-  color: var(--au-primary, #016a71);
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #1e1e1e;
+  color: #f2f2f2;
   font-size: 12px;
+  font-weight: 600;
   white-space: nowrap;
 }
 .acct-whitelist {
@@ -1320,23 +1323,24 @@ watch(providersLoaded, (loaded) => {
   flex-wrap: wrap;
 }
 .acct-whitelist-badge {
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--au-primary, #016a71);
-  color: var(--paper, #f6f1e7);
-  font-size: 12px;
-  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 2px;
+  background: #c3f53c;
+  color: #111111;
+  font-size: 11px;
+  font-weight: 800;
   white-space: nowrap;
 }
 .acct-whitelist-title {
   font-size: 13px;
-  font-weight: 600;
-  color: var(--ink);
+  font-weight: 700;
+  color: #f2f2f2;
 }
 .acct-whitelist-serial {
+  font-family: var(--dh-font-mono);
   font-size: 12px;
-  color: var(--au-primary, #016a71);
-  font-weight: 600;
+  color: #c3f53c;
+  font-weight: 700;
   letter-spacing: 0.04em;
 }
 .acct-title-row {
@@ -1477,10 +1481,10 @@ watch(providersLoaded, (loaded) => {
 }
 .lh-badge {
   flex-shrink: 0; font-size: 11px; line-height: 1;
-  padding: 4px 7px; border-radius: 999px; margin-top: 1px;
-  border: 1px solid var(--au-border, #e3e3e2); color: var(--ink2);
+  padding: 4px 7px; border-radius: 2px; margin-top: 1px;
+  border: 1px solid #2a2a2a; background: #1e1e1e; color: #9a9a9a;
 }
-.lh-badge.ok { color: var(--au-primary, #016a71); border-color: var(--au-primary, #016a71); }
+.lh-badge.ok { color: #f2f2f2; border-color: #3a3a3a; }
 .lh-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .lh-line1 { font-size: 13px; color: var(--ink); }
 .lh-line2 { font-size: 12px; color: var(--ink2); }
@@ -1599,16 +1603,16 @@ watch(providersLoaded, (loaded) => {
 }
 .acct-modal {
   width: 100%;
-  max-width: 340px;
+  max-width: 360px;
   margin: auto;
   max-height: calc(100% - 48px);
   max-height: calc(100dvh - 48px);
   overflow-y: auto;
-  padding: 20px;
-  background: var(--paper-card);
-  border: 1.5px solid var(--ink);
-  border-radius: 14px;
-  box-shadow: 4px 4px 0 rgba(42, 38, 32, 0.15);
+  padding: 22px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
+  box-shadow: none;
 }
 .acct-modal-title {
   margin: 0 0 14px;
@@ -1677,8 +1681,9 @@ watch(providersLoaded, (loaded) => {
 /* 发现页卡片展示：模式三段选择 + 每服显隐开关（只用 --paper-* token） */
 .mode-seg {
   display: flex;
-  border: 1.5px solid var(--paper-ink);
-  border-radius: 8px;
+  background: #111111;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
   overflow: hidden;
 }
 .mode-seg button {
@@ -1686,43 +1691,45 @@ watch(providersLoaded, (loaded) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 44px;
+  min-height: 40px;
   background: none;
   border: 0;
-  font-size: 12px;
-  color: var(--paper-ink);
+  font-size: 13px;
+  font-weight: 600;
+  color: #9a9a9a;
   cursor: pointer;
 }
 .mode-seg button + button {
-  border-left: 1px solid var(--paper-line);
+  border-left: 1px solid #2a2a2a;
 }
 .mode-seg button.is-on {
-  background: var(--paper-primary);
-  color: #2A2620;
+  background: #1e1e1e;
+  color: #f2f2f2;
+  box-shadow: inset 0 -2px 0 #c3f53c;
   font-weight: 700;
 }
 .mode-hint {
   margin: 8px 0 0;
-  font-size: 11px;
-  color: var(--paper-ink-2);
+  font-size: 12px;
+  color: #9a9a9a;
 }
 .srv-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 0;
+  padding: 11px 0;
 }
 .srv-row + .srv-row {
-  border-top: 1px dashed var(--paper-line);
+  border-top: 1px solid #242424;
 }
 .srv-name {
   font-size: 14px;
   font-weight: 700;
-  color: var(--paper-ink);
+  color: #f2f2f2;
 }
 .srv-tag {
-  font-size: 11px;
-  color: var(--paper-ink-2);
+  font-size: 12px;
+  color: #9a9a9a;
 }
 .srv-switch {
   position: relative;
@@ -1730,7 +1737,7 @@ watch(providersLoaded, (loaded) => {
   width: 48px;
   height: 44px;
   padding: 0;
-  border-radius: 999px;
+  border-radius: 2px;
   border: 0;
   background: none;
   cursor: pointer;
@@ -1742,28 +1749,28 @@ watch(providersLoaded, (loaded) => {
   top: 12px;
   width: 36px;
   height: 20px;
-  border-radius: 999px;
-  border: 1.5px solid var(--paper-ink);
-  background: var(--paper-card);
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #111111;
 }
 .srv-switch.is-on::before {
-  background: var(--paper-primary);
+  background: #c3f53c;
+  border-color: #c3f53c;
 }
 .srv-switch::after {
   content: '';
   position: absolute;
-  top: 14px;
-  left: 8px;
+  top: 15px;
+  left: 9px;
   width: 14px;
   height: 14px;
-  border-radius: 50%;
-  background: var(--paper-card);
-  border: 1.5px solid var(--paper-ink);
+  border-radius: 1px;
+  background: #9a9a9a;
 }
 .srv-switch.is-on::after {
   left: auto;
-  right: 8px;
-  background: var(--paper-ink);
+  right: 9px;
+  background: #111111;
 }
 .srv-empty {
   padding: 10px 0;

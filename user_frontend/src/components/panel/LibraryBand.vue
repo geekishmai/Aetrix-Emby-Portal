@@ -52,3 +52,52 @@ onMounted(() => {
   if (user.isLoggedIn) void panel.loadServer()
 })
 </script>
+
+<style scoped>
+.d3-band {
+  max-width: min(1720px, 96vw);
+  margin: 28px auto 0;
+  padding: 0 24px;
+  box-sizing: border-box;
+}
+.d3-sec-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.d3-sec-title {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: #f2f2f2;
+}
+.d3-sec-sub {
+  font-size: 13px;
+  color: #9a9a9a;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.d3-sec-link {
+  font-size: 13px;
+  font-weight: 600;
+  color: #9a9a9a;
+  text-decoration: none;
+}
+.d3-sec-link:hover {
+  color: #c3f53c;
+}
+.d3-lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+@media (max-width: 767px) {
+  .d3-band {
+    max-width: 100%;
+    padding: 0 16px;
+    margin-top: 22px;
+  }
+}
+</style>

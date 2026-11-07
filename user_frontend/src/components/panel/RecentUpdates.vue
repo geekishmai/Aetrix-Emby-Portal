@@ -45,11 +45,11 @@ function cleanTitle(raw?: string | null): string {
 <style scoped>
 .d3-recent-row {
   display: flex; justify-content: space-between; align-items: baseline;
-  gap: 12px; padding: 8px 0; border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  gap: 12px; padding: 9px 0; border-bottom: 1px solid #242424;
 }
 .d3-recent-row:last-child { border-bottom: none; }
-.d3-recent-link { text-decoration: none; color: #27251e; font-size: 14px; }
-.d3-recent-link:hover .d3-recent-t { color: #016a71; }
+.d3-recent-link { text-decoration: none; color: #f2f2f2; font-size: 14px; }
+.d3-recent-link:hover .d3-recent-t { color: #c3f53c; }
 .d3-recent-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.d3-recent-m { display: flex; gap: 8px; flex-shrink: 0; font-size: 13px; color: #524b42; }
+.d3-recent-m { display: flex; gap: 8px; flex-shrink: 0; font-size: 12.5px; color: #9a9a9a; font-variant-numeric: tabular-nums; }
 </style>

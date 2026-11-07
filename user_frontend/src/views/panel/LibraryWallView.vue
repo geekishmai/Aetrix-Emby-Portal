@@ -133,14 +133,21 @@
                 <span class="lib-ph-text">{{ titleOf(item) }}</span>
                 <span class="lib-ph-foot">暂无海报</span>
               </div>
-              <span v-if="ratingOf(item)" class="lib-badge-rating">★ {{ ratingOf(item) }}</span>
               <span v-if="resOf(item)" class="lib-badge-res">{{ resOf(item) }}</span>
+              <div class="lib-poster-hover" aria-hidden="true">
+                <div class="lib-hover-meta">
+                  <span>{{ item.Type === 'Series' ? '剧集' : '电影' }}</span>
+                  <span v-if="item.ProductionYear">{{ item.ProductionYear }}</span>
+                  <span v-if="ratingOf(item)" class="lib-hover-score">★ {{ ratingOf(item) }}</span>
+                </div>
+                <div class="lib-hover-title">{{ titleOf(item) }}</div>
+              </div>
             </div>
             <div class="lib-card-title" :title="titleOf(item)">{{ titleOf(item) }}</div>
             <div class="lib-card-meta">
               <span>{{ item.Type === 'Series' ? '剧集' : '电影' }}</span>
               <span v-if="item.ProductionYear">· {{ item.ProductionYear }}</span>
-              <span v-if="item.Genres?.length">· {{ item.Genres[0] }}</span>
+              <span v-if="ratingOf(item)">· ★ {{ ratingOf(item) }}</span>
             </div>
           </RouterLink>
         </div>
@@ -383,20 +390,21 @@ onUnmounted(() => {
 
 <style scoped>
 .lib-wall {
-  padding: 24px 24px 64px;
+  padding: 28px 24px 64px;
 }
 
 .lib-head {
-  background: #fdfbfa;
-  border: 1px solid #d1d1cd;
-  border-radius: 16px;
-  padding: 20px 22px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #222222;
+  border-radius: 0;
+  padding: 0 0 18px;
   margin-bottom: 22px;
 }
 
 .lib-head-top {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 20px;
   flex-wrap: wrap;
@@ -404,16 +412,17 @@ onUnmounted(() => {
 
 .lib-title {
   margin: 0;
-  font-size: 24px;
-  font-weight: 500;
-  color: #27251e;
-  letter-spacing: 0;
+  font-size: clamp(26px, 2.4vw, 34px);
+  font-weight: 800;
+  color: #f2f2f2;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
 }
 
 .lib-sub {
   margin: 6px 0 0;
   font-size: 14px;
-  color: #524b42;
+  color: #9a9a9a;
   line-height: 1.5;
 }
 
@@ -425,14 +434,14 @@ onUnmounted(() => {
   position: relative;
   display: flex;
   align-items: center;
-  width: min(340px, 100%);
+  width: min(360px, 100%);
   flex-shrink: 0;
 }
 
 .lib-search-ic {
   position: absolute;
   left: 13px;
-  color: #524b42;
+  color: #9a9a9a;
   pointer-events: none;
 }
 
@@ -440,17 +449,22 @@ onUnmounted(() => {
   width: 100%;
   height: 42px;
   padding: 0 36px 0 38px;
-  border-radius: 12px;
-  border: 1px solid #d1d1cd;
-  background: #faf8f5;
-  color: #27251e;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #171717;
+  color: #f2f2f2;
   font-size: 14px;
   font-family: inherit;
   outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.lib-search-input::placeholder {
+  color: #6e6e6e;
 }
 
 .lib-search-input:focus {
-  border-color: #016a71;
+  border-color: #c3f53c;
 }
 
 .lib-search-clear {
@@ -459,19 +473,21 @@ onUnmounted(() => {
   width: 28px;
   height: 28px;
   border: none;
-  border-radius: 9999px;
+  border-radius: 2px;
   background: transparent;
-  color: #524b42;
+  color: #9a9a9a;
   font-size: 13px;
   cursor: pointer;
 }
 
+.lib-search-clear:hover {
+  color: #f2f2f2;
+}
+
 .lib-controls {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid #ece8e0;
+  margin-top: 18px;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
@@ -480,11 +496,10 @@ onUnmounted(() => {
 .lib-tabs {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 20px;
   overflow-x: auto;
   scrollbar-width: none;
   max-width: 100%;
-  padding-bottom: 2px;
 }
 
 .lib-tabs::-webkit-scrollbar {
@@ -495,31 +510,40 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 36px;
-  padding: 6px 14px;
-  border-radius: 9999px;
-  border: 1px solid #d1d1cd;
-  background: #faf8f5;
-  color: #27251e;
+  min-height: 38px;
+  padding: 6px 2px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: #9a9a9a;
   font-size: 14px;
-  font-weight: 400;
+  font-weight: 600;
   font-family: inherit;
   white-space: nowrap;
   cursor: pointer;
-  transition: opacity 0.16s ease;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.lib-tab:hover {
+  color: #f2f2f2;
 }
 
 .lib-tab.on {
-  background: #016a71;
-  border-color: #016a71;
-  color: #ffffff;
-  font-weight: 500;
+  color: #f2f2f2;
+  border-bottom-color: #c3f53c;
+  font-weight: 700;
 }
 
 .lib-tab-cnt {
-  font-size: 12px;
-  opacity: 0.85;
+  font-family: var(--dh-font-mono);
+  font-size: 11px;
+  color: #6e6e6e;
   font-variant-numeric: tabular-nums;
+}
+
+.lib-tab.on .lib-tab-cnt {
+  color: #c3f53c;
 }
 
 .lib-sorts {
@@ -530,22 +554,29 @@ onUnmounted(() => {
 }
 
 .lib-sort-btn {
-  min-height: 34px;
-  padding: 5px 12px;
-  border-radius: 6px;
-  border: 1px solid #d1d1cd;
-  background: transparent;
-  color: #524b42;
-  font-size: 14px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #171717;
+  color: #9a9a9a;
+  font-size: 13px;
+  font-weight: 600;
   font-family: inherit;
   cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.lib-sort-btn:hover:not(:disabled) {
+  color: #f2f2f2;
+  border-color: #444444;
 }
 
 .lib-sort-btn.on {
-  border-color: #016a71;
-  color: #016a71;
-  background: rgba(1, 106, 113, 0.08);
-  font-weight: 500;
+  border-color: #c3f53c;
+  color: #f2f2f2;
+  background: #1e1e1e;
+  font-weight: 700;
 }
 
 .lib-sort-btn:disabled {
@@ -553,41 +584,38 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
+/* 高密度无外框海报墙：手机 3 列，平板 5 列，1280+ 7 列，1600+ 8 列 */
 .lib-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 10px;
 }
 
 @media (min-width: 640px) {
   .lib-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 18px;
+    gap: 16px 12px;
   }
 }
 
 @media (min-width: 1024px) {
   .lib-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 18px 12px;
   }
 }
 
 @media (min-width: 1280px) {
   .lib-grid {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 20px;
-  }
-}
-
-@media (min-width: 1536px) {
-  .lib-grid {
     grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 20px 12px;
   }
 }
 
-@media (min-width: 1800px) {
+@media (min-width: 1600px) {
   .lib-grid {
     grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 22px 12px;
   }
 }
 
@@ -595,25 +623,19 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   text-decoration: none;
-  color: #27251e;
+  color: #f2f2f2;
   min-width: 0;
-  transition: transform 0.18s ease;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .lib-card:hover {
-    transform: translateY(-2px);
-  }
 }
 
 .lib-poster-wrap {
   position: relative;
   width: 100%;
   aspect-ratio: 2 / 3;
-  border-radius: 12px;
+  border-radius: 2px;
   overflow: hidden;
-  background: #efe9df;
-  border: 1px solid #d1d1cd;
+  background: #171717;
+  border: 1px solid #222222;
+  transition: border-color 0.16s ease;
 }
 
 .lib-poster-wrap img {
@@ -621,29 +643,30 @@ onUnmounted(() => {
   height: 100%;
   object-fit: cover;
   display: block;
+  transition: transform 0.22s ease;
 }
 
 .lib-poster-placeholder {
   width: 100%;
   height: 100%;
-  padding: 40px 14px 14px;
+  padding: 34px 12px 12px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  background: linear-gradient(160deg, #eae2d3 0%, #d8ccb8 100%);
-  color: #27251e;
+  background: #171717;
+  color: #f2f2f2;
 }
 
 .lib-ph-type {
-  font-size: 12px;
-  font-weight: 500;
-  color: #524b42;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9a9a9a;
 }
 
 .lib-ph-text {
-  font-size: 15px;
-  font-weight: 500;
-  line-height: 1.4;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -652,55 +675,91 @@ onUnmounted(() => {
 }
 
 .lib-ph-foot {
-  font-size: 12px;
-  color: #6b6257;
-}
-
-.lib-badge-rating {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  padding: 2px 8px;
-  border-radius: 9999px;
-  background: rgba(28, 25, 22, 0.84);
-  color: #fdfbfa;
-  font-size: 12px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.4;
+  font-size: 11px;
+  color: #6e6e6e;
 }
 
 .lib-badge-res {
   position: absolute;
-  top: 8px;
-  left: 8px;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: rgba(28, 25, 22, 0.82);
-  color: #fdfbfa;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  top: 6px;
+  left: 6px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: rgba(17, 17, 17, 0.88);
+  border: 1px solid #2a2a2a;
+  color: #f2f2f2;
+  font-family: var(--dh-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
   line-height: 1.4;
 }
 
-.lib-card-title {
-  margin-top: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 1.4;
-  color: #27251e;
+.lib-poster-hover {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 24px 10px 10px;
+  background: linear-gradient(180deg, transparent 0%, rgba(17, 17, 17, 0.94) 46%, #111111 100%);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  pointer-events: none;
+}
+
+.lib-hover-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #9a9a9a;
+  font-variant-numeric: tabular-nums;
+}
+
+.lib-hover-score {
+  color: #c3f53c;
+  font-weight: 700;
+}
+
+.lib-hover-title {
+  margin-top: 3px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: #f2f2f2;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  word-break: break-word;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lib-card:hover .lib-poster-wrap {
+    border-color: #c3f53c;
+  }
+  .lib-card:hover .lib-poster-wrap img {
+    transform: scale(1.025);
+  }
+  .lib-card:hover .lib-poster-hover {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.lib-card-title {
+  margin-top: 7px;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #e6e6e6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lib-card-meta {
   margin-top: 2px;
-  font-size: 13px;
-  color: #524b42;
+  font-size: 12px;
+  color: #9a9a9a;
   display: flex;
   gap: 4px;
   white-space: nowrap;
@@ -712,45 +771,45 @@ onUnmounted(() => {
 .lib-skel-poster {
   width: 100%;
   aspect-ratio: 2 / 3;
-  border-radius: 12px;
+  border-radius: 2px;
 }
 
 .lib-skel-title {
-  height: 16px;
+  height: 14px;
   width: 82%;
-  margin-top: 8px;
+  margin-top: 7px;
 }
 
 .lib-skel-meta {
-  height: 13px;
+  height: 12px;
   width: 54%;
   margin-top: 5px;
 }
 
 .lib-empty-card {
-  background: #fdfbfa;
-  border: 1px solid #d1d1cd;
-  border-radius: 16px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
   padding: 48px 24px;
   text-align: center;
 }
 
 .lib-empty-title {
   margin: 0;
-  font-size: 17px;
-  font-weight: 500;
-  color: #27251e;
+  font-size: 18px;
+  font-weight: 700;
+  color: #f2f2f2;
 }
 
 .lib-empty-desc {
   margin: 8px auto 16px;
   max-width: 44ch;
   font-size: 14px;
-  color: #524b42;
+  color: #9a9a9a;
 }
 
 .lib-footer {
-  margin-top: 28px;
+  margin-top: 32px;
   display: flex;
   justify-content: center;
 }
@@ -758,24 +817,26 @@ onUnmounted(() => {
 .lib-more-btn {
   min-height: 44px;
   padding: 10px 28px;
-  border-radius: 12px;
-  border: 1px solid #d1d1cd;
-  background: #fdfbfa;
-  color: #27251e;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #171717;
+  color: #f2f2f2;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   font-family: inherit;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 
 .lib-more-btn:hover:not(:disabled) {
-  border-color: #016a71;
-  color: #016a71;
+  border-color: #c3f53c;
+  color: #c3f53c;
 }
 
 .lib-end-note {
-  font-size: 14px;
-  color: #524b42;
+  font-size: 13px;
+  color: #9a9a9a;
   font-variant-numeric: tabular-nums;
 }
 
@@ -784,10 +845,17 @@ onUnmounted(() => {
     padding: 16px 16px calc(84px + env(safe-area-inset-bottom));
   }
   .lib-head {
-    padding: 16px;
+    padding-bottom: 14px;
+    margin-bottom: 16px;
   }
   .lib-search-box {
     width: 100%;
+  }
+  .lib-card-title {
+    font-size: 12.5px;
+  }
+  .lib-card-meta {
+    font-size: 11px;
   }
 }
 </style>

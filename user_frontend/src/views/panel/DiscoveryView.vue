@@ -2,22 +2,11 @@
   <div class="v4-scope p2-home-scope">
     <WorldHome v-if="homeWorldActive" />
     <template v-else>
-      <header class="p2-home-hero" aria-label="观影导览">
-        <div class="p2-hero-inner">
-          <div class="p2-hero-titles">
-            <h1 class="p2-hero-greeting">{{ greeting }}，{{ nickname }}</h1>
-            <p class="p2-hero-sub">
-              <span>{{ dateLabel }}</span>
-              <span>·</span>
-              <span>选一部好片，一键唤起 Infuse、VidHub 或 SenPlayer 流畅直放</span>
-            </p>
-          </div>
-          <div class="p2-hero-actions">
-            <RouterLink to="/library" class="p2-btn-primary">浏览片库</RouterLink>
-            <RouterLink to="/game/operator" class="p2-btn-ghost">播放器接入</RouterLink>
-          </div>
-        </div>
-      </header>
+      <DarkHallHero
+        :greeting="greeting"
+        :nickname="nickname"
+        :date-label="dateLabel"
+      />
 
       <!-- 第 2 期看片优先首屏三联：最新入库海报行 + 继续观看进度行 + 各库热门海报行 -->
       <LatestPosterRow v-if="user.isLoggedIn" />
@@ -128,6 +117,7 @@ import { humanizeError, type FeedItem } from '@/composables/usePanelApi'
 import { collectionsApi, embyApi, type HomeSection, type RecentAddedItem, type ShelfCollection } from '@/api'
 import { formatFeedText } from '@/utils/mediaTitle'
 import WorldHome from '@/components/panel/WorldHome.vue'
+import DarkHallHero from '@/components/panel/DarkHallHero.vue'
 import LatestPosterRow from '@/components/panel/LatestPosterRow.vue'
 import ResumePosterRow from '@/components/panel/ResumePosterRow.vue'
 import LibraryHotRow from '@/components/panel/LibraryHotRow.vue'
@@ -284,101 +274,16 @@ onMounted(() => {
 
 <style scoped>
 .p2-home-scope {
-  padding-bottom: 48px;
-}
-
-.p2-home-hero {
-  max-width: min(1480px, 94vw);
-  margin: 12px auto 0;
-  padding: 0 20px;
-}
-
-.p2-hero-inner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 4px 10px;
-  border-bottom: 1px solid #d1d1cd;
-}
-
-.p2-hero-titles {
-  min-width: 0;
-}
-
-.p2-hero-greeting {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 500;
-  line-height: 1.3;
-  letter-spacing: 0;
-  color: #27251e;
-}
-
-.p2-hero-sub {
-  margin: 4px 0 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 14px;
-  color: #524b42;
-}
-
-.p2-hero-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.p2-btn-primary {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 40px;
-  padding: 0 18px;
-  border-radius: 12px;
-  background: #016a71;
-  color: #ffffff;
-  font-size: 14px;
-  font-weight: 500;
-  text-decoration: none;
-  white-space: nowrap;
-  transition: opacity 0.16s ease, transform 0.16s ease;
-}
-
-.p2-btn-primary:hover {
-  transform: translateY(-1px);
-  opacity: 0.92;
-}
-
-.p2-btn-ghost {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 40px;
-  padding: 0 14px;
-  border-radius: 6px;
-  border: 1px solid #d1d1cd;
-  background: #fdfbfa;
-  color: #27251e;
-  font-size: 14px;
-  font-weight: 500;
-  text-decoration: none;
-  white-space: nowrap;
-  transition: opacity 0.16s ease, transform 0.16s ease;
-}
-
-.p2-btn-ghost:hover {
-  transform: translateY(-1px);
-  opacity: 0.88;
+  padding-bottom: 56px;
+  background: #111111;
 }
 
 .p2-band-wrap,
 .p2-ops-band {
-  max-width: min(1480px, 94vw);
-  margin: 16px auto 0;
-  padding: 0 20px;
+  max-width: min(1720px, 96vw);
+  margin: 28px auto 0;
+  padding: 0 24px;
+  box-sizing: border-box;
 }
 
 .p2-ops-grid {
@@ -396,10 +301,10 @@ onMounted(() => {
 }
 
 .p2-surface-card {
-  background: #fdfbfa;
-  border: 1px solid #d1d1cd;
-  border-radius: 16px;
-  padding: 18px 22px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
+  padding: 20px 22px;
   min-width: 0;
 }
 
@@ -408,34 +313,40 @@ onMounted(() => {
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .p2-card-title {
   margin: 0;
-  font-size: 17px;
-  font-weight: 500;
-  color: #27251e;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: #f2f2f2;
 }
 
 .p2-card-sub {
-  margin: 2px 0 0;
-  font-size: 14px;
-  color: #524b42;
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: #9a9a9a;
 }
 
 .p2-card-link {
-  color: #016a71;
-  font-size: 14px;
-  font-weight: 500;
+  color: #9a9a9a;
+  font-size: 13px;
+  font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
+  transition: color 0.15s ease;
+}
+
+.p2-card-link:hover {
+  color: #c3f53c;
 }
 
 .p2-collections-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .p2-feed-list {
@@ -446,9 +357,9 @@ onMounted(() => {
 .p2-feed-row {
   display: flex;
   align-items: baseline;
-  gap: 10px;
-  padding: 9px 0;
-  border-top: 1px solid #e7e4de;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid #242424;
   font-size: 14px;
 }
 
@@ -459,15 +370,16 @@ onMounted(() => {
 
 .p2-feed-time {
   flex: 0 0 auto;
-  font-size: 13px;
-  color: #524b42;
+  font-family: var(--dh-font-mono);
+  font-size: 12px;
+  color: #9a9a9a;
   font-variant-numeric: tabular-nums;
 }
 
 .p2-feed-text {
   flex: 1 1 auto;
   min-width: 0;
-  color: #27251e;
+  color: #f2f2f2;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -475,11 +387,11 @@ onMounted(() => {
 
 .p2-feed-lib {
   flex: 0 0 auto;
-  padding: 2px 8px;
-  border-radius: 9999px;
-  border: 1px solid #d1d1cd;
-  background: #faf8f5;
-  color: #524b42;
+  padding: 2px 7px;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #1e1e1e;
+  color: #9a9a9a;
   font-size: 12px;
 }
 
@@ -487,9 +399,9 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   min-height: 44px;
-  padding: 4px 12px;
-  margin: -4px -12px;
-  color: #016a71;
+  padding: 4px 10px;
+  margin: -4px -10px;
+  color: #c3f53c;
   text-decoration: none;
 }
 
@@ -504,35 +416,15 @@ onMounted(() => {
     padding-bottom: calc(84px + env(safe-area-inset-bottom));
   }
 
-  .p2-home-hero,
   .p2-band-wrap,
   .p2-ops-band {
     max-width: 100%;
+    margin-top: 22px;
     padding: 0 16px;
   }
 
-  .p2-hero-inner {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .p2-hero-greeting {
-    font-size: 20px;
-  }
-
-  .p2-hero-actions {
-    width: 100%;
-  }
-
-  .p2-btn-primary,
-  .p2-btn-ghost {
-    min-height: 44px;
-    flex: 1 1 0;
-  }
-
   .p2-surface-card {
-    padding: 14px 16px;
+    padding: 16px;
   }
 }
 </style>

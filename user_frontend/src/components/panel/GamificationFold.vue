@@ -224,15 +224,16 @@ onMounted(() => {
 
 <style scoped>
 .p2-camp-band {
-  max-width: min(1480px, 94vw);
-  margin: 16px auto 0;
-  padding: 0 20px;
+  max-width: min(1720px, 96vw);
+  margin: 24px auto 0;
+  padding: 0 24px;
+  box-sizing: border-box;
 }
 
 .p2-camp-shell {
-  background: #fdfbfa;
-  border: 1px solid #d1d1cd;
-  border-radius: 16px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
   overflow: hidden;
 }
 
@@ -242,7 +243,7 @@ onMounted(() => {
   padding: 16px 22px;
   border: 0;
   background: transparent;
-  color: #27251e;
+  color: #f2f2f2;
   font-family: inherit;
   display: flex;
   align-items: center;
@@ -253,7 +254,7 @@ onMounted(() => {
 }
 
 .p2-camp-toggle:hover {
-  opacity: 0.92;
+  background: #1a1a1a;
 }
 
 .p2-camp-head-left {
@@ -265,13 +266,13 @@ onMounted(() => {
 
 .p2-camp-title {
   font-size: 16px;
-  font-weight: 500;
-  color: #27251e;
+  font-weight: 700;
+  color: #f2f2f2;
 }
 
 .p2-camp-sub {
-  font-size: 14px;
-  color: #524b42;
+  font-size: 13px;
+  color: #9a9a9a;
 }
 
 .p2-camp-head-right {
@@ -284,13 +285,13 @@ onMounted(() => {
 }
 
 .p2-camp-pill {
-  padding: 4px 10px;
-  border-radius: 9999px;
-  border: 1px solid #d1d1cd;
-  background: #faf8f5;
-  color: #27251e;
+  padding: 3px 9px;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #1e1e1e;
+  color: #f2f2f2;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
@@ -299,15 +300,16 @@ onMounted(() => {
   align-items: center;
   gap: 4px;
   padding: 5px 12px;
-  border-radius: 6px;
-  border: 1px solid #d1d1cd;
-  color: #016a71;
-  font-size: 14px;
-  font-weight: 500;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #1e1e1e;
+  color: #f2f2f2;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .p2-camp-chev {
-  transition: transform 0.18s ease;
+  transition: transform 0.16s ease;
 }
 
 .p2-camp-chev.is-open {
@@ -316,23 +318,23 @@ onMounted(() => {
 
 .p2-camp-body {
   padding: 18px 22px 22px;
-  border-top: 1px solid #d1d1cd;
-  background: #faf8f5;
+  border-top: 1px solid #2a2a2a;
+  background: #141414;
 }
 
 .p2-camp-shortcuts {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
   margin-bottom: 16px;
 }
 
 .p2-shortcut-card {
   padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid #d1d1cd;
-  background: #fdfbfa;
-  color: #27251e;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #171717;
+  color: #f2f2f2;
   text-decoration: none;
   font-family: inherit;
   text-align: left;
@@ -340,43 +342,43 @@ onMounted(() => {
   flex-direction: column;
   gap: 3px;
   cursor: pointer;
-  transition: transform 0.16s ease;
+  transition: border-color 0.15s ease;
 }
 
 .p2-shortcut-card:hover {
-  transform: translateY(-2px);
+  border-color: #c3f53c;
 }
 
 .p2-sc-name {
-  font-size: 15px;
-  font-weight: 500;
-  color: #27251e;
+  font-size: 14.5px;
+  font-weight: 700;
+  color: #f2f2f2;
 }
 
 .p2-sc-desc {
-  font-size: 13px;
-  color: #524b42;
+  font-size: 12.5px;
+  color: #9a9a9a;
 }
 
 .p2-camp-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: 14px;
   align-items: start;
 }
 
 .p2-camp-col {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   min-width: 0;
 }
 
 .p2-camp-card {
   padding: 18px 20px;
-  border-radius: 16px;
-  border: 1px solid #d1d1cd;
-  background: #fdfbfa;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #171717;
 }
 
 .p2-sec-head {
@@ -386,19 +388,19 @@ onMounted(() => {
 .p2-sec-title {
   margin: 0;
   font-size: 16px;
-  font-weight: 500;
-  color: #27251e;
+  font-weight: 700;
+  color: #f2f2f2;
 }
 
 .p2-sec-sub {
   margin: 2px 0 0;
-  font-size: 14px;
-  color: #524b42;
+  font-size: 13px;
+  color: #9a9a9a;
 }
 
 .p2-parcels-row {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   overflow-x: auto;
   padding-bottom: 4px;
 }
@@ -417,7 +419,7 @@ onMounted(() => {
   .p2-camp-band {
     max-width: 100%;
     padding: 0 16px;
-    margin-top: 12px;
+    margin-top: 16px;
   }
 
   .p2-camp-toggle {

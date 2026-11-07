@@ -272,20 +272,25 @@ onUnmounted(() => {
 
 <style scoped>
 .p2-watch-band {
-  max-width: min(1480px, 94vw);
-  margin: 14px auto 0;
-  padding: 0 20px;
+  width: 100%;
+  max-width: min(1720px, 96vw);
+  margin: 26px auto 0;
+  padding: 0 24px;
+  box-sizing: border-box;
 }
 
 .p2-watch-card {
-  background: #fdfbfa;
-  border: 1px solid #d1d1cd;
-  border-radius: 16px;
-  padding: 18px 22px 20px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
 }
 
 .p2-watch-card.is-compact {
-  padding: 14px 22px;
+  padding: 14px 18px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
 }
 
 .p2-watch-head {
@@ -304,46 +309,47 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px 12px;
+  gap: 6px 14px;
   min-width: 0;
 }
 
 .p2-watch-title {
   margin: 0;
-  font-size: 18px;
-  font-weight: 500;
-  line-height: 1.35;
-  letter-spacing: 0;
-  color: #27251e;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: #f2f2f2;
 }
 
 .p2-watch-sub {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.45;
-  color: #524b42;
+  color: #9a9a9a;
 }
 
 .p2-watch-more {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 36px;
-  padding: 4px 12px;
-  border-radius: 6px;
-  border: 1px solid #d1d1cd;
-  color: #016a71;
-  font-size: 14px;
-  font-weight: 500;
+  gap: 5px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border-radius: 2px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  color: #f2f2f2;
+  font-size: 13px;
+  font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
   flex-shrink: 0;
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 
 .p2-watch-more:hover {
-  transform: translateY(-1px);
-  opacity: 0.88;
+  border-color: #c3f53c;
+  color: #c3f53c;
 }
 
 .p2-shelf-wrap {
@@ -352,11 +358,15 @@ onUnmounted(() => {
 
 .p2-resume-row {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   overflow-x: auto;
   scroll-snap-type: x proximity;
   padding-bottom: 4px;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+.p2-resume-row::-webkit-scrollbar {
+  display: none;
 }
 
 .p2-resume-row.is-dragging {
@@ -365,27 +375,31 @@ onUnmounted(() => {
   user-select: none;
 }
 
-.p2-resume-card {
-  flex: 0 0 236px;
-  width: 236px;
+.p2-resume-card,
+.p2-resume-skel {
+  flex: 0 0 calc((100% - 4 * 12px) / 5);
+  width: calc((100% - 4 * 12px) / 5);
+  min-width: 224px;
   scroll-snap-align: start;
   text-decoration: none;
   color: inherit;
-  transition: transform 0.16s ease;
-}
-
-.p2-resume-card:hover {
-  transform: translateY(-2px);
 }
 
 .p2-resume-frame {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
-  border-radius: 12px;
+  border-radius: 2px;
   overflow: hidden;
-  background: #ece6dc;
-  border: 1px solid #d1d1cd;
+  background: #171717;
+  border: 1px solid #222222;
+  transition: border-color 0.16s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .p2-resume-card:hover .p2-resume-frame {
+    border-color: #c3f53c;
+  }
 }
 
 .p2-resume-frame img {
@@ -403,47 +417,48 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   text-align: center;
-  background: linear-gradient(155deg, #f3ede2 0%, #e7dfd1 100%);
-  color: #27251e;
+  background: #171717;
+  color: #f2f2f2;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 700;
 }
 
 .p2-ep-pill {
   position: absolute;
-  top: 8px;
-  left: 8px;
-  padding: 2px 8px;
-  border-radius: 9999px;
-  background: rgba(250, 248, 245, 0.92);
-  border: 1px solid #d1d1cd;
-  color: #27251e;
+  top: 6px;
+  left: 6px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: rgba(17, 17, 17, 0.88);
+  border: 1px solid #2a2a2a;
+  color: #f2f2f2;
+  font-family: var(--dh-font-mono);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
-/* DESIGN.md §6.3：继续观看进度条 3px 贴底，唯一点缀色 #016a71 */
+/* 帆桥暗厅：继续观看进度条 3px 贴底，唯一荧光绿 #c3f53c */
 .p2-progress-track {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
   height: 3px;
-  background: rgba(39, 37, 30, 0.24);
+  background: rgba(255, 255, 255, 0.18);
 }
 
 .p2-progress-fill {
   height: 100%;
-  background: #016a71;
+  background: #c3f53c;
 }
 
 .p2-resume-name {
-  margin-top: 8px;
-  font-size: 14px;
-  font-weight: 500;
+  margin-top: 7px;
+  font-size: 13.5px;
+  font-weight: 600;
   line-height: 1.35;
-  color: #27251e;
+  color: #e6e6e6;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -453,8 +468,8 @@ onUnmounted(() => {
   margin-top: 2px;
   display: flex;
   gap: 5px;
-  font-size: 13px;
-  color: #524b42;
+  font-size: 12px;
+  color: #9a9a9a;
   font-variant-numeric: tabular-nums;
 }
 
@@ -463,16 +478,21 @@ onUnmounted(() => {
   top: 38%;
   transform: translateY(-50%);
   z-index: 2;
-  width: 36px;
-  height: 36px;
-  border-radius: 9999px;
-  border: 1px solid #d1d1cd;
-  background: rgba(253, 251, 250, 0.95);
-  color: #27251e;
+  width: 34px;
+  height: 34px;
+  border-radius: 2px;
+  border: 1px solid #333333;
+  background: rgba(23, 23, 23, 0.94);
+  color: #f2f2f2;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+
+.p2-shelf-arrow:hover {
+  border-color: #c3f53c;
+  color: #c3f53c;
 }
 
 .p2-shelf-arrow.is-left {
@@ -483,41 +503,35 @@ onUnmounted(() => {
   right: -10px;
 }
 
-.p2-resume-skel {
-  flex: 0 0 236px;
-  width: 236px;
-}
-
 .p2-resume-skel-img {
   width: 100%;
   aspect-ratio: 16 / 9;
-  border-radius: 12px;
+  border-radius: 2px;
 }
 
 .p2-resume-skel-line {
   height: 14px;
   width: 72%;
-  margin-top: 8px;
-  border-radius: 6px;
+  margin-top: 7px;
+  border-radius: 2px;
 }
 
 @media (max-width: 767px) {
   .p2-watch-band {
     max-width: 100%;
     padding: 0 16px;
-    margin-top: 12px;
+    margin-top: 20px;
   }
 
-  .p2-watch-card,
   .p2-watch-card.is-compact {
-    padding: 14px 16px;
+    padding: 12px 14px;
   }
 
-  /* DESIGN.md §6.3：手机端继续观看横滑紧凑卡 */
   .p2-resume-card,
   .p2-resume-skel {
-    flex: 0 0 168px;
-    width: 168px;
+    flex: 0 0 176px;
+    width: 176px;
+    min-width: 176px;
   }
 
   .p2-shelf-arrow {

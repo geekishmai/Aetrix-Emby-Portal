@@ -359,7 +359,7 @@ onUnmounted(() => {
 
         <CaptchaChallenge ref="captchaRef" action="login" @update:token="captchaToken = $event" />
 
-        <button type="submit" class="submit-btn" :disabled="loginLoading || !loginForm.username.trim() || !loginForm.password">
+        <button type="submit" class="submit-btn" :disabled="loginLoading">
           {{ loginLoading ? '登录中…' : '登 录' }}
         </button>
 
@@ -472,7 +472,7 @@ onUnmounted(() => {
 
         <CaptchaChallenge ref="captchaRef" action="register" @update:token="captchaToken = $event" />
 
-        <button type="submit" class="submit-btn" :disabled="registerLoading || registrationClosed || !registerForm.username.trim() || !registerForm.password || !registerForm.confirmPassword">
+        <button type="submit" class="submit-btn" :disabled="registerLoading || registrationClosed">
           {{ registerLoading ? '注册中…' : '注 册' }}
         </button>
       </form>
@@ -492,66 +492,64 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 48px 24px;
+  padding: 48px 20px;
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  background: var(--paper-bg);
+  background: #111111;
+  color: #f2f2f2;
 }
 
-/* 氛围光已移除：海报拼贴本身提供视觉丰富度（2026-10-11，品牌收敛到琥珀）。 */
-
-/* 单独遮罩网格，避免遮罩影响光晕、品牌或表单。 */
+/* 建筑感极细暗网辅助线：无发光、无球形渐变遮罩 */
 .auth-grid {
   position: absolute;
   inset: 0;
   z-index: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(to right, rgba(128, 128, 128, 0.14) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(128, 128, 128, 0.14) 1px, transparent 1px);
-  background-size: 48px 48px;
-  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, black 30%, transparent 100%);
-  mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, black 30%, transparent 100%);
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 56px 56px;
 }
 
-@supports (color: color-mix(in srgb, black 70%, transparent)) {
-  .auth-grid {
-    background-image:
-      linear-gradient(to right, color-mix(in srgb, var(--paper-line) 70%, transparent) 1px, transparent 1px),
-      linear-gradient(to bottom, color-mix(in srgb, var(--paper-line) 70%, transparent) 1px, transparent 1px);
-  }
-}
-
-/* 无卡片底色、边框与阴影，内容直接浮于页面背景。 */
+/* 居中暗厅硬朗鉴权面板 */
 .auth-column {
   position: relative;
   z-index: 1;
+  box-sizing: border-box;
   width: 100%;
-  max-width: 400px;
+  max-width: 416px;
   min-width: 0;
-  animation: authColumnIn 0.4s cubic-bezier(0.22,1,0.36,1) both;
+  padding: 36px 32px 32px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
+  animation: authColumnIn 0.2s ease-out both;
 }
 
 @keyframes authColumnIn {
-  from { opacity: 0; transform: translateY(16px); }
-  to { opacity: 1; transform: none; }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .auth-brand {
-  text-align: center;
-  margin-bottom: 2rem;
+  text-align: left;
+  margin-bottom: 24px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #242424;
 }
 
 .brand-mark {
-  width: 46px;
-  height: 46px;
-  margin: 0 auto 1rem;
-  border-radius: var(--paper-r-md);
+  width: 40px;
+  height: 40px;
+  margin: 0 0 14px;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #111111;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--paper-ink-2);
+  color: #c3f53c;
 }
 
 .brand-mark img {
@@ -562,145 +560,136 @@ onUnmounted(() => {
 }
 
 .brand-title {
-  font-size: 1.75rem;
-  font-weight: 700;
-  /* CJK 站名不拉距：≤0.04em，不再 uppercase */
-  letter-spacing: 0.02em;
-  text-indent: 0.02em;
-  color: var(--paper-ink);
-  margin: 0 0 0.625rem;
-  line-height: 1.3;
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #f2f2f2;
+  margin: 0 0 6px;
+  line-height: 1.2;
   overflow-wrap: anywhere;
 }
 
 .brand-subtitle {
-  font-size: 0.8125rem;
-  color: var(--paper-ink-3);
+  font-size: 13px;
+  color: #9a9a9a;
   margin: 0;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
-/* 胶囊模式切换 */
+/* 建筑感分栏页签：底边 2px #c3f53c 激活指示，把实心荧光绿留给唯一主提交按钮 */
 .mode-switch {
   box-sizing: border-box;
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  height: auto;
-  background: var(--paper-card);
-  border: 1px solid var(--paper-line);
-  border-radius: var(--paper-r-full);
-  padding: 4px;
-  margin-bottom: 1.5rem;
+  background: #111111;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
+  padding: 0;
+  margin-bottom: 22px;
 }
 
 .mode-btn {
   position: relative;
   z-index: 1;
   min-width: 0;
-  min-height: 44px;
-  padding: 0 0.75rem;
+  min-height: 42px;
+  padding: 0 12px;
   border: none;
   background: transparent;
-  border-radius: var(--paper-r-full);
+  border-radius: 0;
   font: inherit;
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
   line-height: 1;
-  color: var(--paper-ink-3);
+  color: #9a9a9a;
   cursor: pointer;
-  transition: color 0.2s ease;
-  /* 文字在胶囊内严格水平垂直居中（移动端浏览器默认样式可能偏） */
+  transition: color 0.15s ease;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-/* CJK 光学垂直居中：PingFang SC 等中文字形在行盒内视觉重心偏下，
-   line-height: 1 收紧行盒后再微调上移，保证文字在琥珀胶囊内真正居中 */
 .mode-btn-label {
   line-height: 1;
-  transform: translateY(-0.05em);
 }
 
 .mode-btn.active {
-  color: var(--paper-on-primary);
-  font-weight: 600;
+  color: #f2f2f2;
+  font-weight: 700;
 }
 
 .mode-indicator {
   position: absolute;
-  /* 4px 与 .mode-switch 的 padding: 4px 对应，改一处需同步 */
-  top: 4px;
-  left: 4px;
-  width: calc(50% - 4px);
-  height: calc(100% - 8px);
-  border-radius: var(--paper-r-full);
-  background: var(--paper-primary);
+  left: 0;
+  bottom: 0;
+  width: 50%;
+  height: 100%;
+  background: #1e1e1e;
+  border-bottom: 2px solid #c3f53c;
+  box-sizing: border-box;
   pointer-events: none;
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .mode-indicator.right {
   transform: translateX(100%);
 }
 
-/* 全胶囊表单 */
 .auth-form {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 16px;
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 6px;
   min-width: 0;
 }
 
 .field-label {
-  padding: 0 24px;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  line-height: 1.5;
-  color: var(--paper-ink-3);
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #9a9a9a;
 }
 
 .optional {
-  margin-left: 0.25rem;
-  font-size: 0.75rem;
+  margin-left: 4px;
+  font-size: 12px;
   font-style: normal;
   font-weight: 400;
-  color: var(--paper-ink-3);
+  color: #6e6e6e;
 }
 
 .field-box {
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  min-height: 52px;
-  background: var(--paper-input-bg);
-  border: 1px solid var(--paper-line);
-  border-radius: var(--paper-r-full);
-  padding: 0 24px;
-  transition: box-shadow 0.2s ease;
+  min-height: 46px;
+  background: #111111;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
+  padding: 0 14px;
+  transition: border-color 0.15s ease;
 }
 
 .field-box:focus-within {
-  border-color: var(--paper-border-focus);
-  box-shadow: 0 0 0 3px var(--paper-primary-soft);
+  border-color: #c3f53c;
 }
 
 .field-icon {
-  color: var(--paper-ink-3);
-  margin-right: 0.625rem;
+  color: #6e6e6e;
+  margin-right: 10px;
   flex-shrink: 0;
-  transition: color 0.2s ease;
+  transition: color 0.15s ease;
 }
 
 .field-box:focus-within .field-icon {
-  color: var(--paper-primary);
+  color: #c3f53c;
 }
 
 .field-box input {
@@ -712,23 +701,22 @@ onUnmounted(() => {
   background: transparent;
   border: none;
   outline: none;
-  color: var(--paper-ink);
+  color: #f2f2f2;
   font: inherit;
-  font-size: 0.9375rem;
+  font-size: 15px;
 }
 
 .field-box input::placeholder {
-  color: var(--paper-ink-3);
+  color: #6e6e6e;
   opacity: 1;
 }
 
-/* 修复2：浏览器自动填充（Chrome/Safari）默认底色会盖住输入框，强制跟随主题 */
 .field-box input:-webkit-autofill,
 .field-box input:-webkit-autofill:hover,
 .field-box input:-webkit-autofill:focus,
 .field-box input:-webkit-autofill:active {
-  -webkit-text-fill-color: var(--paper-ink);
-  -webkit-box-shadow: 0 0 0 1000px var(--paper-input-bg) inset;
+  -webkit-text-fill-color: #f2f2f2;
+  -webkit-box-shadow: 0 0 0 1000px #111111 inset;
   transition: background-color 5000s ease-in-out 0s;
 }
 
@@ -742,16 +730,14 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: 0;
-  margin-left: 0.375rem;
+  margin-left: 6px;
   background: transparent;
   border: none;
-  color: var(--paper-ink-3);
+  color: #9a9a9a;
   cursor: pointer;
-  border-radius: 50%;
-  transition: color 0.2s ease, background-color 0.2s ease;
+  border-radius: 2px;
 }
 
-/* 点击区扩到 44px：视觉保持 32px，用 ::after 透明层扩展 */
 .eye-btn::after {
   content: "";
   position: absolute;
@@ -760,76 +746,74 @@ onUnmounted(() => {
 
 @media (hover: hover) {
   .eye-btn:hover {
-    color: var(--paper-ink-2);
-    background: var(--paper-card);
+    color: #f2f2f2;
+    background: #1e1e1e;
   }
 }
 
 .mode-btn:focus-visible,
 .eye-btn:focus-visible,
 .submit-btn:focus-visible {
-  outline: 2px solid var(--paper-border-focus);
-  outline-offset: 3px;
+  outline: 2px solid #c3f53c;
+  outline-offset: 2px;
 }
 
 /* 密码强度 */
 .strength {
   display: flex;
   align-items: center;
-  gap: 0.625rem;
-  margin-top: 0.125rem;
-  padding: 0 24px;
+  gap: 10px;
+  margin-top: 2px;
+  padding: 0;
 }
 
 .strength-track {
   flex: 1;
   height: 3px;
-  background: var(--paper-card-2);
-  border-radius: var(--paper-r-full);
+  background: #242424;
+  border-radius: 0;
   overflow: hidden;
 }
 
 .strength-fill {
   height: 100%;
   width: 100%;
-  border-radius: var(--paper-r-full);
-  /* 用 transform: scaleX 代替 width 做进度动画，避免触发布局重排 */
+  border-radius: 0;
   transform: scaleX(0);
   transform-origin: left center;
-  transition: transform 0.3s ease, background-color 0.3s ease;
+  transition: transform 0.25s ease, background-color 0.25s ease;
 }
 
-.strength-fill.lv-1 { transform: scaleX(0.33); background: var(--paper-danger); }
-.strength-fill.lv-2 { transform: scaleX(0.66); background: var(--paper-warning); }
-.strength-fill.lv-3 { transform: scaleX(1); background: var(--paper-primary); }
+.strength-fill.lv-1 { transform: scaleX(0.33); background: #e5534b; }
+.strength-fill.lv-2 { transform: scaleX(0.66); background: #9a9a9a; }
+.strength-fill.lv-3 { transform: scaleX(1); background: #c3f53c; }
 
 .strength-text {
-  font-size: 0.8125rem;
-  color: var(--paper-ink-3);
+  font-size: 12px;
+  color: #9a9a9a;
   min-width: 16px;
 }
 
-/* 错误与注册关闭提示保留独立语义色。 */
 .form-error {
   margin: 0;
-  padding: 0.75rem 24px;
-  border-radius: 26px;
-  background: var(--paper-danger-soft);
-  border: 1px solid var(--paper-danger-border);
-  color: var(--paper-danger);
-  font-size: 0.8125rem;
+  padding: 10px 14px;
+  border-radius: 2px;
+  background: #1e1e1e;
+  border: 1px solid rgba(229, 83, 75, 0.55);
+  color: #ef6b63;
+  font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .closed-notice {
   margin: 0;
-  padding: 0.75rem 24px;
-  border-radius: 26px;
-  background: var(--paper-warning-soft, var(--paper-danger-soft));
-  border: 1px solid var(--paper-warning-border, var(--paper-danger-border));
-  color: var(--paper-warning, var(--paper-danger));
-  font-size: 0.875rem;
+  padding: 12px 14px;
+  border-radius: 2px;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  color: #9a9a9a;
+  font-size: 13.5px;
   line-height: 1.5;
   text-align: center;
 }
@@ -839,100 +823,84 @@ onUnmounted(() => {
   border: none;
   padding: 0 8px;
   min-height: 44px;
-  color: var(--paper-primary);
+  color: #c3f53c;
   font: inherit;
   text-decoration: underline;
   cursor: pointer;
 }
 
-/* 渐变胶囊提交按钮 */
+/* 全页唯一实心荧光绿 #c3f53c 主提交按钮 */
 .submit-btn {
   box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
+  gap: 8px;
   width: 100%;
-  height: 52px;
+  height: 46px;
   flex-shrink: 0;
-  margin-top: 0.25rem;
-  padding: 0 24px;
-  background: var(--paper-gradient);
-  border: none;
-  border-radius: var(--paper-r-full);
-  color: var(--paper-on-primary);
+  margin-top: 4px;
+  padding: 0 20px;
+  background: #c3f53c;
+  border: 1px solid #c3f53c;
+  border-radius: 2px;
+  color: #111111;
   font: inherit;
-  font-size: 0.9375rem;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 800;
   cursor: pointer;
-  transition: transform 0.15s ease, filter 0.2s ease, color 0.2s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
 .submit-btn:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-
-.submit-btn:active:not(:disabled) {
-  transform: scale(0.98);
+  background: #d1fa58;
+  border-color: #d1fa58;
 }
 
 .submit-btn:disabled {
-  background: var(--paper-card-3);
-  color: var(--paper-ink-3);
+  background: #242424;
+  border-color: #2a2a2a;
+  color: #6e6e6e;
   cursor: not-allowed;
 }
 
 .auth-footnote {
-  margin: 1.5rem 0 0;
+  margin: 20px 0 0;
   text-align: center;
-  font-size: 0.8125rem;
-  color: var(--paper-ink-3);
+  font-size: 12px;
+  color: #6e6e6e;
   line-height: 1.6;
 }
 
 @media (max-width: 767px) {
   .auth-page {
-    padding-top: 32px;
-    padding-left: 24px;
-    padding-right: 24px;
-    padding-bottom: env(safe-area-inset-bottom);
+    padding: 24px 16px max(24px, env(safe-area-inset-bottom));
   }
 
   .auth-column {
     max-width: 100%;
-  }
-
-  .field-box {
-    min-height: 52px;
-  }
-
-  .submit-btn {
-    height: 52px;
+    padding: 28px 20px 24px;
   }
 
   .field-box input {
     font-size: 16px;
   }
-
-  .auth-footnote {
-    margin-bottom: 24px;
-  }
 }
 
-/* TG 一键登录入口（描边次级按钮风，与主提交按钮区分主次） */
+/* TG 一键登录入口（暗厅次级描边按钮） */
 .tg-login {
-  margin-top: 1rem;
+  margin-top: 16px;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 8px;
 }
 
 .tg-login-divider {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  color: var(--paper-ink-3);
-  font-size: 0.8125rem;
+  gap: 12px;
+  color: #6e6e6e;
+  font-size: 12px;
 }
 
 .tg-login-divider::before,
@@ -940,7 +908,7 @@ onUnmounted(() => {
   content: '';
   flex: 1;
   height: 1px;
-  background: var(--paper-line);
+  background: #242424;
 }
 
 .tg-login-btn {
@@ -948,39 +916,38 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
+  gap: 8px;
   width: 100%;
-  min-height: 52px;
-  padding: 0 24px;
-  background: transparent;
-  border: 1.5px solid var(--paper-line-strong);
-  border-radius: var(--paper-r-full);
-  color: inherit;
-  font-size: 0.9375rem;
+  min-height: 46px;
+  padding: 0 20px;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
+  color: #f2f2f2;
+  font-size: 14px;
   font-weight: 600;
   text-decoration: none;
-  transition: filter 0.2s ease, border-color 0.2s ease;
+  transition: border-color 0.15s ease;
 }
 
 .tg-login-btn:hover {
-  filter: brightness(1.06);
+  border-color: #f2f2f2;
 }
 
 .tg-login-btn:focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid #c3f53c;
   outline-offset: 2px;
 }
 
 .tg-login-hint {
   margin: 0;
-  font-size: 0.8125rem;
+  font-size: 12px;
   line-height: 1.5;
-  color: var(--paper-ink-3);
+  color: #9a9a9a;
   text-align: center;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  /* 自动填充的 5000s 背景过渡是防黄色底色的 hack，不是可见动画，排除在外 */
   *:not(:-webkit-autofill) {
     animation: none !important;
     transition: none !important;

@@ -6,7 +6,7 @@
          底部导航坞与吸底按钮的“避开小白条”内边距会全部失效 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <!-- 移动端浏览器工具栏跟随页面底色（不是品牌色），滚动时不会出现一条亮青色带 -->
-    <meta name="theme-color" content="#0c0a09">
+    <meta name="theme-color" content="#111111">
     <meta name="color-scheme" content="dark">
     <meta name="description" content="帆桥影院：高清片库在线浏览、多端播放器一键直连与个人观影管理。">
     <meta property="og:type" content="website">
@@ -29,10 +29,7 @@
       /*
        * 首屏零闪烁预引导（在任何样式绘制与 Vue 挂载之前同步执行）：
        * 1. 并行预拉公开品牌配置 /api/site/branding（零额外串行 RTT），同时用本地缓存预热标题；
-       * 2. 精确判定首屏目标表面（portal 暖纸面 vs auth 暗房面）：
-       *    - 已持登录态（access_token 或 SSO 交接 cookie）访问门户路由，或公开门户路由 /want → 直接锁定 light (#faf8f5)，消灭「黑底 → 浅底」全屏频闪；
-       *    - 未登录访问受保护门户路由（守卫将直跳 /login）或访问 /login、/tg-login、/privacy → 按用户主题（默认暗房 #0c0a09）渲染安静骨架。
-       */
+       * 2. 精确判定首屏目标骨架表面（portal 暗厅骨架 vs auth 鉴权骨架），全程锁定 #111111 帆桥暗厅底色。
       (function () {
         var docEl = document.documentElement;
         try {
@@ -71,65 +68,27 @@
           var isPublicPortalPath = rawPath === '/want';
           var bootSurface = (!isAuthPath && (hasToken || hasSso || isPublicPortalPath)) ? 'portal' : 'auth';
           docEl.setAttribute('data-boot-mode', bootSurface);
-
+          docEl.removeAttribute('data-theme');
           var meta = document.querySelector('meta[name="theme-color"]');
-          if (bootSurface === 'portal') {
-            docEl.setAttribute('data-theme', 'light');
-            if (meta) meta.setAttribute('content', '#faf8f5');
-          } else {
-            var stored = localStorage.getItem('aetrix-theme');
-            var lightPref = stored === 'light' || (
-              stored === 'system' &&
-              window.matchMedia &&
-              window.matchMedia('(prefers-color-scheme: light)').matches
-            );
-            if (lightPref) {
-              docEl.setAttribute('data-theme', 'light');
-              if (meta) meta.setAttribute('content', '#f5f1ea');
-            } else {
-              docEl.removeAttribute('data-theme');
-              if (meta) meta.setAttribute('content', '#0c0a09');
-            }
-          }
+          if (meta) meta.setAttribute('content', '#111111');
         } catch (e) {}
       })();
     </script>
     <style>
-      html {
-        background: #0c0a09;
-        color-scheme: dark;
-      }
-
-      html[data-theme='light'] {
-        background: #f5f1ea;
-        color-scheme: light;
-      }
-
-      html[data-boot-mode='portal'] {
-        background: #faf8f5;
-        color-scheme: light;
-      }
-
+      html,
       body {
         margin: 0;
+        background: #111111;
+        color-scheme: dark;
       }
 
       #app-boot {
         position: fixed;
         inset: 0;
-        background: #0c0a09;
-        font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        background: #111111;
+        font: 15px/1.6 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
       }
 
-      html[data-theme='light'] #app-boot {
-        background: #f5f1ea;
-      }
-
-      html[data-boot-mode='portal'] #app-boot {
-        background: #faf8f5;
-      }
-
-      /* 认证态骨架：居中静谧加载环，与登录页同底色零跳变 */
       .boot-auth {
         height: 100%;
         display: flex;
@@ -137,33 +96,20 @@
         align-items: center;
         justify-content: center;
         gap: 14px;
-        color: rgba(243, 237, 228, 0.48);
-      }
-
-      html[data-theme='light'] .boot-auth {
-        color: rgba(39, 37, 30, 0.52);
+        color: #9a9a9a;
       }
 
       .boot-ring {
-        width: 22px;
-        height: 22px;
-        border-radius: 50%;
-        border: 2px solid rgba(245, 235, 220, 0.14);
-        border-top-color: #e8a84a;
+        width: 20px;
+        height: 20px;
+        border: 2px solid #2a2a2a;
+        border-top-color: #c3f53c;
         animation: boot-spin 0.8s linear infinite;
       }
 
-      html[data-theme='light'] .boot-ring {
-        border-color: rgba(39, 37, 30, 0.16);
-        border-top-color: #016a71;
-      }
-
-      /* 门户态统一骨架壳：在品牌配置、登录态与路由组件全部就绪前稳定呈现暖纸布局轮廓 */
       .boot-portal {
         display: none;
-        max-width: min(1480px, 94vw);
-        margin: 0 auto;
-        padding: 0 20px;
+        width: 100%;
         box-sizing: border-box;
       }
 
@@ -176,40 +122,39 @@
       }
 
       .boot-topbar {
-        height: 62px;
+        height: 60px;
+        padding: 0 clamp(16px, 3.5vw, 48px);
         display: flex;
         align-items: center;
         justify-content: space-between;
-        border-bottom: 1px solid #e7e4de;
+        border-bottom: 1px solid #2a2a2a;
+        background: #111111;
       }
 
       .boot-pill {
-        border-radius: 10px;
-        background: #ece6dc;
+        border-radius: 2px;
+        background: #171717;
         animation: boot-pulse 1.5s ease-in-out infinite;
       }
 
       .boot-shelf {
-        margin-top: 20px;
-        padding: 20px 22px;
-        border-radius: 16px;
-        border: 1px solid #d1d1cd;
-        background: #fdfbfa;
+        padding: 36px clamp(16px, 3.5vw, 48px) 0;
       }
 
       .boot-posters {
-        margin-top: 14px;
+        margin-top: 18px;
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(144px, 1fr));
-        gap: 14px;
+        grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+        gap: 10px;
         overflow: hidden;
-        max-height: 228px;
+        max-height: 260px;
       }
 
       .boot-card {
         aspect-ratio: 2 / 3;
-        border-radius: 12px;
-        background: #efe9df;
+        border-radius: 2px;
+        background: #171717;
+        border: 1px solid #222222;
         animation: boot-pulse 1.5s ease-in-out infinite;
       }
 
@@ -218,8 +163,8 @@
       }
 
       @keyframes boot-pulse {
-        0%, 100% { opacity: 0.92; }
-        50% { opacity: 0.54; }
+        0%, 100% { opacity: 0.9; }
+        50% { opacity: 0.45; }
       }
 
       @media (prefers-reduced-motion: reduce) {
@@ -232,16 +177,11 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: #0c0a09;
-        color: rgba(243, 237, 228, 0.68);
-        font: 14px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        background: #111111;
+        color: #f2f2f2;
+        font: 15px/1.6 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
         text-align: center;
         padding: 24px;
-      }
-
-      html[data-theme='light'] #app-noscript {
-        background: #faf8f5;
-        color: #27251e;
       }
     </style>
   </head>

@@ -321,36 +321,10 @@ export const V4_PATHS = new Set(['/', '/library', '/collector', '/favorites', '/
 const V4_PATH_PREFIXES = ['/collections/', '/media/', '/library/']
 // 底部坞由 App.vue 全局常驻渲染（PanelTabbar，≤768px 唯一一套，
 // 桌面 ≥769px 由 CSS 隐藏）；各视图模板不再自带 <PanelTabbar/>。
-function restoreUserTheme() {
-  // 从 useTheme.ts 同 key 读用户偏好（默认 dark），恢复 data-theme
-  let pref = 'dark'
-  try {
-    const s = localStorage.getItem('aetrix-theme')
-    if (s === 'light' || s === 'dark' || s === 'system') pref = s
-  } catch { /* ignore */ }
-  const html = document.documentElement
-  const light =
-    pref === 'light' ||
-    (pref === 'system' &&
-      typeof window !== 'undefined' &&
-      window.matchMedia?.('(prefers-color-scheme: light)').matches)
-  if (light) html.setAttribute('data-theme', 'light')
-  else html.removeAttribute('data-theme')
-  // 浏览器工具栏色跟回用户主题（与 useTheme.ts applyTheme 一致）
-  document
-    .querySelector('meta[name="theme-color"]')
-    ?.setAttribute('content', light ? '#f5f1ea' : '#0c0a09')
-}
-router.afterEach((to) => {
-  if (!panelV4) return
-  // 尾斜杠规范化：/game/ 与 /game 是同一页；根路径 '/' 去掉斜杠会变空串，要兜回 '/'
-  const v4Path = to.path.replace(/\/+$/, '') || '/'
-  if (to.name === 'not-found' || V4_PATHS.has(v4Path) || V4_PATH_PREFIXES.some((p) => v4Path.startsWith(p))) {
-    document.documentElement.setAttribute('data-theme', 'light')
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#faf8f5')
-  } else {
-    restoreUserTheme()
-  }
+// 帆桥暗厅默认全站深色统一（#111111），消除页面切换间的底色与状态栏翻转
+router.afterEach(() => {
+  document.documentElement.removeAttribute('data-theme')
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#111111')
 })
 
 // SPA 部署竞态兜底（2026-10-13 实锤：#788 部署把全部 chunk 换了新哈希，

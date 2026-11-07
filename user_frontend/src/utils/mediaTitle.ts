@@ -6,7 +6,7 @@ const BRACKET_NOISE_RE =
   /\[[^\]]*(?:字幕|音轨|配音|双语|国粤|国英|简繁|中英|特效|合集|tmdbid?|tmdb)[^\]]*\]|\{tmdb(?:id)?[-=]\d+\}/gi
 const CASE_SENSITIVE_GROUP_RE = /(?:\b[A-Za-z0-9_]+@[A-Za-z0-9_]+\b|\bbeAst\b)/g
 const PT_JUNK_RE =
-  /\b(?:2160p|1440p|1080[ip]|720p|480p|4k|8k|uhd|hdr10\+?|hdr|sdr|dv|dolby|hevc|avc|[hx][.\s]?26[45]|blu[\s-]?ray|bluray|remux|web[\s-]?dl|webrip|bdrip|brrip|hdtv|dvdrip|bdmv|truehd(?:\s*\d[.\s]\d)?|dts(?:[-\s]?hd(?:[.\s]?ma|[.\s]?hra?)?)?(?:[.\s]?\d[.\s]?\d)?|dtshd(?:ma)?(?:[.\s]?\d[.\s]?\d)?|hdma(?:[.\s]?\d[.\s]?\d)?|hd\s+ma(?:\s+\d[\s.]\d)?|ddp?[.\s]?\d[.\s]?\d|(?:eac3|ac3|aac|flac)(?:[.\s]?\d[.\s]?\d)?|atmos|(?:8|10|12)\s*bit|(?:[2-9]|multi|dual|2ual)audios?|pgs|repack|proper|complete|minihd|mnhd|beitai|chdweb|chdbits|tagweb|taghd|momoweb|momohd|ctrlweb|ctrlhd|enthd|bathd|homeweb|homehd|hdbweb|frds|adweb|ourtv|harestv|hhweb|mweb|ttg|2d3d)\b/gi
+  /\b(?:2160p|1440p|1080[ip]|720p|480p|4k|8k|uhd|hdr10\+?|hdr|sdr|dv|dolby|hevc|avc|[hx][.\s]?26[45]|blu[\s-]?ray|bluray|remux|web[\s-]?dl|webrip|bdrip|brrip|hdtv|dvdrip|bdmv|truehd(?:\s*\d[.\s]\d)?|dts(?:[-\s]?hd(?:[.\s]?ma|[.\s]?hra?)?)?(?:[.\s]?\d[.\s]?\d)?|dtshd(?:ma)?(?:[.\s]?\d[.\s]?\d)?|hdma(?:[.\s]?\d[.\s]?\d)?|hd\s+ma(?:\s+\d[\s.]\d)?|ma[.\s]?[1257][.\s][01]|ddp?[.\s]?\d[.\s]\d|(?:eac3|ac3|aac|flac)(?:[.\s]?\d[.\s]\d)?|atmos|(?:8|10|12)\s*bit|(?:[2-9]|multi|dual|2ual)audios?|pgs|repack|proper|complete|minihd|mnhd|beitai|chdweb|chdbits|tagweb|taghd|momoweb|momohd|ctrlweb|ctrlhd|enthd|bathd|homeweb|homehd|hdbweb|frds|adweb|ourtv|harestv|hhweb|mweb|ttg|2d3d)\b/gi
 const TAIL_SHORT_TAG_RE =
   /\s+[\[(（【]?\s*(?:hktv|hk|tw|us|gb|kr|jp|cn|gl|cee|dc|alt|chd|xiaomi|ma|hd)\s*[\])）】]?\s*$/i
 const ROMAN_RE = /^(?:I{1,3}|IV|VI{0,3}|IX|XI{0,2}|[\u2160-\u216b])$/

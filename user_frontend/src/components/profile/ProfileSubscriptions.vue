@@ -145,7 +145,7 @@ const welfareExpiresDate = computed(() => {
             v-for="days in ([7, 30] as const)"
             :key="days"
             type="button"
-            class="btn btn-primary renew-btn"
+            :class="['btn', 'renew-btn', days === 30 ? 'btn-primary' : 'renew-btn-sec']"
             :disabled="renewingWelfare != null || tgBound === false"
             @click="emit('renew-welfare', days)"
           >{{ renewingWelfare === days ? '续期中…' : `续期 ${days} 天` }}</button>
@@ -213,107 +213,111 @@ const welfareExpiresDate = computed(() => {
    全局样式无此 keyframes，不迁则 animation 失效 */
 .pane {
   min-width: 0;
-  padding: 1.25rem;
-  background: var(--paper-card);
-  border: 1px solid var(--paper-line);
-  border-radius: var(--paper-radius-lg);
-  animation: pane-in 0.45s var(--paper-ease) both;
+  padding: 20px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
   content-visibility: auto;
   contain-intrinsic-size: auto 200px;
 }
-@keyframes pane-in {
-  from { opacity: 0; transform: translateY(12px); }
-  to { opacity: 1; transform: none; }
-}
 .pane-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.pane-title { display: flex; align-items: center; gap: 8px; font-size: 16px; margin: 0; }
-/* P2-25：旧 ProfileView.vue 第 1407-1436 行全文——生效中琥珀底高亮、临期整块换警示底色 */
+.pane-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; color: #f2f2f2; margin: 0; }
 .sub-active {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.875rem 1rem;
-  background: var(--paper-primary-soft);
-  border: 1px solid var(--paper-primary-border);
-  border-radius: var(--paper-r-md);
+  gap: 12px;
+  padding: 14px 16px;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
 }
-/* 临期状态：整块底色换成警示色，避免"还剩 3 天"淹没在常规配色里 */
 .sub-active.warn {
-  background: var(--paper-warning-soft);
-  border-color: var(--paper-warning-soft);
+  background: #1e1e1e;
+  border-color: rgba(229, 83, 75, 0.45);
 }
-/* P3-13：等宽数字（倒计时不抖动） */
-.sub-plan { font-weight: 600; color: var(--paper-ink); font-variant-numeric: tabular-nums; }
-.sub-end { margin-top: 0.125rem; font-size: 0.8125rem; color: var(--paper-ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.sub-warn { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--paper-warning); margin: 6px 0 0; }
-.badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; }
-.badge.ok { background: var(--paper-success-soft); color: var(--paper-success); }
-.badge.warn { background: var(--paper-warning-soft); color: var(--paper-warning); }
-.badge.free { background: var(--paper-primary-soft); color: var(--paper-primary); }
-.badge.off { background: var(--paper-card-2); color: var(--paper-ink-3); }
+.sub-plan { font-weight: 700; color: #f2f2f2; font-variant-numeric: tabular-nums; }
+.sub-end { margin-top: 2px; font-size: 13px; color: #9a9a9a; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sub-warn { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #ef6b63; margin: 6px 0 0; }
+.badge { padding: 2px 8px; border-radius: 2px; border: 1px solid #2a2a2a; font-size: 11px; font-weight: 700; }
+.badge.ok { background: #1e1e1e; color: #c3f53c; border-color: #3a3a3a; }
+.badge.warn { background: #1e1e1e; color: #ef6b63; border-color: rgba(229, 83, 75, 0.45); }
+.badge.free { background: #1e1e1e; color: #c3f53c; border-color: #3a3a3a; }
+.badge.off { background: #141414; color: #9a9a9a; }
 .sub-history { list-style: none; margin: 12px 0 0; padding: 0; }
-.sub-history-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--paper-line); font-size: 13px; }
-/* R32：历史记录截断脚注（SupplyLogView .rc-foot 先例） */
-.sub-history-foot { padding: 8px 0 0; border-top: 1px solid var(--paper-line); text-align: center; font-size: 11px; color: var(--paper-ink-3); letter-spacing: 1px; }
-.sub-history-date { color: var(--paper-ink-3); margin-left: auto; }
-.text-btn.danger { color: var(--paper-danger); background: none; border: none; cursor: pointer; }
-/* r48-⑬：自动续订开关行 */
+.sub-history-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #242424; font-size: 13px; }
+.sub-history-foot { padding: 8px 0 0; border-top: 1px solid #242424; text-align: center; font-size: 11px; color: #9a9a9a; letter-spacing: 1px; }
+.sub-history-date { color: #9a9a9a; margin-left: auto; font-variant-numeric: tabular-nums; }
+.text-btn.danger { color: #e5534b; background: none; border: none; cursor: pointer; }
 .renew-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  padding: 0.75rem 1rem;
-  background: var(--paper-card-2);
-  border: 1px solid var(--paper-line);
-  border-radius: var(--paper-r-md);
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
 }
 .renew-info { display: flex; flex-direction: column; gap: 2px; }
-.renew-info b { font-size: 0.875rem; color: var(--paper-ink); }
-.renew-info small { font-size: 0.75rem; color: var(--paper-ink-3); line-height: 1.5; }
+.renew-info b { font-size: 14px; color: #f2f2f2; }
+.renew-info small { font-size: 12px; color: #9a9a9a; line-height: 1.5; }
 .renew-switch {
   flex: none;
-  width: 44px;
-  height: 24px;
-  border-radius: 999px;
-  border: 1px solid var(--paper-line);
-  background: var(--paper-card);
+  width: 42px;
+  height: 22px;
+  border-radius: 2px;
+  border: 1px solid #3a3a3a;
+  background: #111111;
   cursor: pointer;
   position: relative;
-  transition: background 0.2s var(--paper-ease, ease), border-color 0.2s;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 .renew-switch .knob {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--paper-ink-3);
-  transition: transform 0.2s var(--paper-ease, ease), background 0.2s;
+  width: 16px;
+  height: 16px;
+  border-radius: 1px;
+  background: #9a9a9a;
+  transition: transform 0.15s ease, background-color 0.15s ease;
 }
-.renew-switch.on { background: var(--paper-primary); border-color: var(--paper-primary); }
-.renew-switch.on .knob { transform: translateX(20px); background: #fff; }
+.renew-switch.on { background: #c3f53c; border-color: #c3f53c; }
+.renew-switch.on .knob { transform: translateX(20px); background: #111111; }
 .renew-switch:disabled { opacity: 0.6; cursor: wait; }
-.renew-switch:focus-visible { outline: 2px solid var(--paper-primary); outline-offset: 2px; }
-/* P2-26：公益服状态块三条旧规则全文（ProfileView.vue 第 1087 / 1050 / 1469-1473 行） */
-.sub-free { display: flex; flex-direction: column; gap: 0.375rem; align-items: flex-start; }
-/* 自助续期：沿用 renew-row 的卡片语气（浅底 + 细边 + 圆角），与“到期自动续订”行同款 */
+.renew-switch:focus-visible { outline: 2px solid #c3f53c; outline-offset: 2px; }
+.sub-free { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .renew-block {
   align-self: stretch;
-  margin-top: 0.75rem;
-  padding: 0.75rem 1rem;
-  background: var(--paper-card-2);
-  border: 1px solid var(--paper-line);
-  border-radius: var(--paper-r-md);
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
 }
-.renew-block-title { font-size: 0.875rem; font-weight: 600; color: var(--paper-ink); }
+.renew-block-title { font-size: 14px; font-weight: 700; color: #f2f2f2; }
 .renew-line { margin: 4px 0 0; font-size: 0.8125rem; color: var(--paper-ink-3); font-variant-numeric: tabular-nums; }
 .renew-hint { margin: 6px 0 0; font-size: 12px; color: var(--paper-warning); }
 .renew-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .renew-btn:disabled { opacity: 0.6; cursor: wait; }
+.renew-btn {
+  height: 38px;
+  min-height: 38px;
+  padding: 0 16px;
+  font-size: 13.5px;
+  border-radius: 2px;
+}
+.renew-btn-sec {
+  background: #171717;
+  border: 1px solid #333333;
+  color: #f2f2f2;
+  font-weight: 600;
+}
+.renew-btn-sec:hover:not(:disabled) {
+  border-color: #f2f2f2;
+}
 .pane-empty {
   margin: 0;
   font-size: 0.8125rem;

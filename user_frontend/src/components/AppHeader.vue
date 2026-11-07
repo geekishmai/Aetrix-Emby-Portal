@@ -152,10 +152,7 @@ const showHeaderEconomyPills = computed(() => {
     p.startsWith('/collector')
   )
 })
-const showThemeToggle = computed(() => {
-  const p = (route.path || '/').replace(/\/+$/, '') || '/'
-  return p === '/login' || p === '/tg-login' || p === '/privacy'
-})
+const showThemeToggle = computed(() => false)
 const visibleNav = computed(() => getVisiblePrimaryNav(branding.gamification_enabled))
 const headerLogoBroken = ref(false)
 watch(
@@ -780,37 +777,28 @@ onBeforeUnmount(() => {
 .app-header {
   position: sticky;
   top: 0;
-  /* PWA 刘海屏：顶栏垫进状态栏安全区（非刘海机 env 为 0，无副作用） */
   padding-top: env(safe-area-inset-top, 0px);
   z-index: 50;
-  /* DESIGN.md §5-7：内容未滚过时顶栏融入纸面（透明、无模糊、无边框）；
-     内容滚动到顶栏下方时才加 blur(12px) + 1px #e3e3e2 下边框 */
-  background: transparent;
-  border-bottom: 1px solid transparent;
+  background: #111111;
+  border-bottom: 1px solid #2a2a2a;
   overflow: hidden;
-  transition: background-color var(--paper-fast, 0.16s) var(--paper-ease, ease),
-    border-color var(--paper-fast, 0.16s) var(--paper-ease, ease);
 }
 .app-header.is-scrolled {
-  /* ui/beautify-20261018：DESIGN.md §5-7 口径——滚动后才 blur(12px) + 1px #e3e3e2 边框 */
-  /* P3-4：滚动背景色与 aurora.css --au-chrome（0.96）统一，单源 */
-  background: var(--au-chrome);
-  -webkit-backdrop-filter: saturate(1.4) blur(12px);
-  backdrop-filter: saturate(1.4) blur(12px);
-  border-bottom: 1px solid #e3e3e2;
+  background: #111111;
+  border-bottom: 1px solid #2a2a2a;
 }
 
 .header-container {
   position: relative;
   z-index: 1;
-  max-width: 1080px;
+  max-width: 100%;
   margin: 0 auto;
-  padding: 0 1.25rem;
-  min-height: 62px;
+  padding: 0 clamp(16px, 3.5vw, 48px);
+  min-height: 60px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 1.5rem;
 }
 
 .header-logo {
@@ -826,29 +814,28 @@ onBeforeUnmount(() => {
 .header-logo::after { content: ""; position: absolute; top: -10px; right: -8px; bottom: -10px; left: -8px; }
 
 .logo-mark {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--paper-r-sm);
-  color: var(--paper-primary);
+  border-radius: 4px;
+  color: #c3f53c;
 }
 
 .logo-mark img {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  border-radius: inherit;
+  border-radius: 4px;
 }
 
-/* 品牌字：与登录页同一口径，CJK 不拉距、不再 uppercase */
 .logo-text {
-  font-family: var(--paper-font-serif);
-  font-size: 1.0625rem;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  color: var(--paper-ink);
+  font-family: var(--dh-font-sans);
+  font-size: 1.125rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: #f2f2f2;
 }
 
 .main-nav {
@@ -865,45 +852,41 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 0.375rem;
-  padding: 0.4375rem 0.75rem;
+  padding: 0.5rem 0.75rem;
   border: none;
-  border-radius: var(--paper-r-sm);
-  font-size: 0.875rem;
-  font-weight: 500;
-  letter-spacing: 0.04em;
+  border-radius: 2px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   white-space: nowrap;
-  color: var(--paper-ink-3);
+  color: #9a9a9a;
   text-decoration: none;
-  transition: color var(--paper-fast) var(--paper-ease);
+  transition: color 0.15s ease;
 }
 
-/* 触点 44px：::before 透明扩展，安静纯文字导航视觉不变（::after 留给当前页圆点） */
 .nav-link::before { content: ""; position: absolute; top: -7px; right: 0; bottom: -7px; left: 0; }
 
 .nav-link svg { display: none; }
 
 .nav-link:hover {
-  color: var(--paper-ink);
+  color: #f2f2f2;
 }
-
-.nav-link:active { transform: scale(0.98); }
 
 .nav-link-active,
 .nav-link-active:hover {
-  color: #016a71;
-  font-weight: 600;
+  color: #c3f53c;
+  font-weight: 700;
 }
 
 .nav-link-active::after {
   content: '';
   position: absolute;
-  left: 50%;
+  left: 0.75rem;
+  right: 0.75rem;
   bottom: 0;
-  width: 4px;
-  height: 4px;
-  margin-left: -2px;
-  border-radius: 50%;
-  background: #016a71;
+  height: 2px;
+  border-radius: 0;
+  background: #c3f53c;
 }
 
 /* 键盘焦点环：与全站其余可聚焦元素同一配方（替代掉的 .theme-opt:focus-visible 同源） */
@@ -1073,7 +1056,7 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 .user-btn .avatar {
-  border-radius: 10px;
+  border-radius: 2px;
 }
 
 /* 头像右上角的未读点（只在 ≤420px 消息铃铛隐藏时出现） */
@@ -1113,9 +1096,10 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
-  background: var(--paper-primary);
-  color: var(--paper-on-primary);
+  border-radius: 2px;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  color: #f2f2f2;
   font-size: 0.8125rem;
   font-weight: 800;
 }

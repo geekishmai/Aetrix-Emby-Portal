@@ -46,7 +46,7 @@
       </div>
 
       <div v-if="loading" class="p2-poster-row" aria-hidden="true">
-        <div v-for="n in 7" :key="n" class="p2-poster-skel">
+        <div v-for="n in 8" :key="n" class="p2-poster-skel">
           <div class="v4-skeleton p2-poster-skel-img"></div>
           <div class="v4-skeleton p2-poster-skel-line"></div>
         </div>
@@ -105,12 +105,20 @@
                 <span class="p2-ph-note">暂无海报</span>
               </div>
               <span v-if="resOf(item)" class="p2-badge-res">{{ resOf(item) }}</span>
-              <span v-if="ratingOf(item)" class="p2-badge-rating">★ {{ ratingOf(item) }}</span>
+              <div class="p2-poster-hover" aria-hidden="true">
+                <div class="p2-hover-meta">
+                  <span>{{ item.Type === 'Series' ? '剧集' : '电影' }}</span>
+                  <span v-if="item.ProductionYear">{{ item.ProductionYear }}</span>
+                  <span v-if="ratingOf(item)" class="p2-hover-score">★ {{ ratingOf(item) }}</span>
+                </div>
+                <div class="p2-hover-title">{{ titleOf(item) }}</div>
+              </div>
             </div>
             <div class="p2-poster-name" :title="titleOf(item)">{{ titleOf(item) }}</div>
             <div class="p2-poster-meta">
               <span>{{ item.Type === 'Series' ? '剧集' : '电影' }}</span>
               <span v-if="item.ProductionYear">· {{ item.ProductionYear }}</span>
+              <span v-if="ratingOf(item)">· ★ {{ ratingOf(item) }}</span>
             </div>
           </RouterLink>
         </div>
@@ -304,21 +312,23 @@ onUnmounted(() => {
 
 <style scoped>
 .p2-hot-band {
-  max-width: min(1480px, 94vw);
-  margin: 14px auto 0;
-  padding: 0 20px;
+  width: 100%;
+  max-width: min(1720px, 96vw);
+  margin: 28px auto 0;
+  padding: 0 24px;
+  box-sizing: border-box;
 }
 
 .p2-hot-card {
-  background: #fdfbfa;
-  border: 1px solid #d1d1cd;
-  border-radius: 16px;
-  padding: 18px 22px 20px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
 }
 
 .p2-hot-head {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 12px;
@@ -328,54 +338,56 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px 12px;
+  gap: 6px 14px;
   min-width: 0;
 }
 
 .p2-hot-title {
   margin: 0;
-  font-size: 18px;
-  font-weight: 500;
-  line-height: 1.35;
-  letter-spacing: 0;
-  color: #27251e;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: #f2f2f2;
 }
 
 .p2-hot-sub {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.45;
-  color: #524b42;
+  color: #9a9a9a;
 }
 
 .p2-hot-more {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 36px;
-  padding: 4px 12px;
-  border-radius: 6px;
-  border: 1px solid #d1d1cd;
-  color: #016a71;
-  font-size: 14px;
-  font-weight: 500;
+  gap: 5px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border-radius: 2px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  color: #f2f2f2;
+  font-size: 13px;
+  font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
   flex-shrink: 0;
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 
 .p2-hot-more:hover {
-  transform: translateY(-1px);
-  opacity: 0.88;
+  border-color: #c3f53c;
+  color: #c3f53c;
 }
 
+/* 建筑感底边下划线页签：杜绝胶囊圆角堆砌 */
 .p2-lib-tabs {
   display: flex;
-  gap: 8px;
+  gap: 20px;
   overflow-x: auto;
-  padding-bottom: 6px;
-  margin-bottom: 12px;
+  border-bottom: 1px solid #222222;
+  margin-bottom: 16px;
   scrollbar-width: none;
 }
 
@@ -384,29 +396,31 @@ onUnmounted(() => {
 }
 
 .p2-lib-tab {
+  position: relative;
   flex: 0 0 auto;
-  min-height: 34px;
-  padding: 5px 14px;
-  border-radius: 9999px;
-  border: 1px solid #d1d1cd;
-  background: #faf8f5;
-  color: #524b42;
+  min-height: 38px;
+  padding: 6px 2px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: #9a9a9a;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   font-family: inherit;
   cursor: pointer;
   white-space: nowrap;
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: color 0.15s ease, border-color 0.15s ease;
 }
 
 .p2-lib-tab:hover {
-  color: #27251e;
+  color: #f2f2f2;
 }
 
 .p2-lib-tab.is-active {
-  background: #016a71;
-  border-color: #016a71;
-  color: #ffffff;
+  color: #f2f2f2;
+  border-bottom-color: #c3f53c;
+  font-weight: 700;
 }
 
 .p2-shelf-wrap {
@@ -415,11 +429,15 @@ onUnmounted(() => {
 
 .p2-poster-row {
   display: flex;
-  gap: 14px;
+  gap: 10px;
   overflow-x: auto;
   scroll-snap-type: x proximity;
   padding-bottom: 4px;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+.p2-poster-row::-webkit-scrollbar {
+  display: none;
 }
 
 .p2-poster-row.is-dragging {
@@ -428,27 +446,44 @@ onUnmounted(() => {
   user-select: none;
 }
 
-.p2-poster-card {
-  flex: 0 0 156px;
-  width: 156px;
+.p2-poster-card,
+.p2-poster-skel {
+  flex: 0 0 calc((100% - 7 * 10px) / 8);
+  width: calc((100% - 7 * 10px) / 8);
+  min-width: 148px;
   scroll-snap-align: start;
   text-decoration: none;
   color: inherit;
-  transition: transform 0.16s ease;
+  display: flex;
+  flex-direction: column;
 }
 
-.p2-poster-card:hover {
-  transform: translateY(-2px);
+@media (min-width: 1280px) and (max-width: 1599.98px) {
+  .p2-poster-card,
+  .p2-poster-skel {
+    flex-basis: calc((100% - 6 * 10px) / 7);
+    width: calc((100% - 6 * 10px) / 7);
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1279.98px) {
+  .p2-poster-card,
+  .p2-poster-skel {
+    flex-basis: calc((100% - 5 * 10px) / 6);
+    width: calc((100% - 5 * 10px) / 6);
+    min-width: 136px;
+  }
 }
 
 .p2-poster-frame {
   position: relative;
   width: 100%;
   aspect-ratio: 2 / 3;
-  border-radius: 12px;
+  border-radius: 2px;
   overflow: hidden;
-  background: #f0ece4;
-  border: 1px solid #d1d1cd;
+  background: #171717;
+  border: 1px solid #222222;
+  transition: border-color 0.16s ease;
 }
 
 .p2-poster-frame img {
@@ -456,6 +491,7 @@ onUnmounted(() => {
   height: 100%;
   object-fit: cover;
   display: block;
+  transition: transform 0.22s ease;
 }
 
 .p2-poster-fallback {
@@ -465,14 +501,14 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  background: linear-gradient(160deg, #f5f1e8 0%, #eae3d5 100%);
-  color: #27251e;
+  background: #171717;
+  color: #f2f2f2;
 }
 
 .p2-ph-title {
   font-size: 14px;
-  font-weight: 500;
-  line-height: 1.4;
+  font-weight: 700;
+  line-height: 1.35;
   display: -webkit-box;
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
@@ -480,56 +516,95 @@ onUnmounted(() => {
 }
 
 .p2-ph-note {
-  font-size: 12px;
-  color: #524b42;
+  font-size: 11px;
+  color: #9a9a9a;
 }
 
 .p2-badge-res {
   position: absolute;
-  top: 8px;
-  left: 8px;
-  padding: 2px 7px;
-  border-radius: 9999px;
-  background: rgba(250, 248, 245, 0.92);
-  border: 1px solid #d1d1cd;
-  color: #27251e;
-  font-size: 11px;
-  font-weight: 600;
+  top: 6px;
+  left: 6px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: rgba(17, 17, 17, 0.88);
+  border: 1px solid #2a2a2a;
+  color: #f2f2f2;
+  font-family: var(--dh-font-mono);
+  font-size: 10px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
-.p2-badge-rating {
+.p2-poster-hover {
   position: absolute;
-  bottom: 8px;
-  right: 8px;
-  padding: 2px 7px;
-  border-radius: 9999px;
-  background: #016a71;
-  color: #ffffff;
+  inset: auto 0 0 0;
+  padding: 24px 10px 10px;
+  background: linear-gradient(180deg, transparent 0%, rgba(17, 17, 17, 0.94) 46%, #111111 100%);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  pointer-events: none;
+}
+
+.p2-hover-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11px;
-  font-weight: 500;
+  color: #9a9a9a;
   font-variant-numeric: tabular-nums;
 }
 
-.p2-poster-name {
-  margin-top: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 1.38;
-  color: #27251e;
+.p2-hover-score {
+  color: #c3f53c;
+  font-weight: 700;
+}
+
+.p2-hover-title {
+  margin-top: 3px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: #f2f2f2;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
+@media (hover: hover) and (pointer: fine) {
+  .p2-poster-card:hover .p2-poster-frame {
+    border-color: #c3f53c;
+  }
+  .p2-poster-card:hover .p2-poster-frame img {
+    transform: scale(1.025);
+  }
+  .p2-poster-card:hover .p2-poster-hover {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.p2-poster-name {
+  margin-top: 7px;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #e6e6e6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .p2-poster-meta {
   margin-top: 2px;
   display: flex;
-  gap: 5px;
-  font-size: 13px;
-  color: #524b42;
+  gap: 4px;
+  font-size: 12px;
+  color: #9a9a9a;
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .p2-shelf-arrow {
@@ -537,16 +612,21 @@ onUnmounted(() => {
   top: 40%;
   transform: translateY(-50%);
   z-index: 2;
-  width: 36px;
-  height: 36px;
-  border-radius: 9999px;
-  border: 1px solid #d1d1cd;
-  background: rgba(253, 251, 250, 0.95);
-  color: #27251e;
+  width: 34px;
+  height: 34px;
+  border-radius: 2px;
+  border: 1px solid #333333;
+  background: rgba(23, 23, 23, 0.94);
+  color: #f2f2f2;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+
+.p2-shelf-arrow:hover {
+  border-color: #c3f53c;
+  color: #c3f53c;
 }
 
 .p2-shelf-arrow.is-left {
@@ -558,50 +638,50 @@ onUnmounted(() => {
 }
 
 .p2-inline-link {
-  color: #016a71;
-  font-weight: 500;
+  color: #c3f53c;
+  font-weight: 600;
   text-decoration: none;
   margin-left: 4px;
-}
-
-.p2-poster-skel {
-  flex: 0 0 156px;
-  width: 156px;
 }
 
 .p2-poster-skel-img {
   width: 100%;
   aspect-ratio: 2 / 3;
-  border-radius: 12px;
+  border-radius: 2px;
 }
 
 .p2-poster-skel-line {
   height: 14px;
   width: 80%;
-  margin-top: 8px;
-  border-radius: 6px;
+  margin-top: 7px;
+  border-radius: 2px;
 }
 
 @media (max-width: 767px) {
   .p2-hot-band {
     max-width: 100%;
     padding: 0 16px;
-    margin-top: 12px;
+    margin-top: 22px;
   }
 
-  .p2-hot-card {
-    padding: 14px 16px 16px;
+  .p2-hot-sub {
+    display: none;
+  }
+
+  .p2-poster-row {
+    gap: 8px;
   }
 
   .p2-poster-card,
   .p2-poster-skel {
-    flex: 0 0 128px;
-    width: 128px;
+    flex: 0 0 112px;
+    width: 112px;
+    min-width: 112px;
   }
 
   .p2-lib-tab {
-    min-height: 40px;
-    padding: 6px 14px;
+    min-height: 38px;
+    padding: 6px 2px 8px;
   }
 
   .p2-shelf-arrow {

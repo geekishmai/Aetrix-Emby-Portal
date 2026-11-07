@@ -53,22 +53,10 @@ const resolved = computed<ResolvedTheme>(() => {
   return preference.value
 })
 
-function isForcedLightPortalPath(): boolean {
-  if (typeof window === 'undefined') return false
-  const p = (window.location.pathname || '/').replace(/\/+$/, '') || '/'
-  return p !== '/login' && p !== '/tg-login' && p !== '/privacy'
-}
-
 function applyTheme() {
   const html = document.documentElement
-  if (isForcedLightPortalPath()) {
-    html.setAttribute('data-theme', 'light')
-    metaTheme?.setAttribute('content', '#faf8f5')
-    return
-  }
-  if (resolved.value === 'light') html.setAttribute('data-theme', 'light')
-  else html.removeAttribute('data-theme')
-  metaTheme?.setAttribute('content', resolved.value === 'light' ? '#f5f1ea' : '#0c0a09')
+  html.removeAttribute('data-theme')
+  metaTheme?.setAttribute('content', '#111111')
 }
 
 function setPreference(value: ThemePreference) {

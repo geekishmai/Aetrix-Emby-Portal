@@ -127,9 +127,9 @@ function hideBrokenPoster(e: Event): void {
   width: 160px;
   aspect-ratio: 2 / 3;
   object-fit: cover;
-  border-radius: 10px;
+  border-radius: 2px;
   flex-shrink: 0;
-  filter: brightness(0.65) saturate(0.85);
+  filter: brightness(0.36) saturate(0.7);
   user-select: none;
 }
 
@@ -137,10 +137,7 @@ function hideBrokenPoster(e: Event): void {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background:
-    radial-gradient(ellipse 75% 65% at 50% 45%, var(--au-bg) 45%, transparent 100%),
-    var(--au-bg);
-  opacity: 0.6;
+  background: rgba(17, 17, 17, 0.82);
 }
 
 @media (max-width: 767px) {

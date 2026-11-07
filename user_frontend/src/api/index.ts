@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { toUserMessage } from '@/utils/toUserMessage'
-import { getEmbyApiKey, setEmbyApiKey } from '@/api/imageKey'
+import { getEmbyApiKey, setEmbyApiKey, shareAccountCardFlight } from '@/api/imageKey'
 
 // 使用空 baseURL，让请求自动适配当前域名（前后端同源部署）
 const api = axios.create({
@@ -547,18 +547,19 @@ export interface SetEmbyPasswordResult {
 
 export const embyApi = {
   // 账号卡（服务器地址 / Emby 用户名 / 播放器一键导入 scheme，scheme 不含密码）
-  getAccountCard: () => {
-    // PA-054：把手里那把图片 key 经请求头带回去，够新后端就复用不轮换；
-    // 多处视图反复读卡不再互相踢掉对方的 key。没 key 时不带头，走轮换老路。
-    const currentKey = getEmbyApiKey()
-    return api.get<never, AccountCard>(
-      '/api/user/emby/server',
-      currentKey ? { headers: { 'X-Web-Image-Key': currentKey } } : undefined,
-    ).then((card) => {
-      if (card?.emby_api_key) setEmbyApiKey(card.emby_api_key)
-      return card
-    })
-  },
+  getAccountCard: () =>
+    shareAccountCardFlight(() => {
+      // PA-054：把手里那把图片 key 经请求头带回去，够新后端就复用不轮换；
+      // 多处视图并发/反复读卡不再互相踢掉对方的 key。
+      const currentKey = getEmbyApiKey()
+      return api.get<never, AccountCard>(
+        '/api/user/emby/server',
+        currentKey ? { headers: { 'X-Web-Image-Key': currentKey } } : undefined,
+      ).then((card) => {
+        if (card?.emby_api_key) setEmbyApiKey(card.emby_api_key)
+        return card
+      })
+    }),
 
   // 公益服：花能量解锁 Emby 账号/线路查看权限（幂等）
   unlockView: (realmId?: number) =>

@@ -29,7 +29,7 @@
 
       <div v-else-if="notGranted" class="md-section-card" role="status">
         <h2 class="md-sec-h">尚未开启片库观影权限</h2>
-        <p style="margin:0;font-size:14px;color:#524b42;line-height:1.6">
+        <p style="margin:0;font-size:14px;color:#9a9a9a;line-height:1.6">
           前往「播放器接入」或「我的」激活观影权限后，即可查看完整影片详情并一键唤起播放器点播。
         </p>
         <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
@@ -123,7 +123,7 @@
                   :disabled="favBusy"
                   @click="toggleFav"
                 >
-                  <Heart :size="15" :fill="isFav ? '#36b3ba' : 'none'" aria-hidden="true" />
+                  <Heart :size="15" :fill="isFav ? '#c3f53c' : 'none'" :color="isFav ? '#c3f53c' : 'currentColor'" aria-hidden="true" />
                   <span>{{ isFav ? '已收藏' : '收藏' }}</span>
                 </button>
                 <button type="button" class="md-btn-ghost" @click="pickerOpen = true">
@@ -625,7 +625,7 @@ onUnmounted(() => {
 
 <style scoped>
 .md-page {
-  padding: 20px 24px 64px;
+  padding: 22px 24px 64px;
 }
 
 .md-topbar {
@@ -641,47 +641,49 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 38px;
+  min-height: 36px;
   padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid #d1d1cd;
-  background: #fdfbfa;
-  color: #27251e;
-  font-size: 14px;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #171717;
+  color: #f2f2f2;
+  font-size: 13.5px;
+  font-weight: 600;
   font-family: inherit;
   cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 
 .md-back-btn:hover {
-  border-color: #016a71;
-  color: #016a71;
+  border-color: #c3f53c;
+  color: #c3f53c;
 }
 
 .md-series-back {
-  font-size: 14px;
-  font-weight: 500;
-  color: #016a71;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #c3f53c;
   text-decoration: none;
 }
 
 .md-hero-card {
   position: relative;
-  background: #171411;
-  border: 1px solid #2e2923;
-  border-radius: 16px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
   overflow: hidden;
-  color: #f6f1e7;
+  color: #f2f2f2;
 }
 
 .md-hero-card.has-backdrop {
-  min-height: 420px;
+  min-height: 440px;
 }
 
 .md-backdrop {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  background: #171411;
+  background: #111111;
   pointer-events: none;
 }
 
@@ -689,8 +691,8 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  object-position: center 22%;
-  opacity: 0.78;
+  object-position: center 20%;
+  opacity: 0.76;
   display: block;
 }
 
@@ -698,16 +700,16 @@ onUnmounted(() => {
   position: absolute;
   inset: 0;
   background:
-    linear-gradient(90deg, rgba(20, 17, 14, 0.95) 0%, rgba(20, 17, 14, 0.82) 48%, rgba(20, 17, 14, 0.34) 100%),
-    linear-gradient(180deg, rgba(20, 17, 14, 0.18) 0%, rgba(20, 17, 14, 0.62) 55%, rgba(20, 17, 14, 0.96) 100%);
+    linear-gradient(90deg, rgba(17, 17, 17, 0.96) 0%, rgba(17, 17, 17, 0.86) 48%, rgba(17, 17, 17, 0.42) 100%),
+    linear-gradient(180deg, rgba(17, 17, 17, 0.22) 0%, rgba(17, 17, 17, 0.68) 58%, #171717 100%);
 }
 
 .md-hero-grid {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 236px minmax(0, 1fr);
-  gap: 28px;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: 32px;
   padding: 36px 32px 32px;
   align-items: end;
 }
@@ -715,10 +717,10 @@ onUnmounted(() => {
 .md-poster-frame {
   width: 100%;
   aspect-ratio: 2 / 3;
-  border-radius: 14px;
+  border-radius: 2px;
   overflow: hidden;
-  background: #2b2620;
-  border: 1px solid rgba(255, 253, 248, 0.22);
+  background: #111111;
+  border: 1px solid #2a2a2a;
 }
 
 .md-poster-frame img {
@@ -736,10 +738,10 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   text-align: center;
-  background: linear-gradient(155deg, #322c25, #221e19);
-  color: #f6f1e7;
+  background: #111111;
+  color: #f2f2f2;
   font-size: 24px;
-  font-weight: 500;
+  font-weight: 800;
 }
 
 .md-logo-img {
@@ -749,27 +751,28 @@ onUnmounted(() => {
   object-fit: contain;
   margin-bottom: 10px;
   display: block;
-  filter: drop-shadow(0 2px 14px rgba(0, 0, 0, 0.68));
 }
 
 .md-title {
   margin: 0;
-  font-size: 28px;
-  font-weight: 500;
-  line-height: 1.3;
-  letter-spacing: 0;
-  color: #faf8f5;
+  font-size: clamp(26px, 2.8vw, 38px);
+  font-weight: 800;
+  line-height: 1.16;
+  letter-spacing: -0.02em;
+  color: #f2f2f2;
 }
 
 .md-title.has-logo {
-  font-size: 19px;
-  color: #e9e2d5;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: #9a9a9a;
 }
 
 .md-orig-title {
-  margin: 4px 0 0;
+  margin: 5px 0 0;
   font-size: 14px;
-  color: #cfc6b8;
+  color: #9a9a9a;
 }
 
 .md-meta-pills {
@@ -780,64 +783,68 @@ onUnmounted(() => {
 }
 
 .md-pill {
-  padding: 4px 12px;
-  border-radius: 9999px;
-  border: 1px solid rgba(255, 253, 248, 0.22);
-  background: rgba(20, 17, 14, 0.56);
-  color: #f4efe6;
-  font-size: 13px;
+  padding: 3px 9px;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: rgba(17, 17, 17, 0.85);
+  color: #f2f2f2;
+  font-family: var(--dh-font-mono);
+  font-size: 12px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
 .md-pill-teal {
-  border-color: #36b3ba;
-  background: rgba(1, 106, 113, 0.52);
-  color: #d4f8fa;
-  font-weight: 500;
+  border-color: #3a3a3a;
+  background: #1e1e1e;
+  color: #c3f53c;
+  font-weight: 700;
 }
 
 .md-genres {
-  margin-top: 12px;
+  margin-top: 10px;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .md-genre-chip {
-  font-size: 13px;
-  color: #e5ddd0;
-  background: rgba(255, 253, 248, 0.12);
-  padding: 3px 10px;
-  border-radius: 9999px;
+  font-size: 12.5px;
+  color: #9a9a9a;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  padding: 2px 9px;
+  border-radius: 2px;
 }
 
 .md-player-group {
-  margin-top: 20px;
+  margin-top: 22px;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
 }
 
+/* 唯一主操作按钮：荧光绿 #c3f53c + 黑字 */
 .md-btn-primary {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   min-height: 44px;
-  padding: 0 20px;
-  border-radius: 12px;
-  border: 1px solid #018088;
-  background: #016a71;
-  color: #ffffff;
+  padding: 0 22px;
+  border-radius: 2px;
+  border: 1px solid #c3f53c;
+  background: #c3f53c;
+  color: #111111;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 800;
   font-family: inherit;
   cursor: pointer;
-  transition: transform 0.16s ease, opacity 0.16s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
 .md-btn-primary:hover {
-  transform: translateY(-1px);
-  opacity: 0.94;
+  background: #d1fa58;
+  border-color: #d1fa58;
 }
 
 .md-btn-player {
@@ -846,20 +853,20 @@ onUnmounted(() => {
   gap: 7px;
   min-height: 44px;
   padding: 0 16px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 253, 248, 0.34);
-  background: rgba(250, 248, 245, 0.14);
-  color: #faf8f5;
+  border-radius: 2px;
+  border: 1px solid #333333;
+  background: #1e1e1e;
+  color: #f2f2f2;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: transform 0.16s ease, opacity 0.16s ease;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
 .md-btn-player:hover {
-  transform: translateY(-1px);
-  opacity: 0.9;
+  border-color: #f2f2f2;
+  background: #242424;
 }
 
 .md-btn-ghost {
@@ -868,30 +875,30 @@ onUnmounted(() => {
   gap: 6px;
   min-height: 44px;
   padding: 0 14px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 253, 248, 0.22);
-  background: rgba(20, 17, 14, 0.45);
-  color: #efe9de;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: rgba(17, 17, 17, 0.72);
+  color: #d0d0d0;
   font-size: 14px;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
-  transition: transform 0.16s ease, opacity 0.16s ease;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 
 .md-btn-ghost:hover {
-  transform: translateY(-1px);
-  opacity: 0.9;
+  border-color: #4a4a4a;
+  color: #f2f2f2;
 }
 
 .md-overview-block {
   margin-top: 22px;
   padding-top: 16px;
-  border-top: 1px solid rgba(255, 253, 248, 0.16);
+  border-top: 1px solid #2a2a2a;
 }
 
 .md-hero-card .md-sec-h {
-  color: #faf8f5;
+  color: #f2f2f2;
 }
 
 .md-sec-bar {
@@ -904,53 +911,54 @@ onUnmounted(() => {
 
 .md-sec-h {
   margin: 0 0 10px;
-  font-size: 17px;
-  font-weight: 500;
-  color: #27251e;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: #f2f2f2;
 }
 
 .md-sec-count {
   font-size: 13px;
-  color: #524b42;
+  color: #9a9a9a;
   font-variant-numeric: tabular-nums;
 }
 
 .md-overview {
   margin: 0;
   max-width: 72ch;
-  font-size: 15px;
+  font-size: 15.5px;
   line-height: 1.7;
-  color: #eae3d6;
+  color: #cccccc;
   white-space: pre-line;
 }
 
 .md-specs {
   margin: 18px 0 0;
   padding-top: 14px;
-  border-top: 1px solid rgba(255, 253, 248, 0.16);
+  border-top: 1px solid #2a2a2a;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px 20px;
 }
 
 .md-spec-item dt {
-  font-size: 13px;
-  color: #c8beae;
+  font-size: 12px;
+  color: #9a9a9a;
 }
 
 .md-spec-item dd {
   margin: 3px 0 0;
   font-size: 14px;
-  font-weight: 500;
-  color: #faf8f5;
+  font-weight: 600;
+  color: #f2f2f2;
   font-variant-numeric: tabular-nums;
 }
 
 .md-section-card {
   margin-top: 20px;
-  background: #fdfbfa;
-  border: 1px solid #d1d1cd;
-  border-radius: 16px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
   padding: 22px 24px;
 }
 
@@ -961,11 +969,15 @@ onUnmounted(() => {
 
 .md-cast-row {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   overflow-x: auto;
   scroll-snap-type: x proximity;
   padding-bottom: 4px;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+.md-cast-row::-webkit-scrollbar {
+  display: none;
 }
 
 .md-cast-row.is-dragging {
@@ -983,10 +995,10 @@ onUnmounted(() => {
 .md-actor-photo {
   width: 100%;
   aspect-ratio: 3 / 4;
-  border-radius: 12px;
+  border-radius: 2px;
   overflow: hidden;
-  border: 1px solid #d1d1cd;
-  background: #efe9df;
+  border: 1px solid #2a2a2a;
+  background: #1e1e1e;
 }
 
 .md-actor-photo img {
@@ -1002,17 +1014,17 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(155deg, #f4efe6 0%, #e7dfd0 100%);
-  color: #524b42;
-  font-size: 26px;
-  font-weight: 500;
+  background: #1e1e1e;
+  color: #9a9a9a;
+  font-size: 24px;
+  font-weight: 700;
 }
 
 .md-actor-name {
   margin-top: 8px;
-  font-size: 14px;
-  font-weight: 500;
-  color: #27251e;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f2f2f2;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1020,8 +1032,8 @@ onUnmounted(() => {
 
 .md-actor-role {
   margin-top: 2px;
-  font-size: 13px;
-  color: #524b42;
+  font-size: 12px;
+  color: #9a9a9a;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1032,16 +1044,21 @@ onUnmounted(() => {
   top: 38%;
   transform: translateY(-50%);
   z-index: 2;
-  width: 36px;
-  height: 36px;
-  border-radius: 9999px;
-  border: 1px solid #d1d1cd;
-  background: rgba(253, 251, 250, 0.95);
-  color: #27251e;
+  width: 34px;
+  height: 34px;
+  border-radius: 2px;
+  border: 1px solid #333333;
+  background: rgba(23, 23, 23, 0.94);
+  color: #f2f2f2;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+
+.md-cast-arrow:hover {
+  border-color: #c3f53c;
+  color: #c3f53c;
 }
 
 .md-cast-arrow.is-left {
@@ -1055,15 +1072,15 @@ onUnmounted(() => {
 .md-season-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
-  gap: 16px;
+  gap: 14px;
 }
 
 .md-season-poster {
   aspect-ratio: 2 / 3;
-  border-radius: 12px;
+  border-radius: 2px;
   overflow: hidden;
-  border: 1px solid #d1d1cd;
-  background: #efe9df;
+  border: 1px solid #2a2a2a;
+  background: #1e1e1e;
 }
 
 .md-season-poster img {
@@ -1082,34 +1099,36 @@ onUnmounted(() => {
   padding: 10px;
   text-align: center;
   font-size: 14px;
-  color: #524b42;
+  color: #9a9a9a;
 }
 
 .md-season-name {
   margin-top: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  color: #27251e;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f2f2f2;
 }
 
 .md-season-cnt {
-  font-size: 13px;
-  color: #524b42;
+  font-size: 12px;
+  color: #9a9a9a;
+  font-variant-numeric: tabular-nums;
 }
 
 .md-skel-poster {
   width: 100%;
   aspect-ratio: 2 / 3;
-  border-radius: 14px;
+  border-radius: 2px;
 }
 
 .md-ghost-link {
   display: inline-flex;
   align-items: center;
   padding: 8px 16px;
-  border-radius: 12px;
-  border: 1px solid #d1d1cd;
-  color: #27251e;
+  border-radius: 2px;
+  border: 1px solid #2a2a2a;
+  background: #1e1e1e;
+  color: #f2f2f2;
   text-decoration: none;
   font-size: 14px;
 }
@@ -1123,20 +1142,19 @@ onUnmounted(() => {
     min-height: 0;
   }
 
-  /* DESIGN.md §6.2：手机端主视觉图高 240–320px，半透明背板保证文字清晰 */
   .md-backdrop {
     height: 256px;
     bottom: auto;
   }
 
   .md-backdrop-scrim {
-    background: linear-gradient(180deg, rgba(23, 20, 17, 0.22) 0%, rgba(23, 20, 17, 0.88) 76%, #171411 100%);
+    background: linear-gradient(180deg, rgba(17, 17, 17, 0.2) 0%, rgba(17, 17, 17, 0.88) 76%, #171717 100%);
   }
 
   .md-hero-grid {
     grid-template-columns: 1fr;
     gap: 16px;
-    padding: 136px 16px 20px;
+    padding: 132px 16px 20px;
     align-items: start;
   }
 
@@ -1145,11 +1163,11 @@ onUnmounted(() => {
   }
 
   .md-poster-col {
-    width: 132px;
+    width: 128px;
   }
 
   .md-logo-img {
-    max-height: 64px;
+    max-height: 60px;
   }
 
   .md-title {

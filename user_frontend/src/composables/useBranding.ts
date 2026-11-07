@@ -14,7 +14,7 @@ import { reactive } from 'vue'
 import { brandingApi, type Branding } from '@/api'
 
 export const DEFAULT_SITE_NAME = '帆桥影院'
-export const DEFAULT_THEME_COLOR = '#e8a84a'
+export const DEFAULT_THEME_COLOR = '#c3f53c'
 
 /**
  * 旧主题（Aurora 电光青）的默认主题色。暗房影院改版起用户端换成「暗房影院」琥珀主题，
@@ -22,7 +22,7 @@ export const DEFAULT_THEME_COLOR = '#e8a84a'
  * 这种情况视作「没有自定义」，交给主题自己的琥珀令牌，不再注入覆盖；
  * 管理员真的填了别的颜色才按品牌色覆盖。
  */
-const LEGACY_DEFAULT_THEME_COLORS = new Set(['#22d3ee', DEFAULT_THEME_COLOR])
+const LEGACY_DEFAULT_THEME_COLORS = new Set(['#22d3ee', '#e8a84a', DEFAULT_THEME_COLOR])
 
 const BRANDING_CACHE_KEY = 'aetrix:branding:v1'
 

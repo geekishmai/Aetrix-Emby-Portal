@@ -20,12 +20,10 @@ _SUFFIX = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
 
 def _location_block(text: str, location: str) -> str | None:
     """取 location 块全文（花括号计数；块内注释不含花括号）。"""
-    start = text.find(f"location {location}")
-    if start < 0:
+    m = re.search(rf"\blocation\s+(?:\^~\s+)?{re.escape(location)}\s*\{{", text)
+    if not m:
         return None
-    brace = text.find("{", start)
-    if brace < 0:
-        return None
+    brace = m.end() - 1
     depth = 0
     for i in range(brace, len(text)):
         if text[i] == "{":

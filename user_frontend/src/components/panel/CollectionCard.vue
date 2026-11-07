@@ -54,23 +54,28 @@ const coverSrc = computed(() => {
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  border: 1px solid var(--au-border, #e3e3e2);
-  border-radius: 12px;
-  background: var(--au-surface, #fff);
-  color: inherit;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
+  background: #1e1e1e;
+  color: #f2f2f2;
   text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+.v4-collection-card:hover {
+  border-color: #c3f53c;
 }
 .v4-collection-art {
   width: 44px;
   height: 58px;
   flex: 0 0 auto;
-  border-radius: 6px;
+  border-radius: 2px;
   overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #8a7a62;
-  color: #f6f1e7;
+  background: #111111;
+  border: 1px solid #2a2a2a;
+  color: #9a9a9a;
 }
 .v4-collection-cover {
   width: 100%;

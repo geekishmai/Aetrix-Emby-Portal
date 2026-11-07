@@ -66,3 +66,15 @@ export function withImageKey(url: string): string {
   const sep = url.includes('?') ? '&' : '?'
   return `${url}${sep}api_key=${encodeURIComponent(key)}`
 }
+
+let accountCardFlight: Promise<unknown> | null = null
+
+/** 合并同页并发的 /api/user/emby/server 请求（防首次登录后双路并发各拿一把 key 互踢 401） */
+export function shareAccountCardFlight<T>(loader: () => Promise<T>): Promise<T> {
+  if (!accountCardFlight) {
+    accountCardFlight = loader().finally(() => {
+      accountCardFlight = null
+    })
+  }
+  return accountCardFlight as Promise<T>
+}
