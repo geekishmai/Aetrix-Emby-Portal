@@ -50,7 +50,7 @@ const route = useRoute()
  * 页面底部留白用 --au-dock-space 跟着坞的高度走：≥769px 为 0，≤768px 给坞让位。
  */
 const showChrome = computed(
-  () => route.name !== 'login',
+  () => Boolean(route.matched.length) && route.name !== 'login' && route.name !== 'tg-login',
 )
 
 /**
@@ -145,24 +145,29 @@ onMounted(async () => {
   userStore.init()
 
   const wantsSetupQuery = route.query.setup_emby === '1'
-  if (hasSsoPendingCookie() || wantsSetupQuery) {
+  if (hasSsoPendingCookie()) {
     const ssoRes = await userStore.consumeSsoSession()
-    if (wantsSetupQuery) {
-      const nextQuery = { ...route.query }
-      delete nextQuery.setup_emby
-      void router.replace({ query: nextQuery })
-    }
-    if ((ssoRes.ok && ssoRes.setupEmbyNeeded) || (wantsSetupQuery && userStore.isLoggedIn && !userStore.user?.emby_username)) {
+    if (ssoRes.ok && ssoRes.setupEmbyNeeded) {
       showSsoEmbySetupGuide.value = true
     }
+  }
+  if (wantsSetupQuery) {
+    const nextQuery = { ...route.query }
+    delete nextQuery.setup_emby
+    void router.replace({ query: nextQuery })
+    if (userStore.isLoggedIn && !userStore.user?.emby_username) {
+      showSsoEmbySetupGuide.value = true
+    }
+  }
+  if (userStore.pendingSsoSetupGuide) {
+    userStore.pendingSsoSetupGuide = false
+    showSsoEmbySetupGuide.value = true
   }
 
   // P0#1：后台重新校验 EA 地址（8001→8002 这类变更 1 小时内自动纠正，不阻塞首屏）
   refreshEmbyBaseUrl()
-  // 有登录 token 时后台刷新一次用户信息：购买订阅后 localStorage 里缓存的
-  // is_vip 会过期，不刷新则媒体库详情页一直显示"没有生效中的订阅"
-  //（2026-09-26 线上实测）。401 时拦截器会自动用 refresh token 续期。
-  if (userStore.isLoggedIn) {
+  // 若首屏路由守卫尚未核验过用户信息（例如先落在公开页），再静默刷新一次
+  if (userStore.isLoggedIn && !userStore.sessionConfirmed) {
     userStore.fetchUser().catch(() => {})
   }
   // TG 绑定引导：延迟 1.5s 等首屏稳定后检查，避免与首屏加载抢资源

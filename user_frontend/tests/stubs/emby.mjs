@@ -3,3 +3,4 @@ export let resetCalls = 0
 export function resetEmbyBaseUrl() {
   resetCalls += 1
 }
+export function refreshEmbyBaseUrl() {}

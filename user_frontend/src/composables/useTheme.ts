@@ -53,11 +53,21 @@ const resolved = computed<ResolvedTheme>(() => {
   return preference.value
 })
 
+function isForcedLightPortalPath(): boolean {
+  if (typeof window === 'undefined') return false
+  const p = (window.location.pathname || '/').replace(/\/+$/, '') || '/'
+  return p !== '/login' && p !== '/tg-login' && p !== '/privacy'
+}
+
 function applyTheme() {
   const html = document.documentElement
+  if (isForcedLightPortalPath()) {
+    html.setAttribute('data-theme', 'light')
+    metaTheme?.setAttribute('content', '#faf8f5')
+    return
+  }
   if (resolved.value === 'light') html.setAttribute('data-theme', 'light')
   else html.removeAttribute('data-theme')
-  // 浏览器工具栏跟底色（与 --au-bg 一致）：浅色影院大厅 #f5f1ea，深色暗房 #0c0a09
   metaTheme?.setAttribute('content', resolved.value === 'light' ? '#f5f1ea' : '#0c0a09')
 }
 

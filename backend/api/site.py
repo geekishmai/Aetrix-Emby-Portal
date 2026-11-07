@@ -13,7 +13,8 @@ import logging
 import threading
 import time
 
-from fastapi import APIRouter, Depends, Request
+import json
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
@@ -31,10 +32,26 @@ site_router = APIRouter(prefix="/api/site", tags=["站点信息"])
 
 
 @site_router.get("/branding")
-def get_branding(db: Session = Depends(get_db)):
-    """站点名称 / Logo / 主题色 / SEO（公开）"""
+def get_branding(response: Response, db: Session = Depends(get_db)):
+    """站点名称 / Logo / 主题色 / 游戏化开关 / SEO（公开，禁缓存防切开关后闪旧态）"""
+    response.headers["Cache-Control"] = "no-store, max-age=0"
     return branding_capability.public_info(db)
 
+
+@site_router.get("/boot.js")
+def get_boot_js(db: Session = Depends(get_db)) -> Response:
+    """首屏同步/预拉品牌快照脚本（公开、零凭据，供静态壳首帧前注入）"""
+    try:
+        info = branding_capability.public_info(db)
+    except Exception:
+        logger.warning("生成 boot.js 品牌配置快照失败，回落默认空对象", exc_info=True)
+        info = {}
+    safe_json = json.dumps(info, ensure_ascii=False).replace("</", "<\\/")
+    return Response(
+        content=f"window.__AETRIX_BOOT__={safe_json};\n",
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
 
 @site_router.get("/tg-login-entry")
 def get_tg_login_entry(db: Session = Depends(get_db)) -> dict:

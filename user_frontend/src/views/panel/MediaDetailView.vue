@@ -30,10 +30,10 @@
       <div v-else-if="notGranted" class="md-section-card" role="status">
         <h2 class="md-sec-h">尚未开启片库观影权限</h2>
         <p style="margin:0;font-size:14px;color:#524b42;line-height:1.6">
-          前往「我的」激活观影凭证或开通会员后，即可查看完整影片详情并一键唤起播放器点播。
+          前往「播放器接入」或「我的」激活观影权限后，即可查看完整影片详情并一键唤起播放器点播。
         </p>
         <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
-          <RouterLink to="/game/account" class="v4-retry" style="text-decoration:none">去我的页面开启权限</RouterLink>
+          <RouterLink to="/game/operator" class="v4-retry" style="text-decoration:none">前往开启观影权限</RouterLink>
           <RouterLink to="/library" class="md-ghost-link">返回片库</RouterLink>
         </div>
       </div>
@@ -270,6 +270,7 @@ import { resolveBindingUiState, shouldShowBindingGuide } from '@/utils/bindingUi
 import { cleanOriginalSubtitle, displayMediaTitle, resolutionBadge } from '@/utils/mediaTitle'
 import { humanizeError } from '@/composables/usePanelApi'
 import { useToast } from '@/composables/useToast'
+import { pageTitle } from '@/composables/useBranding'
 
 interface PersonEntry {
   Id?: string
@@ -574,7 +575,7 @@ async function loadDetail() {
     resolvedBaseUrl.value = await ensureEmbyBase()
     const fetched = (await embyApi.getItem(itemId.value)) as FullEmbyItem
     item.value = fetched
-    document.title = `${displayMediaTitle(fetched)} - 影片详情`
+    document.title = pageTitle(displayMediaTitle(fetched))
     if (fetched.Type === 'Series') {
       const [seasonList, epList] = await Promise.allSettled([
         embyApi.getSeasons(fetched.Id),

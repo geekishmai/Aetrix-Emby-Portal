@@ -277,8 +277,8 @@ onMounted(() => {
   void panel.loadHome()
   void panel.loadFeed()
   void loadServers()
-  void loadCollections()
-  void loadHomeSections()
+  if (branding.collections_enabled) void loadCollections()
+  if (branding.home_sections_enabled) void loadHomeSections()
 })
 </script>
 

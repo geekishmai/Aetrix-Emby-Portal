@@ -147,10 +147,14 @@ const showHeaderEconomyPills = computed(() => {
   if (!gamificationOn.value) return false
   const p = route.path
   return (
-    (p.startsWith('/game') && p !== '/game/operator') ||
+    (p.startsWith('/game') && p !== '/game/operator' && p !== '/game/guide' && p !== '/game/account') ||
     p.startsWith('/shop') ||
     p.startsWith('/collector')
   )
+})
+const showThemeToggle = computed(() => {
+  const p = (route.path || '/').replace(/\/+$/, '') || '/'
+  return p === '/login' || p === '/tg-login' || p === '/privacy'
 })
 const visibleNav = computed(() => getVisiblePrimaryNav(branding.gamification_enabled))
 const headerLogoBroken = ref(false)
@@ -536,10 +540,10 @@ onBeforeUnmount(() => {
       <RouterLink to="/" class="header-logo" @click="closeMenus">
         <span class="logo-mark">
           <img
-            v-if="branding.logo_url && !headerLogoBroken"
+            v-if="!headerLogoBroken"
             decoding="async"
             fetchpriority="high"
-            :src="branding.logo_url"
+            :src="branding.logo_url || '/logo.png'"
             :alt="branding.site_name"
             @error="headerLogoBroken = true"
           />
@@ -592,6 +596,7 @@ onBeforeUnmount(() => {
           <span>{{ vitality }}/{{ vitalityMax }}</span>
         </RouterLink>
         <button
+          v-if="showThemeToggle"
           class="theme-btn round-btn wide-only"
           :class="{ auto: themePreference === 'system' }"
           :title="themeTitle"
@@ -607,8 +612,8 @@ onBeforeUnmount(() => {
             <button
               class="msg-btn round-btn"
               :class="{ alert: unreadCount > 0, open: msgMenuOpen }"
-              :title="unreadCount > 0 ? `${unreadCount} 条未读消息` : '信鸽'"
-              :aria-label="unreadCount > 0 ? `${unreadCount} 条未读消息` : '信鸽'"
+              :title="unreadCount > 0 ? `${unreadCount} 条未读通知` : '站内通知'"
+              :aria-label="unreadCount > 0 ? `${unreadCount} 条未读通知` : '站内通知'"
               @click="toggleMsgMenu"
             >
               <Inbox :size="18" />
@@ -623,7 +628,7 @@ onBeforeUnmount(() => {
             <Transition name="dd">
               <div v-if="msgMenuOpen" class="msg-dropdown" :style="dropStyle">
                 <div class="msg-drop-head">
-                  <span class="msg-drop-title">信鸽</span>
+                  <span class="msg-drop-title">站内通知</span>
                   <span v-if="unreadCount > 0" class="msg-drop-unread">{{ unreadCount > 99 ? '99+' : unreadCount }} 条未读</span>
                   <span v-else class="msg-drop-clear">已全部读完</span>
                 </div>

@@ -1,52 +1,59 @@
 <template>
   <div class="v4-scope">
     <div class="v4-page">
-      <!-- 日志头 -->
       <header class="v4-loghead">
-        <span class="v4-stamp">营地一角 · 老向导</span>
-        <h1>向导</h1>
-        <p>营地里坐着位老向导，片库的事，问他准没错。</p>
-        <div v-if="available" id="guide-quota" class="v4-fire"><span aria-hidden="true">🟢</span> {{ quotaText }}</div>
-        <div v-else-if="loading" class="v4-skeleton" style="height:32px;width:60%;margin-top:10px"></div>
+        <h1>观影帮助</h1>
+        <p>客户端连接教程、常见播放说明与在线问答支持。</p>
+        <div v-if="available" id="guide-quota" class="v4-fire">{{ quotaText }}</div>
+        <div v-else-if="loading" class="v4-skeleton" style="height:28px;width:48%;margin-top:10px"></div>
       </header>
 
       <div v-if="loading" class="v4-sec"><div class="v4-skeleton" style="height:180px"></div></div>
 
-      <!-- 向导没在：说清楚是哪种情况 -->
       <section v-else-if="!available" class="v4-sec">
         <div class="guide-card">
-          <div class="avatar" aria-hidden="true">🧙‍♂️</div>
+          <div class="guide-ic" aria-hidden="true"><Compass :size="22" /></div>
           <div class="who">
-            <div class="nm">老陈 <span class="tag">{{ netError ? '状态未知' : '今天没出摊' }}</span></div>
-            <div class="motto">{{ netError ? '没连上营地，暂时问不到他的情况。' : '向导暂时不在营地。' }}</div>
+            <div class="nm">客户端接入与播放速查 <span class="tag">{{ netError ? '离线模式' : '使用指南' }}</span></div>
+            <div class="motto">推荐使用第三方原生播放器直连服务器，获得完整的 4K HDR / 杜比视界解码体验。</div>
           </div>
         </div>
-        <div class="v4-err" style="margin-top:12px">
-          <template v-if="netError">网络开小差了，请检查网络后重试。</template>
-          <template v-else>{{ status?.reason || '管理员还没请向导来坐镇。' }}</template><br>
-          <span class="tip">着急的话，可以发封求救信，会有人回你。</span>
-          <button type="button" class="signal-link" @click="goSignal">去发求救信号</button>
+
+        <div class="faq-grid">
+          <article class="faq-item">
+            <h3>1. 如何获取服务器地址与播放密码？</h3>
+            <p>前往「播放器接入」页面即可查看当前服务器 HTTPS 地址与专属播放用户名，或一键导入至 VidHub、SenPlayer。</p>
+          </article>
+          <article class="faq-item">
+            <h3>2. 推荐使用哪些播放器客户端？</h3>
+            <p>Apple 端推荐 Infuse（添加为文件来源并关闭媒体库模式，缓存设为 Legacy）、VidHub、SenPlayer；Android / Windows 端推荐 VidHub、Hills、AfuseKt。</p>
+          </article>
+          <article class="faq-item">
+            <h3>3. 为什么不在浏览器内直接播放？</h3>
+            <p>本站采用原盘直连不转码架构以保留最高音画质量，请在上述原生客户端中点播或从影片详情页一键唤起。</p>
+          </article>
         </div>
-        <!-- R107-4：删掉 :disabled="loading" —— 该按钮只在「向导不在」分支渲染，此时 loading 恒为 false，disabled 永不生效 -->
-        <button class="v4-retry" style="margin-top:12px" @click="load">再去看看</button>
+
+        <div class="faq-actions">
+          <button type="button" class="v4-retry" @click="router.push('/game/operator')">前往播放器接入</button>
+          <button type="button" class="faq-ghost-btn" @click="goSignal">提交工单反馈</button>
+        </div>
       </section>
 
       <template v-else>
-        <!-- 向导名片 -->
         <section class="v4-sec">
           <div class="guide-card">
-            <div class="avatar" aria-hidden="true">🧙‍♂️</div>
+            <div class="guide-ic" aria-hidden="true"><Sparkles :size="20" /></div>
             <div class="who">
-              <div class="nm">老陈 <span class="tag">营地向导 · 在线</span></div>
-              <div class="motto">"问我，包打听。"</div>
+              <div class="nm">智能观影助手 <span class="tag">在线</span></div>
+              <div class="motto">支持查询近期新片、客户端配置方法与账号权益问题。</div>
             </div>
             <span class="dot"></span>
           </div>
         </section>
 
-        <!-- 快捷问 -->
         <section class="v4-sec">
-          <div class="v4-sec-title">直接问他</div>
+          <div class="v4-sec-title">常见问题</div>
           <div class="chips">
             <button
               v-for="s in SUGGESTIONS"
@@ -59,51 +66,45 @@
           </div>
         </section>
 
-        <!-- 聊天 -->
         <section class="v4-sec">
-          <div ref="scroller" class="chat" role="log" tabindex="0" aria-label="聊天记录">
-            <!-- R41：.chat-empty 已删 —— onMounted 同步 push 欢迎气泡，bubbles 永不为空，空态死代码 -->
-            <!-- R107-2：:key 用气泡唯一 id，不再用索引 -->
+          <div ref="scroller" class="chat" role="log" tabindex="0" aria-label="问答记录">
             <div v-for="b in bubbles" :key="b.id" class="msg" :class="b.role">
-              <div v-if="b.role === 'guide'" class="who">老陈 · 向导</div>
+              <div v-if="b.role === 'guide'" class="who">观影助手</div>
               <p>{{ b.content }}</p>
             </div>
             <div v-if="sending" class="msg guide">
-              <div class="who">老陈 · 向导</div>
-              <!-- R107-3：读屏播报「正在回话」（typing 省略号 aria-hidden，读屏用户原来等不到任何反馈） -->
-              <span class="sr-only" role="status">老陈正在回话…</span>
+              <div class="who">观影助手</div>
+              <span class="sr-only" role="status">正在生成回复…</span>
               <span class="typing" aria-hidden="true"><i></i><i></i><i></i></span>
             </div>
           </div>
         </section>
 
-        <!-- 输入 -->
         <div class="inputbar">
           <input
             v-model="question"
             type="text"
             :disabled="exhausted"
-            :placeholder="exhausted ? '今天问够了，明天再来' : '问问老陈…'"
-            aria-label="向向导提问"
+            :placeholder="exhausted ? '今日提问次数已用完，请明日再试' : '输入你想了解的片库或播放问题…'"
+            aria-label="输入问题"
             aria-describedby="guide-quota"
             @keyup.enter="ask()"
           >
           <button :disabled="sending || exhausted || !question.trim()" @click="ask()">
-            {{ sending ? '等回话' : '发送' }}
+            {{ sending ? '生成中' : '发送' }}
           </button>
         </div>
       </template>
     </div>
-
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { Compass, Sparkles } from 'lucide-vue-next'
 import { aiApi, type AiStatus } from '@/api'
 import { humanizeError } from '@/composables/usePanelApi'
-
 const router = useRouter()
 /** R45：「向导不在」时求救信号文字按钮 → 跳求救信号页（router 里已声明 /game/signal） */
 function goSignal() {
@@ -140,16 +141,15 @@ const available = computed(() => status.value?.enabled === true)
 const quotaText = computed(() => {
   const s = status.value
   if (!s?.enabled) return ''
-  if (!s.daily_limit || typeof s.remaining !== 'number') return '随便问，不限次数'
-  return `今天还能问 ${s.remaining} 次`
+  if (!s.daily_limit || typeof s.remaining !== 'number') return '在线问答已就绪'
+  return `今日剩余提问 ${s.remaining} 次`
 })
 const exhausted = computed(() => available.value && status.value?.remaining === 0)
 
-/** 设计稿 game-guide.html 的快捷问 */
 const SUGGESTIONS = [
-  '今天有啥新片？',
-  '我的能量够换执照吗？',
-  '许愿池里我的愿望咋样了？',
+  '近期有哪些高分新片入库？',
+  '如何在 Infuse 或 VidHub 中添加服务器？',
+  '4K 杜比视界播放有哪些注意事项？',
 ]
 
 async function load() {
@@ -216,7 +216,7 @@ async function ask(text?: string) {
 
 onMounted(() => {
   load()
-  addBubble('guide', '哟，来了。老陈我在这营地坐了三年，片库里哪部片子后劲大、哪条线路最稳，门儿清。甭客气，随便问。')
+  addBubble('guide', '你好，欢迎使用观影助手。你可以询问片库新片推荐、播放器配置步骤或账号权益说明。')
 })
 </script>
 
@@ -227,26 +227,77 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
   background: var(--paper-card);
-  border: 1.5px solid var(--line);
-  border-radius: var(--paper-r-lg, 12px);
-  padding: 14px 16px;
+  border: 1px solid #d1d1cd;
+  border-radius: 16px;
+  padding: 16px 18px;
   position: relative;
 }
-.guide-card .avatar { font-size: 40px; flex: none; }
+.guide-ic {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: rgba(1, 106, 113, 0.1);
+  color: #016a71;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
 .guide-card .who { flex: 1; min-width: 0; }
-.guide-card .nm { font-size: 15px; font-weight: 800; }
+.guide-card .nm { font-size: 16px; font-weight: 500; color: #27251e; }
 .guide-card .tag {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--green);
-  background: #F1F4EC;
-  border: 1px solid var(--green);
-  border-radius: var(--paper-r-2xl, 20px);
-  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #016a71;
+  background: rgba(1, 106, 113, 0.08);
+  border: 1px solid rgba(1, 106, 113, 0.28);
+  border-radius: 9999px;
+  padding: 2px 10px;
   margin-left: 6px;
   white-space: nowrap;
 }
-.guide-card .motto { font-size: 12px; color: var(--ink2); margin-top: 4px; font-style: italic; }
+.guide-card .motto { font-size: 14px; color: #524b42; margin-top: 4px; }
+.faq-grid {
+  margin-top: 14px;
+  display: grid;
+  gap: 12px;
+}
+.faq-item {
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid #d1d1cd;
+  background: #fdfbfa;
+}
+.faq-item h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 500;
+  color: #27251e;
+}
+.faq-item p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: #524b42;
+}
+.faq-actions {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.faq-ghost-btn {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 6px;
+  border: 1px solid #d1d1cd;
+  background: #fdfbfa;
+  color: #27251e;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+}
 .guide-card .dot {
   width: 10px;
   height: 10px;

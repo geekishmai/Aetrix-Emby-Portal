@@ -8,7 +8,7 @@ import { useUserStore } from '@/stores/user'
 import { branding } from '@/composables/useBranding'
 
 export type HomeViewMode = 'world' | 'classic'
-const STORAGE_PREFIX = 'aetrix:home-view:v1'
+const STORAGE_PREFIX = 'aetrix:home-view:v2'
 interface HomeViewPrefs { mode: HomeViewMode }
 const DEFAULT_MODE: HomeViewMode = 'classic'
 const mode = ref<HomeViewMode>(DEFAULT_MODE)

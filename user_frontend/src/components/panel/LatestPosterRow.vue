@@ -25,7 +25,7 @@
 
       <div v-else-if="notGranted" class="v4-empty p1-unlock-guide">
         <span>开启观影权限后，即可在这里直接浏览最新入库海报与影片详情。</span>
-        <RouterLink to="/game/account" class="p1-inline-link">去我的页面开启权限 →</RouterLink>
+        <RouterLink to="/game/operator" class="p1-inline-link">前往开启权限 →</RouterLink>
       </div>
 
       <div v-else-if="error" class="v4-err">

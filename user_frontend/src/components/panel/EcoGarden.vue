@@ -1,14 +1,15 @@
 <template>
   <div class="v4-eco">
     <div ref="plantsEl" class="plants">
-      <div v-for="(p, i) in plants" :key="p.library_id" class="plant">
-        <div class="leaf" aria-hidden="true">{{ leafOf(i) }}</div>
-        <div class="stem" :style="{ height: p.height + 'px' }"></div>
+      <div v-for="p in plants" :key="p.library_id" class="plant">
         <div class="ct">{{ fmtCount(p.count) }}</div>
-        <div class="nm">{{ p.name }}</div>
+        <div class="stem-track">
+          <div class="stem" :style="{ height: p.height + 'px' }"></div>
+        </div>
+        <div class="nm" :title="p.name">{{ p.name }}</div>
       </div>
     </div>
-    <p class="eco-foot">🌧️ 片库是活的，每天都在长</p>
+    <p class="eco-foot">共 {{ plants.length }} 个分类库 · 累计 {{ totalCountText }} 部影视</p>
   </div>
 </template>
 
@@ -18,11 +19,10 @@ import type { EcoItem } from '@/composables/usePanelApi'
 
 const props = defineProps<{ eco: EcoItem[] }>()
 
-/** 叶子 emoji：按索引确定性分配 */
-const LEAVES = ['🌿', '🌱', '🌿', '🌷', '🌿', '🍀', '🌾', '🌵', '🎋', '🌺', '🍁', '🌻']
-const leafOf = (i: number) => LEAVES[i % LEAVES.length]
-
-/** 数量格式化：万 */
+const totalCountText = computed(() => {
+  const sum = (props.eco || []).reduce((acc, e) => acc + (Number(e.count) || 0), 0)
+  return sum.toLocaleString('zh-CN')
+})
 // R41：脏数据（NaN / Infinity）不展示，兜底 '0'
 function fmtCount(n: number): string {
   if (!Number.isFinite(n)) return '0'
@@ -67,43 +67,44 @@ watch(plants, () => {
 /* 取自设计稿 .eco / .plants / .plant */
 .v4-eco {
   background: var(--paper-card);
-  border: 1.5px solid var(--line);
+  border: 1px solid #d1d1cd;
   border-radius: 14px;
   padding: 16px;
 }
 .plants {
   display: flex;
   align-items: flex-end;
-  /* R41：溢出横滑时 space-around 会把最左的内容推出可达区；flex-start 兜底（老浏览器也保证滑得到） */
   justify-content: flex-start;
   justify-content: safe space-around;
-  min-height: 130px;
-  border-bottom: 2px solid var(--ink);
-  padding-bottom: 0;
-  margin-bottom: 8px;
+  min-height: 142px;
+  border-bottom: 1px solid #d1d1cd;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
-  gap: 4px;
+  gap: 8px;
 }
-/* 右侧渐隐边缘：仅可横滑时显示，提示还能滑 */
 .plants.can-scroll {
   mask-image: linear-gradient(90deg, #000 92%, transparent);
   -webkit-mask-image: linear-gradient(90deg, #000 92%, transparent);
 }
 .plant {
   text-align: center;
-  min-width: 44px;
+  min-width: 56px;
   flex: 1;
 }
-.plant .stem {
-  width: 10px;
-  margin: 0 auto;
-  border-radius: 5px 5px 0 0;
-  background: linear-gradient(180deg, #7cb87c, var(--green, #4a7c59));
+.stem-track {
+  height: 112px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  margin-top: 6px;
 }
-.plant .leaf {
-  font-size: 14px;
-  margin-bottom: -4px;
+.plant .stem {
+  width: 18px;
+  margin: 0 auto;
+  border-radius: 6px 6px 2px 2px;
+  background: #016a71;
 }
 .plant .nm {
   font-size: 11px;
@@ -115,8 +116,9 @@ watch(plants, () => {
   text-overflow: ellipsis;
 }
 .plant .ct {
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 .eco-foot {
   font-size: 11px;

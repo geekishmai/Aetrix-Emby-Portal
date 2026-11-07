@@ -27,7 +27,7 @@ const router = createRouter({
       name: 'home',
       // 首页即发现页（旧 HomeView 已删除，不再回退）
       component: () => import('@/views/panel/DiscoveryView.vue'),
-      meta: { title: '首页' },
+      meta: { title: '首页', requiresAuth: true },
     },
     // v4 面板：收藏家 / 服务器（需要登录，panel 接口全部要鉴权）
     ...(panelV4
@@ -145,7 +145,7 @@ const router = createRouter({
             path: '/game/guide',
             name: 'game-guide',
             component: () => import('@/views/game/GuideView.vue'),
-            meta: { title: '向导', requiresAuth: true },
+            meta: { title: '观影帮助', requiresAuth: true },
           },
           {
             path: '/game/outfit',
@@ -157,14 +157,14 @@ const router = createRouter({
             path: '/game/operator',
             name: 'game-operator',
             component: () => import('@/views/game/OperatorView.vue'),
-            meta: { title: '接线员', requiresAuth: true },
+            meta: { title: '播放器接入', requiresAuth: true },
           },
           // v4 游戏化：账号设置设施（旧 ProfileView 的 P0 功能承接：改密码 / 我的订阅 / 我的设备）
           {
             path: '/game/account',
             name: 'game-account',
             component: () => import('@/views/game/AccountSettingsView.vue'),
-            meta: { title: '账号设置', requiresAuth: true },
+            meta: { title: '我的', requiresAuth: true },
           },
         ]
       : []),
@@ -263,31 +263,45 @@ const router = createRouter({
 // 路由守卫
 let initialized = false
 
+function hasSsoPendingCookie(): boolean {
+  if (typeof document === 'undefined') return false
+  return document.cookie.split(';').some((c) => c.trim().startsWith('aetrix_sso_pending='))
+}
+
+function loginRedirectTarget(fullPath: string) {
+  if (!fullPath || fullPath === '/') return { name: 'login' as const }
+  return { name: 'login' as const, query: { redirect: fullPath } }
+}
+
 router.beforeEach(async (to) => {
   const userStore = useUserStore()
 
   if (!initialized) {
     userStore.init()
     initialized = true
+    if (!userStore.isLoggedIn && hasSsoPendingCookie()) {
+      const ssoRes = await userStore.consumeSsoSession()
+      if (ssoRes.ok && ssoRes.setupEmbyNeeded) {
+        userStore.pendingSsoSetupGuide = true
+      }
+    }
   }
 
-  // 分段页标题由 LibraryHomeView 按 ?tab= 覆写（媒体库 / 收藏 / 观看记录）
   if (to.meta.title) {
     document.title = pageTitle(to.meta.title as string | undefined)
   }
 
-  // 未登录访问受保护页面 → 跳转登录页并记录回跳地址
+  // 未登录或本地残留失效 token 访问受保护页面 → 挂载前先核验，直接跳登录页（零闪现受保护页）
   if (to.meta.requiresAuth) {
-    const hasToken = localStorage.getItem('access_token')
+    const hasToken = Boolean(localStorage.getItem('access_token'))
     if (!hasToken && !userStore.isLoggedIn) {
-      return { name: 'login', query: { redirect: to.fullPath } }
+      return loginRedirectTarget(to.fullPath)
     }
-    // 有 token 但没有用户信息（刷新页面），拉取一次
-    if (!userStore.user) {
+    if (!userStore.sessionConfirmed || !userStore.user) {
       try {
         await userStore.fetchUser()
       } catch {
-        return { name: 'login', query: { redirect: to.fullPath } }
+        return loginRedirectTarget(to.fullPath)
       }
     }
   }

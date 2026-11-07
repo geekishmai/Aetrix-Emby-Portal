@@ -22,6 +22,7 @@ const router = useRouter()
 const form = reactive({ username: '', password: '', confirm: '', bootstrap_token: '' })
 const checking = ref(true)
 const submitting = ref(false)
+const logoBroken = ref(false)
 const error = ref('')
 const done = ref(false)
 
@@ -92,7 +93,7 @@ async function submit() {
     <div class="auth-card">
       <div class="auth-brand">
         <div class="brand-mark">
-          <img v-if="branding.logo_url" :src="branding.logo_url" :alt="branding.site_name" />
+          <img v-if="!logoBroken" :src="branding.logo_url || '/admin/logo.png'" :alt="branding.site_name" @error="logoBroken = true" />
           <Clapperboard v-else :size="22" />
         </div>
         <p class="au-eyebrow brand-eyebrow">初始化向导</p>

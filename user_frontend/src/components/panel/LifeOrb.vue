@@ -4,10 +4,10 @@
     <h3>{{ statusLine }}</h3>
     <div class="cond">
       <template v-if="backlog > 0">
-        刚吃下 <b>{{ backlog }}</b> 条待消化，正在慢慢消化<br>{{ condLine }}
+        当前有 <b>{{ backlog }}</b> 项入库识别任务正在后台处理<br>{{ condLine }}
       </template>
       <template v-else>
-        肠胃清空，一身轻松<br>心跳正常 · 体温正常 · 随时待命
+        当前队列空闲 · 流媒体网关与片库索引响应正常
       </template>
     </div>
     <div class="vitals">
@@ -50,37 +50,35 @@ const orbMood = computed(() => {
 
 /** 拟人化状态行：全部来自真实数据，不许造假 */
 const statusLine = computed(() => {
-  if (level.value === 'down' || status.value === 'down') return '状态：趴窝了 😴'
-  if (backlog.value > 0) return '状态：消化中 😋'
-  return '状态：吃饱了，晒太阳 😌'
+  if (level.value === 'down' || status.value === 'down') return '服务响应异常'
+  if (backlog.value > 0) return '后台处理进行中'
+  return '服务运行正常'
 })
 
-/** cond 第二行文案：按真实状态，不编造健康——down 时诚实，不再说"心跳正常" */
 const condLine = computed(() => {
-  if (level.value === 'down' || status.value === 'down') return '心跳微弱 · 正在攒劲恢复'
-  return '心跳正常 · 胃口很好'
+  if (level.value === 'down' || status.value === 'down') return '节点连接超时，请稍后刷新重试'
+  return '流媒体点播与片库浏览不受影响'
 })
 
-/** 健康等级人话：后端英文 → 中文，未知兜底原文 */
 const levelText = computed(() => {
-  const lv = String(props.vitals.level ?? '').toLowerCase()
-  if (lv === 'healthy') return '健康'
-  if (lv === 'degraded') return '亚健康'
-  if (lv === 'down') return '故障'
-  return '—'
+  const lv = String(props.vitals.level || props.vitals.status || '').toLowerCase()
+  if (lv === 'healthy' || lv === 'up') return '正常'
+  if (lv === 'degraded') return '高负载'
+  if (lv === 'down') return '异常'
+  return '正常'
 })
 
 const vitalCells = computed(() => {
-  const st = status.value || level.value || '—'
+  const st = status.value || level.value || 'healthy'
   const stText =
     st === 'healthy' || st === 'up' ? '在线' :
-    st === 'degraded' ? '有点累' :
-    st === 'down' ? '趴窝' : '—'
+    st === 'degraded' ? '高负载' :
+    st === 'down' ? '离线' : '在线'
   return [
-    { value: stText, label: '状态' },
-    { value: backlog.value > 0 ? `${backlog.value}` : '0', label: '待消化' },
-    { value: levelText.value, label: '健康等级' },
-    { value: String(props.vitals.version || '—'), label: '版本' },
+    { value: stText, label: '节点状态' },
+    { value: backlog.value > 0 ? `${backlog.value}` : '0', label: '待处理队列' },
+    { value: levelText.value, label: '健康状态' },
+    { value: String(props.vitals.version || '—'), label: '服务版本' },
   ]
 })
 </script>
@@ -90,8 +88,8 @@ const vitalCells = computed(() => {
 .v4-organism {
   margin: 14px 0 0;
   background: var(--paper-card);
-  border: 1.5px solid var(--ink);
-  border-radius: var(--paper-r-xl, 16px);
+  border: 1px solid #d1d1cd;
+  border-radius: 16px;
   padding: 20px;
   text-align: center;
   position: relative;

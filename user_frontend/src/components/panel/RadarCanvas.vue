@@ -1,8 +1,7 @@
 <template>
   <div class="v4-radar-box">
-    <h3 v-if="activeCount > 0">服务器在忙 · {{ activeCount }} 个任务在线</h3>
-    <!-- R39-11：没任务时说人话，不说"0 个任务在线" -->
-    <h3 v-else>服务器待命 · 暂无在线任务</h3>
+    <h3 v-if="activeCount > 0">后台任务运行中 · {{ activeCount }} 项活跃</h3>
+    <h3 v-else>后台任务队列空闲 · 全部就绪</h3>
     <!-- R39-10：canvas 装饰图加 role="img"，读屏按图片念已有 aria-label -->
     <canvas ref="cv" class="v4-radar-cv" role="img" aria-label="任务雷达扫描图"></canvas>
     <div class="blips">

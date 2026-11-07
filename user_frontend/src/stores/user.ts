@@ -16,6 +16,9 @@ export const useUserStore = defineStore('user', () => {
    */
   const sessionSeq = ref(0)
 
+  /** 首屏守卫是否已完成一次服务端会话核验（防重复请求，并承接 SSO 首登引导） */
+  const sessionConfirmed = ref(false)
+  const pendingSsoSetupGuide = ref(false)
   const isLoggedIn = computed(() => !!token.value)
   const isVIP = computed(() => !!user.value?.is_vip)
   /** 付费墙是否开启（后端配置），开启且非会员时播放会被拦截；公益服恒为 false */
@@ -47,6 +50,7 @@ export const useUserStore = defineStore('user', () => {
     token.value = response.access_token
     user.value = response.user
     sessionSeq.value += 1
+    sessionConfirmed.value = true
     tokenStore.set(response.access_token, response.refresh_token)
     localStorage.setItem('user', JSON.stringify(response.user))
     // PA-036：登录后立刻拉一次账号卡，把图片 api_key 落地——否则首屏海报
@@ -123,6 +127,7 @@ export const useUserStore = defineStore('user', () => {
       const response = await authApi.getCurrentUser()
       user.value = response
       localStorage.setItem('user', JSON.stringify(response))
+      sessionConfirmed.value = true
     } catch (error) {
       // 获取失败（含刷新失败）时清除登录态；拦截器已处理跳转
       console.error('Fetch user failed:', error)
@@ -148,6 +153,8 @@ export const useUserStore = defineStore('user', () => {
     user.value = null
     token.value = null
     sessionSeq.value += 1
+    sessionConfirmed.value = false
+    pendingSsoSetupGuide.value = false
     tokenStore.clear()
     // 缓存的 EA 地址属于上一个登录态，不清的话同浏览器换号会拿到别人的服地址
     resetEmbyBaseUrl()
@@ -167,6 +174,8 @@ export const useUserStore = defineStore('user', () => {
     token,
     loading,
     sessionSeq,
+    sessionConfirmed,
+    pendingSsoSetupGuide,
     isLoggedIn,
     isVIP,
     subscriptionRequired,

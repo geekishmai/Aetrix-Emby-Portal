@@ -24,18 +24,47 @@ export const DEFAULT_THEME_COLOR = '#e8a84a'
  */
 const LEGACY_DEFAULT_THEME_COLORS = new Set(['#22d3ee', DEFAULT_THEME_COLOR])
 
-export const branding = reactive<Branding>({
-  site_name: DEFAULT_SITE_NAME,
-  logo_url: '',
-  theme_color: DEFAULT_THEME_COLOR,
-  seo_title: '',
-  seo_description: '',
-  seo_keywords: '',
-  gamification_enabled: true,
-})
+const BRANDING_CACHE_KEY = 'aetrix:branding:v1'
 
-let initialized = false
+export function normalizeBrandingInfo(info?: Partial<Branding> | null): Branding {
+  const rawName = (info?.site_name || '').trim()
+  const siteName =
+    !rawName || rawName === 'Aetrix' || rawName === '帆桥' ? DEFAULT_SITE_NAME : rawName
+  return {
+    site_name: siteName,
+    logo_url: (info?.logo_url || '').trim(),
+    theme_color: (info?.theme_color || '').trim() || DEFAULT_THEME_COLOR,
+    seo_title: info?.seo_title || '',
+    seo_description: info?.seo_description || '',
+    seo_keywords: info?.seo_keywords || '',
+    gamification_enabled: info?.gamification_enabled !== false,
+    collections_enabled: Boolean(info?.collections_enabled),
+    home_sections_enabled: Boolean(info?.home_sections_enabled),
+    series_follow_enabled: Boolean(info?.series_follow_enabled),
+  }
+}
 
+function readInitialBranding(): Branding {
+  if (typeof window !== 'undefined') {
+    const injected = (window as unknown as { __AETRIX_BOOT__?: Partial<Branding> }).__AETRIX_BOOT__
+    if (injected && typeof injected === 'object') {
+      return normalizeBrandingInfo(injected)
+    }
+    try {
+      const raw = localStorage.getItem(BRANDING_CACHE_KEY)
+      if (raw) {
+        return normalizeBrandingInfo(JSON.parse(raw) as Partial<Branding>)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return normalizeBrandingInfo(null)
+}
+
+export const branding = reactive<Branding>(readInitialBranding())
+
+let initPromise: Promise<void> | null = null
 /** 页面标题：`页面名 - 站名`（没有页面名时用 SEO 标题或站名） */
 export function pageTitle(page?: string): string {
   if (page) return `${page} - ${branding.site_name}`
@@ -90,19 +119,65 @@ function setMeta(name: string, content: string) {
   tag.setAttribute('content', content)
 }
 
-/** 把品牌信息写进文档（主题色令牌 / 标题 / meta） */
+function setMetaProperty(prop: string, content: string) {
+  if (!content) return
+  let tag = document.querySelector<HTMLMetaElement>(`meta[property="${prop}"]`)
+  if (!tag) {
+    tag = document.createElement('meta')
+    tag.setAttribute('property', prop)
+    document.head.appendChild(tag)
+  }
+  tag.setAttribute('content', content)
+}
+
+/** 支持后台「站点与品牌 → Logo 图片地址」动态覆盖浏览器标签页图标与分享卡片 */
+function syncFaviconAndSocial() {
+  if (typeof document === 'undefined') return
+  const customLogo = (branding.logo_url || '').trim()
+  const iconHref = customLogo || '/favicon.svg'
+  const touchHref = customLogo || '/apple-touch-icon.png'
+  const isSvg = iconHref.toLowerCase().split('?')[0].endsWith('.svg')
+
+  const iconLinks = document.querySelectorAll<HTMLLinkElement>('link[rel="icon"]')
+  iconLinks.forEach((link) => {
+    link.href = iconHref
+    if (isSvg) link.type = 'image/svg+xml'
+    else link.removeAttribute('type')
+  })
+  if (customLogo) {
+    document
+      .querySelectorAll<HTMLLinkElement>('link[rel="alternate icon"]')
+      .forEach((link) => {
+        link.href = customLogo
+      })
+  }
+  document
+    .querySelectorAll<HTMLLinkElement>('link[rel="apple-touch-icon"]')
+    .forEach((link) => {
+      link.href = touchHref
+    })
+
+  const desc =
+    branding.seo_description || '帆桥影院：高清片库在线浏览、多端播放器一键直连与个人观影管理。'
+  setMeta('description', desc)
+  setMeta('keywords', branding.seo_keywords)
+  setMetaProperty('og:site_name', branding.site_name)
+  setMetaProperty('og:title', document.title || branding.site_name)
+  setMetaProperty('og:description', desc)
+  setMetaProperty('og:image', customLogo || '/og-image.png')
+}
+
+/** 把品牌信息写进文档（主题色令牌 / 标题 / 动态 favicon / OG meta） */
 export function applyBranding() {
   applyBrandingTokens()
 
-  // 标题策略：若当前标题含「页面名 - 旧站名」，仅替换尾部站名，保留当前页面名
   const sepIdx = document.title.lastIndexOf(' - ')
   if (sepIdx > 0) {
     document.title = `${document.title.slice(0, sepIdx)} - ${branding.site_name}`
   } else {
     document.title = pageTitle()
   }
-  setMeta('description', branding.seo_description)
-  setMeta('keywords', branding.seo_keywords)
+  syncFaviconAndSocial()
 }
 
 /**
@@ -167,32 +242,52 @@ function applyBrandingTokens() {
   brandStyle.textContent = `:root:root{${darkRules}}:root:root[data-theme='light']{${lightRules}}`
 }
 
-/** 启动时拉一次（幂等；失败保持默认值） */
-export function normalizeBrandingInfo(info?: Partial<Branding> | null): Branding {
-  const rawName = (info?.site_name || '').trim()
-  const siteName =
-    !rawName || rawName === 'Aetrix' || rawName === '帆桥' ? DEFAULT_SITE_NAME : rawName
-  return {
-    site_name: siteName,
-    logo_url: (info?.logo_url || '').trim(),
-    theme_color: (info?.theme_color || '').trim() || DEFAULT_THEME_COLOR,
-    seo_title: info?.seo_title || '',
-    seo_description: info?.seo_description || '',
-    seo_keywords: info?.seo_keywords || '',
-    gamification_enabled: info?.gamification_enabled !== false,
+function persistBrandingCache(next: Branding): void {
+  try {
+    localStorage.setItem(BRANDING_CACHE_KEY, JSON.stringify(next))
+  } catch {
+    /* ignore */
   }
 }
 
-/** 启动时拉一次（幂等；失败保持默认值） */
-export async function initBranding(): Promise<void> {
-  if (initialized) return
-  initialized = true
+async function fetchBrandingSafe(): Promise<Partial<Branding> | null> {
   try {
-    const info = await brandingApi.get()
-    Object.assign(branding, normalizeBrandingInfo(info))
+    return await brandingApi.get()
   } catch {
-    applyBranding()
-    return
+    return null
   }
-  applyBranding()
+}
+
+/** 启动前拉取并落位（幂等；优先复用 index.html 并行预拉结果，自带 2.5s 超时保护不卡死首屏） */
+export function initBranding(): Promise<void> {
+  if (initPromise) return initPromise
+  initPromise = (async () => {
+    try {
+      const w =
+        typeof window !== 'undefined'
+          ? (window as unknown as {
+              __AETRIX_BOOT__?: Partial<Branding> | null
+              __AETRIX_BOOT_PROMISE__?: Promise<Partial<Branding> | null>
+            })
+          : null
+
+      let info: Partial<Branding> | null = null
+      if (w?.__AETRIX_BOOT__ && typeof w.__AETRIX_BOOT__ === 'object') {
+        info = w.__AETRIX_BOOT__
+      } else if (w?.__AETRIX_BOOT_PROMISE__) {
+        info = (await w.__AETRIX_BOOT_PROMISE__) || (await fetchBrandingSafe())
+      } else {
+        info = await fetchBrandingSafe()
+      }
+      if (info && typeof info === 'object') {
+        const normalized = normalizeBrandingInfo(info)
+        Object.assign(branding, normalized)
+        persistBrandingCache(normalized)
+      }
+    } catch {
+      /* 拉取失败保持预热/默认品牌配置 */
+    }
+    applyBranding()
+  })()
+  return initPromise
 }

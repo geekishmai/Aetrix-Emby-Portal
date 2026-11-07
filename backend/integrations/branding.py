@@ -16,6 +16,10 @@
 from __future__ import annotations
 
 import re
+import os
+
+from backend.emby_server import media_sets as ms
+from backend.emby_server.env_util import env_int
 
 from sqlalchemy.orm import Session
 
@@ -89,6 +93,9 @@ def public_info(db: Session) -> dict:
     """给前端的公开信息（只含能公开的字段，没有任何凭据）"""
     values = read(db)
     name = str(values.get("site_name") or "").strip() or DEFAULT_SITE_NAME
+    series_follow_on = (os.getenv("SERIES_FOLLOW_ENABLED") or "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
     return {
         "site_name": name,
         "logo_url": logo_url(values),
@@ -97,6 +104,9 @@ def public_info(db: Session) -> dict:
         "seo_description": str(values.get("site_seo_description") or "").strip(),
         "seo_keywords": str(values.get("site_seo_keywords") or "").strip(),
         "gamification_enabled": gamification_enabled(values),
+        "collections_enabled": bool(ms.collections_enabled()),
+        "home_sections_enabled": bool(env_int("HOME_SECTIONS_PROJECTION_ENABLED", 0, 0, 1)),
+        "series_follow_enabled": series_follow_on,
     }
 
 

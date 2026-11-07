@@ -90,9 +90,14 @@ function forceLogout() {
   try { localStorage.removeItem('aetrix_worn_badge_v1') } catch { /* 隐私模式忽略 */ }
   // 用户端只有 /login 一个登录页（没有 /m/* 这套移动端路由），
   // 所以已过期会话必须送到 /login，否则会落到 catch-all 的 404 页
+  // 首屏挂载前若在路由守卫预检阶段发现旧 token 已失效，由 router.beforeEach 直接单跳切向 /login，
+  // 不触发二次 window.location 整页硬刷新（避免二次黑屏与闪烁）。
+  const mounted =
+    typeof window !== 'undefined' &&
+    Boolean((window as unknown as { __AETRIX_MOUNTED__?: boolean }).__AETRIX_MOUNTED__)
   const currentPath = window.location.pathname
   const isLoginPage = currentPath === '/login'
-  if (!isLoginPage) {
+  if (mounted && !isLoginPage) {
     window.location.href = '/login'
   }
 }
@@ -314,11 +319,14 @@ export interface Branding {
   seo_keywords: string
   /** 是否显示用户端游戏化与探险世界组件（默认 true 保持上游行为） */
   gamification_enabled?: boolean
+  collections_enabled?: boolean
+  home_sections_enabled?: boolean
+  series_follow_enabled?: boolean
 }
 
 export const brandingApi = {
   /** 公开端点：站名 / Logo / 主题色 / SEO（不含任何凭据） */
-  get: () => api.get<never, Branding>('/api/site/branding'),
+  get: () => api.get<never, Branding>('/api/site/branding', { timeout: 2500 }),
 }
 
 // ==================== AI 助手（能力：AI 模型设置，backend/api/assistant.py） ====================

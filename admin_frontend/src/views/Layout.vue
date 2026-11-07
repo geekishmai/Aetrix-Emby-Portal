@@ -45,6 +45,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const realm = useRealmStore()
+const logoBroken = ref(false)
 const { isTablet } = useBreakpoint()
 // 外观三档：跟随系统 / 白日 / 黑暗。composable 自带 onMounted 挂监听，
 // 切换只改 html[data-theme]，浅色令牌全在 tokens.css 的浅色块里
@@ -476,7 +477,7 @@ onUnmounted(() => {
       <div class="brand">
         <RouterLink to="/" class="brand-link">
           <span class="brand-mark">
-            <img v-if="branding.logo_url" :src="branding.logo_url" :alt="branding.site_name" />
+            <img v-if="!logoBroken" :src="branding.logo_url || '/admin/logo.png'" :alt="siteName()" @error="logoBroken = true" />
             <Clapperboard v-else :size="17" />
           </span>
           <span class="brand-text">

@@ -3,9 +3,8 @@
     <div class="v4-page">
       <!-- 日志头 -->
       <header class="v4-loghead">
-        <span class="v4-stamp">营地 · 接线处</span>
-        <h1>接线员</h1>
-        <p>买完会员来这儿接线 —— 拿上账号密码，去播放器里连上就能看。</p>
+        <h1>播放器接入</h1>
+        <p>查看 Emby 服务器连接地址与专属播放账号，或一键导入至 VidHub、SenPlayer 等客户端。</p>
       </header>
 
       <!-- 加载中 -->
@@ -16,7 +15,7 @@
       <!-- 加载失败 -->
       <div v-else-if="accountError && !account" class="v4-sec">
         <div class="v4-err">
-          接线员没接上：{{ accountError }}<br>
+          加载接入信息失败：{{ accountError }}<br>
           <button class="v4-retry" @click="refreshAccount()">重试</button>
         </div>
       </div>
@@ -34,8 +33,8 @@
         <!-- 有查看权限：账号密码卡 -->
         <template v-if="viewGranted">
           <section class="v4-sec">
-            <div class="v4-sec-title">你的接线账号</div>
-            <div class="v4-sec-sub">{{ hasEmbyUsername ? '拿着这三样，去播放器里登录' : '自己设用户名和播放密码。用户名设好后不能改。' }}</div>
+            <div class="v4-sec-title">客户端连接凭据</div>
+            <div class="v4-sec-sub">{{ hasEmbyUsername ? '在 Infuse、VidHub 或 SenPlayer 中填入以下三项即可直连播放' : '首次使用请先设置专属播放用户名与密码（用户名保存后不可更改）' }}</div>
 
             <div class="op-rows" :class="{ loading: loading && !accountReloading }">
               <template v-if="accountReloading">
@@ -303,7 +302,7 @@
 
         <!-- 没查看权限：解锁入口 -->
         <div v-else-if="viewPermission" class="v4-sec">
-          <div class="v4-sec-title">接线需要解锁</div>
+          <div class="v4-sec-title">开启片库与接入权限</div>
           <template v-if="viewPermission.realm_free">
             <p class="unlock-desc">
               花 <strong>{{ viewPermission.unlock_points }}</strong> 能量解锁查看权限，
@@ -320,14 +319,14 @@
             <p class="op-tip">能量可通过每日报到、邀请好友等方式获得。</p>
           </template>
           <template v-else>
-            <p class="unlock-desc">服务器地址和账号只向会员开放，开通后回来这儿接线。</p>
+            <p class="unlock-desc">开通会员或观影资格后，即可在此查看服务器连接地址与播放账号。</p>
             <button class="op-btn primary" @click="router.push('/shop')">去开通会员</button>
           </template>
         </div>
 
         <div v-else class="v4-sec">
           <div class="v4-err">
-            接线员没接上，再试一次<br>
+            暂未获取到接入配置，请点击重试<br>
             <button class="v4-retry" @click="refreshAccount()">重试</button>
           </div>
         </div>

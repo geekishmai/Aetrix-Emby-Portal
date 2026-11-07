@@ -79,11 +79,11 @@
       <div v-if="notGranted" class="lib-empty-card" role="status">
         <p class="lib-empty-title">尚未开启片库观影权限</p>
         <p class="lib-empty-desc">
-          前往「我的」激活观影凭证或开通会员后，即可按分类浏览全部馆藏高清海报与影片详情。
+          前往「播放器接入」或「我的」激活观影权限后，即可按分类浏览全部馆藏高清海报与影片详情。
         </p>
         <div style="margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
-          <RouterLink to="/game/account" class="v4-retry" style="text-decoration:none">去我的页面开启权限</RouterLink>
-          <RouterLink to="/shop" class="lib-sort-btn" style="text-decoration:none">前往补给站</RouterLink>
+          <RouterLink to="/game/operator" class="v4-retry" style="text-decoration:none">前往开启观影权限</RouterLink>
+          <RouterLink v-if="branding.gamification_enabled !== false" to="/shop" class="lib-sort-btn" style="text-decoration:none">前往补给站</RouterLink>
         </div>
       </div>
 
@@ -170,6 +170,7 @@ import { embyApi, ensureEmbyBase, httpStatusOf, isEmbyAccessNotGranted, posterUr
 import { displayMediaTitle, resolutionBadge } from '@/utils/mediaTitle'
 import { humanizeError } from '@/composables/usePanelApi'
 import { useToast } from '@/composables/useToast'
+import { branding } from '@/composables/useBranding'
 
 type SortKey = 'latest' | 'rating' | 'year'
 

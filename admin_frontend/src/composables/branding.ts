@@ -8,7 +8,7 @@
 import { reactive } from 'vue'
 import { siteApi, type Branding } from '@/api/site'
 
-export const DEFAULT_SITE_NAME = 'Aetrix'
+export const DEFAULT_SITE_NAME = '帆桥影院'
 export const DEFAULT_THEME_COLOR = '#e8a84a'
 /**
  * 「没自定义过」的主题色：后端默认值仍是旧品牌青 #22d3ee，加上现在的放映机琥珀。
@@ -34,11 +34,12 @@ export const branding = reactive<Branding>({
 let initialized = false
 
 export function siteName(): string {
-  return branding.site_name || DEFAULT_SITE_NAME
+  const raw = (branding.site_name || '').trim()
+  return !raw || raw === 'Aetrix' || raw === '帆桥' ? DEFAULT_SITE_NAME : raw
 }
 
 export function adminTitle(page?: string): string {
-  return page ? `${page} · ${siteName()} 管理后台` : `${siteName()} 管理后台`
+  return page ? `${page} - ${siteName()}` : `管理后台 - ${siteName()}`
 }
 
 function hexToRgb(hex: string): [number, number, number] {
@@ -148,17 +149,39 @@ function applyBrandingTokens() {
     `:root:root{${darkRules}}:root:root[data-theme='light']{${lightRules}}`
 }
 
+function syncAdminFavicon() {
+  if (typeof document === 'undefined') return
+  const customLogo = (branding.logo_url || '').trim()
+  const iconHref = customLogo || '/admin/favicon.svg'
+  const touchHref = customLogo || '/admin/apple-touch-icon.png'
+  const isSvg = iconHref.toLowerCase().split('?')[0].endsWith('.svg')
+
+  document.querySelectorAll<HTMLLinkElement>('link[rel="icon"]').forEach((link) => {
+    link.href = iconHref
+    if (isSvg) link.type = 'image/svg+xml'
+    else link.removeAttribute('type')
+  })
+  if (customLogo) {
+    document.querySelectorAll<HTMLLinkElement>('link[rel="alternate icon"]').forEach((link) => {
+      link.href = customLogo
+    })
+  }
+  document.querySelectorAll<HTMLLinkElement>('link[rel="apple-touch-icon"]').forEach((link) => {
+    link.href = touchHref
+  })
+}
+
 export function applyBranding() {
   applyBrandingTokens()
 
-  // 标题：路由守卫先写的是「页面名 · 旧站名 管理后台」，这里只换站名那段，
-  // 别把页面名（例如「用户管理」）冲掉。
-  const suffix = `· ${DEFAULT_SITE_NAME} 管理后台`
-  if (document.title.endsWith(suffix)) {
-    document.title = `${document.title.slice(0, -suffix.length)}· ${siteName()} 管理后台`
+  const sepIdx = document.title.lastIndexOf(' - ')
+  if (sepIdx > 0) {
+    document.title = `${document.title.slice(0, sepIdx)} - ${siteName()}`
   } else {
     document.title = adminTitle()
   }
+
+  syncAdminFavicon()
 
   let tag = document.querySelector<HTMLMetaElement>('meta[name="description"]')
   if (branding.seo_description) {
@@ -175,9 +198,14 @@ export async function initBranding(): Promise<void> {
   if (initialized) return
   initialized = true
   try {
-    Object.assign(branding, await siteApi.branding())
+    const info = await siteApi.branding()
+    const rawName = (info?.site_name || '').trim()
+    Object.assign(branding, info, {
+      site_name: !rawName || rawName === 'Aetrix' || rawName === '帆桥' ? DEFAULT_SITE_NAME : rawName,
+    })
   } catch {
-    return // 拿不到就用默认品牌，后台不该因为一次请求失败而变白屏
+    applyBranding()
+    return
   }
   applyBranding()
 }

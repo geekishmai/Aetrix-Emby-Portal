@@ -107,7 +107,10 @@ export function toUserMessage(err: unknown, fallbackKey: ToastFallbackKey = 'sav
     ) {
       return fallback
     }
-    // 后端返回的人话（如"用户不存在"）直接透传
+    // 拦截纯英文技术报错串（如 Not Found / Invalid access token），避免英文报错直出上屏
+    if (/^[\x20-\x7e]+$/.test(text) && /[A-Za-z]{3,}/.test(text)) {
+      return fallback
+    }
     return text
   }
   if (Array.isArray(detail) && detail.length) {

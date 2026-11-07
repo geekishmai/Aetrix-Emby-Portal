@@ -22,6 +22,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
+const logoBroken = ref(false)
 const form = reactive({ username: '', password: '' })
 const loading = ref(false)
 const error = ref('')
@@ -60,7 +61,7 @@ async function submit() {
     <div class="auth-card">
       <div class="auth-brand">
         <div class="brand-mark">
-          <img v-if="branding.logo_url" :src="branding.logo_url" :alt="branding.site_name" />
+          <img v-if="!logoBroken" :src="branding.logo_url || '/admin/logo.png'" :alt="branding.site_name" @error="logoBroken = true" />
           <Clapperboard v-else :size="22" />
         </div>
         <h1 class="brand-title">{{ branding.site_name }}</h1>

@@ -26,5 +26,15 @@ const pinia = createPinia()
 app.use(pinia)
 app.use(router)
 
-app.mount('#app')
-void initBranding()
+// 首屏零闪烁门控：等公开品牌配置（站名 / Logo / 游戏化开关）与首个目标路由（含登录态核验和异步页面 chunk）
+// 全部就绪后再替换 #app-boot 统一骨架屏，杜绝先闪空白导航栏、旧主题色或未登录首页。
+async function bootstrap() {
+  await Promise.all([
+    initBranding(),
+    router.isReady(),
+  ])
+  ;(window as unknown as { __AETRIX_MOUNTED__?: boolean }).__AETRIX_MOUNTED__ = true
+  app.mount('#app')
+}
+
+void bootstrap()

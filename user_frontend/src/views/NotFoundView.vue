@@ -15,9 +15,9 @@ function goBack() {
   <main class="v4-scope nf-page">
     <div class="nf-card">
       <div class="nf-code" aria-hidden="true">404</div>
-      <h1 class="nf-title">这一卷胶片不在 {{ branding.site_name }} 片库里</h1>
+      <h1 class="nf-title">未找到所访问的页面</h1>
       <p class="nf-desc">
-        访问的页面地址不存在或已调整位置，可以返回上一页，或直接前往首页与片库浏览。
+        你访问的链接不存在或已变更位置，可返回上一页或前往{{ branding.site_name }}首页与片库浏览。
       </p>
       <div class="nf-actions">
         <button type="button" class="nf-btn nf-btn-ghost" @click="goBack">

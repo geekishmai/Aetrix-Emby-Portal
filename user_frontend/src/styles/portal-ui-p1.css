@@ -216,6 +216,11 @@ body {
   outline-offset: 2px;
 }
 
+/* 统一子页眉下边框为 1px 暖雾发丝线（替代上游粗黑 1.5px 线） */
+.v4-scope .v4-loghead {
+  border-bottom: 1px solid #d1d1cd;
+}
+
 .v4-scope > .d3-band {
   max-width: min(1480px, 94vw);
   margin: 16px auto 0;

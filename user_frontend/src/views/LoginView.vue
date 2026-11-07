@@ -275,17 +275,17 @@ onUnmounted(() => {
       <div class="auth-brand">
         <div class="brand-mark">
           <img
-            v-if="branding.logo_url && !brandLogoBroken"
+            v-if="!brandLogoBroken"
             decoding="async"
             loading="lazy"
-            :src="branding.logo_url"
+            :src="branding.logo_url || '/logo.png'"
             :alt="branding.site_name"
             @error="brandLogoBroken = true"
           />
           <Clapperboard v-else :size="22" aria-hidden="true" />
         </div>
         <h1 class="brand-title">{{ branding.site_name }}</h1>
-        <p class="brand-subtitle">自建 Emby 影视服务 · 一个账号，手机/电视/电脑都能看</p>
+        <p class="brand-subtitle">高清片库在线浏览 · 多端播放器一键直连</p>
       </div>
 
       <!-- 模式切换 -->

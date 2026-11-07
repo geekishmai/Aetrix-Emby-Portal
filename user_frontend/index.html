@@ -8,8 +8,16 @@
     <!-- 移动端浏览器工具栏跟随页面底色（不是品牌色），滚动时不会出现一条亮青色带 -->
     <meta name="theme-color" content="#0c0a09">
     <meta name="color-scheme" content="dark">
-    <meta name="description" content="影音媒体服务平台：海报墙浏览、多端直连播放与客户端接入。">
-    <link rel="icon" href="/favicon.ico">
+    <meta name="description" content="帆桥影院：高清片库在线浏览、多端播放器一键直连与个人观影管理。">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="帆桥影院">
+    <meta property="og:title" content="帆桥影院">
+    <meta property="og:description" content="帆桥影院：高清片库在线浏览、多端播放器一键直连与个人观影管理。">
+    <meta property="og:image" content="/og-image.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="alternate icon" href="/favicon.ico">
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
     <link rel="manifest" href="/manifest.webmanifest">
     <!-- 标题衬线字：perf 优化（2026-10-13）移除了 Google Fonts 外链。
          原因：<link rel="stylesheet"> 是渲染阻塞的，fonts.googleapis.com
@@ -17,16 +25,89 @@
          现在用系统字体栈（Songti SC / STSong / SimSun / serif），
          与 Noto Serif SC 同为宋体风格，首屏不再被外部字体卡住。 -->
     <title>帆桥影院</title>
-    <style>
+    <script>
       /*
-       * 首屏启动画面：写在这里（而不是等样式表）有两个原因——
-       * 1. JS 挂载前不会先闪一下白底或没有排版的内容；
-       * 2. 它天然覆盖了“样式表还没到”的最坏情况，慢网下也只是一片安静的氛围底色。
-       * Vue 挂载会把 #app 的内容整体换掉，所以这里不需要额外清理代码。
+       * 首屏零闪烁预引导（在任何样式绘制与 Vue 挂载之前同步执行）：
+       * 1. 并行预拉公开品牌配置 /api/site/branding（零额外串行 RTT），同时用本地缓存预热标题；
+       * 2. 精确判定首屏目标表面（portal 暖纸面 vs auth 暗房面）：
+       *    - 已持登录态（access_token 或 SSO 交接 cookie）访问门户路由，或公开门户路由 /want → 直接锁定 light (#faf8f5)，消灭「黑底 → 浅底」全屏频闪；
+       *    - 未登录访问受保护门户路由（守卫将直跳 /login）或访问 /login、/tg-login、/privacy → 按用户主题（默认暗房 #0c0a09）渲染安静骨架。
        */
+      (function () {
+        var docEl = document.documentElement;
+        try {
+          var bootCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          var bootTimer = bootCtrl ? setTimeout(function () { bootCtrl.abort(); }, 2500) : 0;
+          window.__AETRIX_BOOT_PROMISE__ = fetch('/api/site/branding', {
+            credentials: 'same-origin',
+            cache: 'no-store',
+            signal: bootCtrl ? bootCtrl.signal : undefined
+          }).then(function (r) {
+            if (bootTimer) clearTimeout(bootTimer);
+            return r.ok ? r.json() : null;
+          }).catch(function () {
+            if (bootTimer) clearTimeout(bootTimer);
+            return null;
+          });
+        } catch (e) {
+          window.__AETRIX_BOOT_PROMISE__ = Promise.resolve(null);
+        }
+
+        try {
+          var cachedBrand = localStorage.getItem('aetrix:branding:v1');
+          if (cachedBrand) {
+            var parsedBrand = JSON.parse(cachedBrand);
+            if (parsedBrand && parsedBrand.site_name) {
+              document.title = parsedBrand.site_name;
+            }
+          }
+        } catch (e) {}
+
+        try {
+          var rawPath = (location.pathname || '/').replace(/\/+$/, '') || '/';
+          var hasToken = Boolean(localStorage.getItem('access_token'));
+          var hasSso = (document.cookie || '').indexOf('aetrix_sso_pending=') !== -1;
+          var isAuthPath = rawPath === '/login' || rawPath === '/tg-login' || rawPath === '/privacy';
+          var isPublicPortalPath = rawPath === '/want';
+          var bootSurface = (!isAuthPath && (hasToken || hasSso || isPublicPortalPath)) ? 'portal' : 'auth';
+          docEl.setAttribute('data-boot-mode', bootSurface);
+
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (bootSurface === 'portal') {
+            docEl.setAttribute('data-theme', 'light');
+            if (meta) meta.setAttribute('content', '#faf8f5');
+          } else {
+            var stored = localStorage.getItem('aetrix-theme');
+            var lightPref = stored === 'light' || (
+              stored === 'system' &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: light)').matches
+            );
+            if (lightPref) {
+              docEl.setAttribute('data-theme', 'light');
+              if (meta) meta.setAttribute('content', '#f5f1ea');
+            } else {
+              docEl.removeAttribute('data-theme');
+              if (meta) meta.setAttribute('content', '#0c0a09');
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <style>
       html {
         background: #0c0a09;
         color-scheme: dark;
+      }
+
+      html[data-theme='light'] {
+        background: #f5f1ea;
+        color-scheme: light;
+      }
+
+      html[data-boot-mode='portal'] {
+        background: #faf8f5;
+        color-scheme: light;
       }
 
       body {
@@ -36,18 +117,34 @@
       #app-boot {
         position: fixed;
         inset: 0;
+        background: #0c0a09;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      }
+
+      html[data-theme='light'] #app-boot {
+        background: #f5f1ea;
+      }
+
+      html[data-boot-mode='portal'] #app-boot {
+        background: #faf8f5;
+      }
+
+      /* 认证态骨架：居中静谧加载环，与登录页同底色零跳变 */
+      .boot-auth {
+        height: 100%;
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: center;
         gap: 14px;
-        background: #0c0a09;
-        color: rgba(243, 237, 228, 0.45);
-        font: 13px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-        letter-spacing: 0.08em;
+        color: rgba(243, 237, 228, 0.48);
       }
 
-      #app-boot .boot-ring {
+      html[data-theme='light'] .boot-auth {
+        color: rgba(39, 37, 30, 0.52);
+      }
+
+      .boot-ring {
         width: 22px;
         height: 22px;
         border-radius: 50%;
@@ -56,34 +153,77 @@
         animation: boot-spin 0.8s linear infinite;
       }
 
+      html[data-theme='light'] .boot-ring {
+        border-color: rgba(39, 37, 30, 0.16);
+        border-top-color: #016a71;
+      }
+
+      /* 门户态统一骨架壳：在品牌配置、登录态与路由组件全部就绪前稳定呈现暖纸布局轮廓 */
+      .boot-portal {
+        display: none;
+        max-width: min(1480px, 94vw);
+        margin: 0 auto;
+        padding: 0 20px;
+        box-sizing: border-box;
+      }
+
+      html[data-boot-mode='portal'] .boot-auth {
+        display: none;
+      }
+
+      html[data-boot-mode='portal'] .boot-portal {
+        display: block;
+      }
+
+      .boot-topbar {
+        height: 62px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid #e7e4de;
+      }
+
+      .boot-pill {
+        border-radius: 10px;
+        background: #ece6dc;
+        animation: boot-pulse 1.5s ease-in-out infinite;
+      }
+
+      .boot-shelf {
+        margin-top: 20px;
+        padding: 20px 22px;
+        border-radius: 16px;
+        border: 1px solid #d1d1cd;
+        background: #fdfbfa;
+      }
+
+      .boot-posters {
+        margin-top: 14px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(144px, 1fr));
+        gap: 14px;
+        overflow: hidden;
+        max-height: 228px;
+      }
+
+      .boot-card {
+        aspect-ratio: 2 / 3;
+        border-radius: 12px;
+        background: #efe9df;
+        animation: boot-pulse 1.5s ease-in-out infinite;
+      }
+
       @keyframes boot-spin {
         to { transform: rotate(360deg); }
       }
 
+      @keyframes boot-pulse {
+        0%, 100% { opacity: 0.92; }
+        50% { opacity: 0.54; }
+      }
+
       @media (prefers-reduced-motion: reduce) {
-        #app-boot .boot-ring { animation: none; }
-      }
-
-      /* 白日模式：预套用脚本已写好 data-theme，启动画面同步换浅色，
-         不然浅色用户首屏会先闪一下暖黑底 */
-      html[data-theme='light'] {
-        background: #f5f1ea;
-        color-scheme: light;
-      }
-
-      html[data-theme='light'] #app-boot {
-        background: #f5f1ea;
-        color: rgba(28, 25, 21, 0.5);
-      }
-
-      html[data-theme='light'] #app-boot .boot-ring {
-        border-color: rgba(28, 25, 21, 0.16);
-        border-top-color: #b9802f;
-      }
-
-      html[data-theme='light'] #app-noscript {
-        background: #f5f1ea;
-        color: rgba(28, 25, 21, 0.72);
+        .boot-ring, .boot-pill, .boot-card { animation: none; }
       }
 
       #app-noscript {
@@ -98,13 +238,39 @@
         text-align: center;
         padding: 24px;
       }
+
+      html[data-theme='light'] #app-noscript {
+        background: #faf8f5;
+        color: #27251e;
+      }
     </style>
   </head>
   <body>
     <div id="app">
-      <div id="app-boot">
-        <span class="boot-ring" aria-hidden="true"></span>
-        <span>正在载入…</span>
+      <div id="app-boot" aria-busy="true" aria-label="正在加载页面">
+        <div class="boot-auth">
+          <span class="boot-ring" aria-hidden="true"></span>
+          <span>正在载入…</span>
+        </div>
+        <div class="boot-portal" aria-hidden="true">
+          <div class="boot-topbar">
+            <div class="boot-pill" style="width:112px;height:24px"></div>
+            <div class="boot-pill" style="width:280px;height:20px;max-width:45vw"></div>
+            <div class="boot-pill" style="width:68px;height:28px"></div>
+          </div>
+          <div class="boot-shelf">
+            <div class="boot-pill" style="width:140px;height:22px"></div>
+            <div class="boot-posters">
+              <div class="boot-card"></div>
+              <div class="boot-card"></div>
+              <div class="boot-card"></div>
+              <div class="boot-card"></div>
+              <div class="boot-card"></div>
+              <div class="boot-card"></div>
+              <div class="boot-card"></div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <noscript>
@@ -112,33 +278,6 @@
         <p>请启用 JavaScript 以使用本网站</p>
       </div>
     </noscript>
-    <script>
-      /*
-       * 主题预套用：在样式表与 Vue 挂载前把 html[data-theme] 定好，避免首屏
-       * 闪烁（FOUC）。口径与 src/composables/useTheme.ts 一致：
-       * localStorage('aetrix-theme') = 'light' | 'dark' | 'system' | 缺省（深色）。
-       * 缺省深色（用户决策 2026-10-11）：新用户首次进站默认深色；显式存了
-       * 'system' 的老用户仍跟随系统。
-       */
-      (function () {
-        try {
-          var stored = localStorage.getItem('aetrix-theme');
-          var theme;
-          if (stored === 'light' || stored === 'dark') {
-            theme = stored;
-          } else if (stored === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
-            theme = 'light';
-          } else {
-            theme = 'dark';
-          }
-          if (theme === 'light') {
-            document.documentElement.setAttribute('data-theme', 'light');
-            var meta = document.querySelector('meta[name="theme-color"]');
-            if (meta) meta.setAttribute('content', '#f5f1ea');
-          }
-        } catch (e) { /* localStorage 不可用时跟默认深色 */ }
-      })();
-    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

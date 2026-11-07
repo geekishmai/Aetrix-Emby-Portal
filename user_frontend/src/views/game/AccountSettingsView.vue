@@ -3,15 +3,14 @@
     <div class="v4-page v4-account-page">
       <!-- 日志头：紧凑账号头（戳记行带网盘快捷入口；头像+用户名+身份徽章一行） -->
       <div class="v4-loghead">
-        <div class="acct-stamp-row">
-          <span class="v4-stamp">{{ facilityStamp('account') }}</span>
-          <a v-if="providersEnabled" class="acct-drive-link" href="#my-drive" @click.prevent="goToMyDrive">去我的网盘绑定 →</a>
+        <div v-if="providersEnabled" class="acct-stamp-row">
+          <a class="acct-drive-link" href="#my-drive" @click.prevent="goToMyDrive">去我的网盘绑定 →</a>
         </div>
         <div class="acct-head">
           <span class="acct-avatar" aria-hidden="true">{{ avatarInitial }}</span>
           <div class="acct-head-main">
             <h1>{{ displayName }}</h1>
-            <p>改登录密码、看我的会员、管我的设备、绑自己的网盘 —— 账号自己的事都在这儿。</p>
+            <p>管理登录密码、观影权益、已授权客户端设备与个人偏好设置。</p>
             <!-- 白名单专属身份：徽章+固定称号+创世编号；非白名单整个元素不渲染 -->
             <div v-if="whitelistIdentity" class="acct-whitelist">
               <span class="acct-whitelist-badge">白名单</span>
@@ -206,7 +205,7 @@
             </RouterLink>
             <RouterLink class="acct-row as-link" to="/game/pigeon">
               <span class="acct-row-ic" aria-hidden="true"><Bird :size="16" /></span>
-              <span class="acct-row-main"><span class="acct-row-text">信鸽</span><span class="acct-row-meta">站内消息都在这里</span></span>
+              <span class="acct-row-main"><span class="acct-row-text">站内通知</span><span class="acct-row-meta">查看系统通知与消息记录</span></span>
               <ChevronRight :size="15" class="acct-row-arrow" />
             </RouterLink>
         </div>
@@ -274,7 +273,7 @@
         <div class="v4-card acct-card">
             <button type="button" class="acct-row" @click="openChangePwd">
               <span class="acct-row-ic" aria-hidden="true"><Lock :size="16" /></span>
-              <span class="acct-row-main"><span class="acct-row-text">修改登录密码</span><span class="acct-row-meta">登录密码是进营地的钥匙，定期换一把更安心</span></span>
+              <span class="acct-row-main"><span class="acct-row-text">修改登录密码</span><span class="acct-row-meta">用于登录网页门户，建议定期更新以保障账号安全</span></span>
               <ChevronRight :size="15" class="acct-row-arrow" />
             </button>
             <RouterLink class=acct-row as-link to=/favorites>
@@ -342,8 +341,8 @@
         </div>
         </div>
         <div class="acct-subblock">
-          <div class="acct-sub-title">发现页卡片展示</div>
-        <div class="v4-sec-sub">发现页服务器卡片怎么摆，你说了算</div>
+          <div class="acct-sub-title">首页卡片展示</div>
+        <div class="v4-sec-sub">自定义首页服务器状态卡片的展示形式</div>
         <div class="v4-card">
           <div class="mode-seg" role="group" aria-label="首页卡片展示模式">
             <button
@@ -383,7 +382,7 @@
         </div>
         <div v-if="gamificationOn" class="acct-subblock">
           <div class="acct-sub-title">隐私</div>
-        <div class="v4-sec-sub">谁能在榜单上看到你，你说了算</div>
+        <div class="v4-sec-sub">控制是否在热播时长排行中公开展示你的昵称与观看时长</div>
         <div class="v4-card">
           <div class="srv-row">
             <div class="srv-info">
@@ -1238,7 +1237,7 @@ async function handleEntryLogout() {
 
 onMounted(() => {
   void loadLoginHistory(true)
-  loadFollows()
+  if (branding.series_follow_enabled) void loadFollows()
   loadSubs()
   if (userStore.isFreeRealm) void loadRenewal()
   loadDevices()

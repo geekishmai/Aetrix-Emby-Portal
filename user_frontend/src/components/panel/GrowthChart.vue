@@ -35,15 +35,15 @@ const total = computed(() => days.value.reduce((s, d) => s + (d.count || 0), 0))
 /** 全部来自真实数据，不许造假 */
 const footText = computed(() => {
   const t = total.value
-  if (t === 0) return '这 7 天静悄悄，一部新片也没长出来'
-  return `过去 7 天，一共长了 ${t} 部新片`
+  if (t === 0) return '近 7 日暂无新增入库记录'
+  return `近 7 日累计新增 ${t.toLocaleString('zh-CN')} 部影视`
 })
 </script>
 
 <style scoped>
 .v4-growth {
   background: var(--paper-card);
-  border: 1.5px solid var(--line);
+  border: 1px solid #d1d1cd;
   border-radius: 14px;
   padding: 16px 12px 12px;
 }
@@ -62,7 +62,8 @@ const footText = computed(() => {
 }
 .bar-val {
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
   color: var(--ink);
   margin-bottom: 4px;
 }
