@@ -47,24 +47,27 @@ export interface NavItem {
   /** 路由内路径，必须已在 src/router/index.ts 声明 */
   path: string
   icon: Component
+  /** 是否属于游戏化/补给模块（后台关闭游戏化开关时隐藏入口） */
+  gamificationOnly?: boolean
 }
 
-/** 主导航：全断点共用同一份（桌面顶栏横排、手机底部坞）。
- *  五项定稿（2026-10-17 用户拍板，DESIGN.md v1.1）：
- *  发现（/） / 世界（/game，含全部 /game/** 设施） / 服务器（/server） /
- *  补给站（/shop） / 我的（/game/account 账号设置）。
- *  叫法统一「发现」（废「首页」）；收藏家（/collector）页面保留，
- *  但退出主导航、入口收进发现页。
- *  媒体库与搜索仍可从头像菜单 / 首页帮助区 / 顶栏资产 pill 上下文进入，
- *  不在主导航占位 */
+/** 主导航全集（桌面顶栏横排、手机底部坞同源）。
+ *  第 2 期优化：「发现」改名为更直观的「首页」；
+ *  「世界」（/game）与「补给站」（/shop）标记 gamificationOnly，在后台关闭游戏化开关时自动隐藏。 */
 export const primaryNav: NavItem[] = [
-  { name: '发现', path: '/', icon: Clapperboard },
+  { name: '首页', path: '/', icon: Clapperboard },
   { name: '片库', path: '/library', icon: Film },
-  { name: '世界', path: '/game', icon: Globe },
+  { name: '世界', path: '/game', icon: Globe, gamificationOnly: true },
   { name: '服务器', path: '/server', icon: Server },
-  { name: '补给站', path: '/shop', icon: ShoppingBag },
+  { name: '补给站', path: '/shop', icon: ShoppingBag, gamificationOnly: true },
   { name: '我的', path: '/game/account', icon: User },
 ]
+
+/** 按后台「显示游戏化与世界组件」开关过滤可见主导航项（默认显示全部） */
+export function getVisiblePrimaryNav(gamificationEnabled = true): NavItem[] {
+  if (gamificationEnabled !== false) return primaryNav
+  return primaryNav.filter((item) => !item.gamificationOnly)
+}
 
 /**
  * 判定当前路由命中的主导航项（最长前缀匹配）：
@@ -73,9 +76,12 @@ export const primaryNav: NavItem[] = [
  *（/game/account 命中「我的」而不是「世界」）。
  * 无命中返回 ''（如 /tg-bind、404 等非导航路由）。
  */
-export function resolveActiveNavPath(routePath: string): string {
+export function resolveActiveNavPath(
+  routePath: string,
+  items: readonly NavItem[] = primaryNav,
+): string {
   let best = ''
-  for (const item of primaryNav) {
+  for (const item of items) {
     const p = item.path
     const matched =
       p === '/' ? routePath === '/' : routePath === p || routePath.startsWith(`${p}/`)

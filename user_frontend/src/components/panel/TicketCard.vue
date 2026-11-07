@@ -26,11 +26,13 @@ const props = withDefaults(
     watchStrip?: ServerWatchStrip
     error?: boolean
     skeletonCount?: number
+    hideGamification?: boolean
   }>(),
   {
     servers: () => [],
     error: false,
     skeletonCount: 2,
+    hideGamification: false,
   },
 )
 
@@ -102,6 +104,7 @@ function showTag(item: ServerCardItem): boolean {
 
 function overviewInfo(item: ServerCardItem): string {
   if (item.accessMode === 'free') {
+    if (props.hideGamification) return '公益服 · 全部片库直连可播'
     return `能量 ${item.balance} · ${vitalityLine(item)} · ${
       item.checkinEnabled ? (item.checkedToday ? '今日已报到' : '今日未报到') : COPY.noCheckin
     }`
@@ -187,7 +190,7 @@ function overviewInfo(item: ServerCardItem): string {
                 <span class="hc-title">{{ s.name }}</span>
                 <span :class="badgeClass(s)">{{ badgeText(s) }}</span>
               </div>
-              <div class="hc-main-row">
+              <div v-if="!props.hideGamification" class="hc-main-row">
                 <span class="hc-val-group">
                   <span class="hc-val">{{ s.balance }}</span>
                   <span class="hc-unit">能量</span>
@@ -197,7 +200,13 @@ function overviewInfo(item: ServerCardItem): string {
                   :class="{ 'hc-vit-low': s.hasVitality && s.isVitalityLow }"
                 >{{ vitalityLine(s) }}</span>
               </div>
-              <div v-if="s.checkinEnabled" class="hc-chips">
+              <div v-else class="hc-main-row">
+                <span class="hc-val-group">
+                  <span class="hc-val" style="font-size:18px">全库畅看</span>
+                </span>
+                <span class="hc-vit">支持 Infuse / VidHub / SenPlayer</span>
+              </div>
+              <div v-if="!props.hideGamification && s.checkinEnabled" class="hc-chips">
                 <span class="hc-chip" :class="{ 'hc-chip-danger': !s.checkedToday }">{{
                   s.checkedToday ? '今日已报到' : '今日未报到'
                 }}</span>
@@ -205,8 +214,12 @@ function overviewInfo(item: ServerCardItem): string {
                 <span class="hc-chip">无需会员看全库</span>
               </div>
               <div class="hc-footer">
-                <span class="hc-desc">{{ s.desc }}</span>
-                <RouterLink class="hc-link" :to="s.to">{{ s.footer }} ›</RouterLink>
+                <span class="hc-desc">{{
+                  props.hideGamification ? '客户端填入服务器地址与播放账号即可直连点播' : s.desc
+                }}</span>
+                <RouterLink class="hc-link" :to="props.hideGamification ? '/game/operator' : s.to">{{
+                  props.hideGamification ? '播放器接入 ›' : `${s.footer} ›`
+                }}</RouterLink>
               </div>
             </template>
           </article>

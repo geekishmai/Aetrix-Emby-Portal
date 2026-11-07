@@ -312,6 +312,8 @@ export interface Branding {
   seo_title: string
   seo_description: string
   seo_keywords: string
+  /** 是否显示用户端游戏化与探险世界组件（默认 true 保持上游行为） */
+  gamification_enabled?: boolean
 }
 
 export const brandingApi = {

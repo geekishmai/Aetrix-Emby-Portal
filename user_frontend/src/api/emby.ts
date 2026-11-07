@@ -283,7 +283,7 @@ export interface EmbyItem {
   DisplayTitle?: string | null
   OriginalTitle?: string | null
   Aliases?: string[] | null
-  People?: Array<{ Name: string; Role?: string; Type?: string }> | null
+  People?: Array<{ Id?: string; Name: string; Role?: string; Type?: string; PrimaryImageTag?: string }> | null
   Countries?: string[] | null
   IsFolder: boolean
   ChildCount?: number | null
@@ -341,6 +341,7 @@ export interface EmbyMediaSource {
   SupportsDirectPlay?: boolean
   SupportsDirectStream?: boolean
   SupportsTranscoding?: boolean
+  DirectPlayUrl?: string
   DirectStreamUrl?: string
   TranscodingUrl?: string
   MediaStreams?: Array<{
@@ -571,6 +572,15 @@ export function posterUrl(item: EmbyItem, maxWidth = 320): string {
 export function backdropUrl(item: EmbyItem, maxWidth = 1280): string {
   if (!item.BackdropImageTags?.length) return ''
   return imageUrl(item.Id, 'Backdrop', maxWidth)
+}
+
+/** 演职员头像地址（后端 _people_dto 下发 Id + PrimaryImageTag 时走 /emby/Items/{Person.Id}/Images/Primary） */
+export function personAvatarUrl(
+  person: { Id?: string | null; PrimaryImageTag?: string | null },
+  maxWidth = 240,
+): string {
+  if (!person?.Id || !person?.PrimaryImageTag) return ''
+  return imageUrl(String(person.Id), 'Primary', maxWidth)
 }
 
 /**

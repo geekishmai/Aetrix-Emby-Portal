@@ -28,6 +28,7 @@ export const branding = reactive<Branding>({
   seo_title: '',
   seo_description: '',
   seo_keywords: '',
+  gamification_enabled: true,
 })
 
 let initialized = false

@@ -9,6 +9,7 @@
  * 登录成功后自动跳转 ?redirect= 指定的受保护页面。
  */
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { useToast } from '@/composables/useToast'
@@ -56,6 +57,13 @@ const error = ref('')
 // 人机验证令牌：由挂件回调写入；未开启保护时一直是空串（后端也不校验）
 const captchaToken = ref('')
 const captchaRef = ref<InstanceType<typeof CaptchaChallenge> | null>(null)
+const brandLogoBroken = ref(false)
+watch(
+  () => branding.logo_url,
+  () => {
+    brandLogoBroken.value = false
+  },
+)
 
 // 强度文案映射 ['弱','弱','中','强'][score]：score=0（1–5 位密码）时旧写法 ['弱','中','强'][score-1] 会取到 undefined 显示空文案
 const passwordStrength = computed(() => {
@@ -266,7 +274,14 @@ onUnmounted(() => {
     <div class="auth-column">
       <div class="auth-brand">
         <div class="brand-mark">
-          <img decoding="async" loading="lazy" v-if="branding.logo_url" :src="branding.logo_url" :alt="branding.site_name" />
+          <img
+            v-if="branding.logo_url && !brandLogoBroken"
+            decoding="async"
+            loading="lazy"
+            :src="branding.logo_url"
+            :alt="branding.site_name"
+            @error="brandLogoBroken = true"
+          />
           <Clapperboard v-else :size="22" aria-hidden="true" />
         </div>
         <h1 class="brand-title">{{ branding.site_name }}</h1>

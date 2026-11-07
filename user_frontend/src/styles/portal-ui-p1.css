@@ -204,3 +204,226 @@ body {
     margin: 0;
   }
 }
+
+/* 6. 门户第 2 期：浏览器细节表面（选区、焦点环）与全断点媒体库速览带 / 营地折叠面板兼容 */
+.v4-scope ::selection {
+  background: rgba(1, 106, 113, 0.18);
+  color: #27251e;
+}
+
+.v4-scope :focus-visible {
+  outline: 2px solid #016a71;
+  outline-offset: 2px;
+}
+
+.v4-scope > .d3-band {
+  max-width: min(1480px, 94vw);
+  margin: 16px auto 0;
+  padding: 0 20px;
+  box-sizing: border-box;
+}
+
+.d3-band .d3-sec-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.d3-band .d3-sec-title {
+  font-size: 17px;
+  font-weight: 500;
+  color: #27251e;
+}
+
+.d3-band .d3-sec-sub {
+  font-size: 14px;
+  color: #524b42;
+  margin-top: 2px;
+}
+
+.d3-band .d3-sec-link {
+  font-size: 14px;
+  font-weight: 500;
+  color: #016a71;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.d3-lib-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.d3-lib-card {
+  background: #fdfbfa;
+  border: 1px solid #d1d1cd;
+  border-radius: 16px;
+  padding: 14px 16px;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  transition: transform 0.16s ease;
+}
+
+.d3-lib-card.d3-hover:hover {
+  transform: translateY(-2px);
+}
+
+.d3-lib-card .ln {
+  font-size: 15px;
+  font-weight: 500;
+  color: #27251e;
+}
+
+.d3-lib-card .lc {
+  font-size: 13px;
+  color: #524b42;
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 探险营地折叠面板内的右栏组件在 <1280px 同样保持纸面卡片样式 */
+.p2-camp-body .d3-right {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.p2-camp-body .d3-card {
+  background: #fdfbfa;
+  border: 1px solid #d1d1cd;
+  border-radius: 16px;
+  padding: 18px 20px;
+}
+
+.p2-camp-body .d3-sec-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.p2-camp-body .d3-sec-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: #27251e;
+}
+
+.p2-camp-body .d3-sec-sub,
+.p2-camp-body .d3-empty,
+.p2-camp-body .d3-msg .who,
+.p2-camp-body .d3-notice .from,
+.p2-camp-body .d3-rk span {
+  font-size: 13px;
+  color: #524b42;
+}
+
+.p2-camp-body .d3-sec-link {
+  font-size: 14px;
+  color: #016a71;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.p2-camp-body .d3-world-map {
+  height: 140px;
+  border-radius: 16px;
+  border: 1px solid #d1d1cd;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(220px 120px at 70% 30%, #d9e8e4, transparent 70%),
+    radial-gradient(160px 100px at 25% 75%, #e9e2d2, transparent 70%),
+    linear-gradient(150deg, #efe9dc, #e2e6dd 55%, #d5ded8);
+}
+
+.p2-camp-body .d3-world-card {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 14px;
+  background: rgba(253, 251, 250, 0.94);
+  border: 1px solid #d1d1cd;
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.p2-camp-body .d3-btn-ghost {
+  background: transparent;
+  border: 1px solid #d1d1cd;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #27251e;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+
+.p2-camp-body .d3-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.p2-camp-body .d3-tabs button {
+  font-size: 13px;
+  color: #524b42;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  border: 1px solid #d1d1cd;
+  background: transparent;
+  cursor: pointer;
+}
+
+.p2-camp-body .d3-tabs button.on {
+  color: #ffffff;
+  background: #016a71;
+  border-color: #016a71;
+}
+
+.p2-camp-body .d3-rk {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-bottom: 1px solid #ece8e0;
+  font-size: 14px;
+  color: #27251e;
+}
+
+.p2-camp-body .d3-rk:last-child {
+  border-bottom: 0;
+}
+
+.p2-camp-body .d3-rk i {
+  font-style: normal;
+  width: 18px;
+  color: #016a71;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1100px) {
+  .d3-lib-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .v4-scope > .d3-band {
+    max-width: 100%;
+    padding: 0 16px;
+    margin-top: 12px;
+  }
+
+  .d3-lib-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}

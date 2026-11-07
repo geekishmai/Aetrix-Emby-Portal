@@ -26,7 +26,7 @@ DEFAULT_THEME_COLOR = "#22d3ee"
 
 SPEC = {
     "title": "站点与品牌",
-    "desc": "站点名称、Logo、主题色与 SEO；用户端顶栏、登录页与浏览器标题随之变化。",
+    "desc": "站点名称、Logo、主题色、SEO 与游戏化组件开关；用户端顶栏、登录页、导航与首页随之变化。",
     "group": "站点与品牌",
     "docs_hint": "主题色填十六进制（如 #22d3ee）；Logo 留空使用内置图标；留空项回落到默认值。",
     "fields": [
@@ -42,6 +42,8 @@ SPEC = {
         {"key": "site_seo_description", "label": "SEO 描述", "type": "str", "default": ""},
         {"key": "site_seo_keywords", "label": "SEO 关键词", "type": "str", "default": "",
          "hint": "逗号分隔"},
+        {"key": "site_gamification_enabled", "label": "显示游戏化与世界组件", "type": "bool", "default": "true",
+         "hint": "关闭后用户端隐藏能量、体力、每日一封、抽一签、世界、到此一游、收藏家、观影碑，以及导航栏的补给站与世界入口（默认开启）"},
     ],
 }
 
@@ -74,6 +76,15 @@ def logo_url(values: dict) -> str:
     return ""
 
 
+
+def gamification_enabled(values: dict) -> bool:
+    """是否显示用户端游戏化与世界组件（默认开启，保持上游行为）"""
+    raw = values.get("site_gamification_enabled")
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw if raw is not None else "true").strip().lower()
+    return text not in {"0", "false", "no", "off"}
+
 def public_info(db: Session) -> dict:
     """给前端的公开信息（只含能公开的字段，没有任何凭据）"""
     values = read(db)
@@ -85,6 +96,7 @@ def public_info(db: Session) -> dict:
         "seo_title": str(values.get("site_seo_title") or "").strip() or f"{name} - 影音媒体服务平台",
         "seo_description": str(values.get("site_seo_description") or "").strip(),
         "seo_keywords": str(values.get("site_seo_keywords") or "").strip(),
+        "gamification_enabled": gamification_enabled(values),
     }
 
 

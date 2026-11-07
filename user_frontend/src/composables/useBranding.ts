@@ -31,6 +31,7 @@ export const branding = reactive<Branding>({
   seo_title: '',
   seo_description: '',
   seo_keywords: '',
+  gamification_enabled: true,
 })
 
 let initialized = false
@@ -167,15 +168,28 @@ function applyBrandingTokens() {
 }
 
 /** 启动时拉一次（幂等；失败保持默认值） */
+export function normalizeBrandingInfo(info?: Partial<Branding> | null): Branding {
+  const rawName = (info?.site_name || '').trim()
+  const siteName =
+    !rawName || rawName === 'Aetrix' || rawName === '帆桥' ? DEFAULT_SITE_NAME : rawName
+  return {
+    site_name: siteName,
+    logo_url: (info?.logo_url || '').trim(),
+    theme_color: (info?.theme_color || '').trim() || DEFAULT_THEME_COLOR,
+    seo_title: info?.seo_title || '',
+    seo_description: info?.seo_description || '',
+    seo_keywords: info?.seo_keywords || '',
+    gamification_enabled: info?.gamification_enabled !== false,
+  }
+}
+
+/** 启动时拉一次（幂等；失败保持默认值） */
 export async function initBranding(): Promise<void> {
   if (initialized) return
   initialized = true
   try {
     const info = await brandingApi.get()
-    const rawName = (info.site_name || '').trim()
-    const normalizedName =
-      !rawName || rawName === 'Aetrix' || rawName === '帆桥' ? DEFAULT_SITE_NAME : rawName
-    Object.assign(branding, info, { site_name: normalizedName })
+    Object.assign(branding, normalizeBrandingInfo(info))
   } catch {
     applyBranding()
     return

@@ -13,7 +13,7 @@ import api, {
   type StationMessage, type Announcement,
 } from '@/api'
 import type { MySubscription } from '@/api'
-import { primaryNav, resolveActiveNavPath } from '@/config/navigation'
+import { getVisiblePrimaryNav, resolveActiveNavPath } from '@/config/navigation'
 /** v4.1：头像菜单改为「探险设施直达」，设施清单唯一数据源 */
 import { gameFacilities, gameHubConfig } from '@/config/game'
 import { checkinApi, vitalityApi } from '@/api/economy'
@@ -142,10 +142,31 @@ const menuBadge = computed(() => {
  *  只显示 enabled 的设施，按注册表 order 排序——与大本营地图顺序、名字一字不差。
  *  设施开关状态由各游戏页自己处理（如报到未开启时页内提示）。
  *  退出登录独立成红色分区，不混在列表里 */
-const menuFacilities = computed(() =>
-  gameFacilities.filter((f) => f.enabled).sort((a, b) => a.order - b.order),
+const gamificationOn = computed(() => branding.gamification_enabled !== false)
+const showHeaderEconomyPills = computed(() => {
+  if (!gamificationOn.value) return false
+  const p = route.path
+  return (
+    (p.startsWith('/game') && p !== '/game/operator') ||
+    p.startsWith('/shop') ||
+    p.startsWith('/collector')
+  )
+})
+const visibleNav = computed(() => getVisiblePrimaryNav(branding.gamification_enabled))
+const headerLogoBroken = ref(false)
+watch(
+  () => branding.logo_url,
+  () => {
+    headerLogoBroken.value = false
+  },
 )
 
+const ESSENTIAL_FACILITY_KEYS = new Set(['operator', 'account'])
+const menuFacilities = computed(() =>
+  gameFacilities
+    .filter((f) => f.enabled && (gamificationOn.value || ESSENTIAL_FACILITY_KEYS.has(f.key)))
+    .sort((a, b) => a.order - b.order),
+)
 /** 昵称展示：登录名可能是一长串邮箱，头像旁只取 @ 前段；@id 用数字 id */
 const displayName = computed(() => {
   const raw = userStore.user?.username || ''
@@ -347,7 +368,7 @@ function toggleMsgMenu() {
 
 function isActive(path: string) {
   // 最长前缀匹配：/game/account 命中「我的」而不是「世界」
-  return resolveActiveNavPath(route.path) === path
+  return resolveActiveNavPath(route.path, visibleNav.value) === path
 }
 
 function closeMenus() {
@@ -514,7 +535,14 @@ onBeforeUnmount(() => {
     <div class="header-container">
       <RouterLink to="/" class="header-logo" @click="closeMenus">
         <span class="logo-mark">
-          <img decoding="async" fetchpriority="high" v-if="branding.logo_url" :src="branding.logo_url" :alt="branding.site_name" />
+          <img
+            v-if="branding.logo_url && !headerLogoBroken"
+            decoding="async"
+            fetchpriority="high"
+            :src="branding.logo_url"
+            :alt="branding.site_name"
+            @error="headerLogoBroken = true"
+          />
           <Clapperboard v-else :size="17" />
         </span>
         <span class="logo-text">{{ branding.site_name }}</span>
@@ -525,7 +553,7 @@ onBeforeUnmount(() => {
            ≤768px 整条让位给底部导航坞（PanelTabbar） -->
       <nav ref="navRef" class="main-nav" aria-label="主导航">
         <RouterLink
-          v-for="item in primaryNav"
+          v-for="item in visibleNav"
           :key="item.path"
           :to="item.path"
           class="nav-link"
@@ -543,7 +571,7 @@ onBeforeUnmount(() => {
       <div class="user-section">
         <!-- 能量徽章：登录后显示当前能量，点击进能量账本 -->
         <RouterLink
-          v-if="userStore.isLoggedIn && pointsBalance !== null"
+          v-if="showHeaderEconomyPills && userStore.isLoggedIn && pointsBalance !== null"
           to="/game/ledger"
           class="points-pill"
           title="我的能量，点击查看能量账本"
@@ -554,7 +582,7 @@ onBeforeUnmount(() => {
         </RouterLink>
         <!-- 体力徽章：显示 x/14（与报到页体力条统一口径），点击进报到页 -->
         <RouterLink
-          v-if="userStore.isLoggedIn && vitality !== null && vitalityMax !== null"
+          v-if="showHeaderEconomyPills && userStore.isLoggedIn && vitality !== null && vitalityMax !== null"
           to="/game/checkin"
           class="points-pill vitality-pill"
           :title="`我的体力 ${vitality}/${vitalityMax}，点击去报到`"
@@ -681,8 +709,9 @@ onBeforeUnmount(() => {
                      scripts/check_avatar_menu_guards.py 在 CI 拦住；窄屏外观切换走后续专项决策）。
                      管理后台例外：2026-10-13 用户拍板恢复，仅管理员可见（见下面 ②.6） -->
                 <template v-if="menuFacilities.length > 0">
-                <div class="dropdown-sec-title">营地设施 · 点卡片直接进</div>
+                <div class="dropdown-sec-title">{{ gamificationOn ? '营地设施 · 点卡片直接进' : '播放与账号' }}</div>
                 <RouterLink
+                  v-if="gamificationOn"
                   to="/game"
                   class="dropdown-facility"
                   role="menuitem"

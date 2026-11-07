@@ -5,6 +5,7 @@
 // 手机发现页永远是经典内容；世界地图在 /game，避免两个 Tab 变成同一页。
 import { ref, watch, computed } from 'vue'
 import { useUserStore } from '@/stores/user'
+import { branding } from '@/composables/useBranding'
 
 export type HomeViewMode = 'world' | 'classic'
 const STORAGE_PREFIX = 'aetrix:home-view:v1'
@@ -79,7 +80,11 @@ export function useHomeViewMode() {
   ensureLoaded(userStore.user?.id)
   startIdWatcherOnce()
   const worldActive = computed(
-    () => mode.value === 'world' && isDesktop.value && userStore.isLoggedIn,
+    () =>
+      branding.gamification_enabled !== false &&
+      mode.value === 'world' &&
+      isDesktop.value &&
+      userStore.isLoggedIn,
   )
   return { mode, setMode, isDesktop, worldActive }
 }

@@ -17,7 +17,7 @@ function goBack() {
       <div class="nf-code" aria-hidden="true">404</div>
       <h1 class="nf-title">这一卷胶片不在 {{ branding.site_name }} 片库里</h1>
       <p class="nf-desc">
-        访问的页面地址不存在或已调整位置，可以返回上一页，或直接前往发现页与片库浏览。
+        访问的页面地址不存在或已调整位置，可以返回上一页，或直接前往首页与片库浏览。
       </p>
       <div class="nf-actions">
         <button type="button" class="nf-btn nf-btn-ghost" @click="goBack">
@@ -26,7 +26,7 @@ function goBack() {
         </button>
         <RouterLink to="/" class="nf-btn nf-btn-primary">
           <Home :size="16" aria-hidden="true" />
-          <span>去发现页</span>
+          <span>回首页</span>
         </RouterLink>
         <RouterLink to="/library" class="nf-btn nf-btn-ghost">
           <Clapperboard :size="16" aria-hidden="true" />

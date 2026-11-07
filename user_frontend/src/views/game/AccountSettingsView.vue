@@ -170,18 +170,28 @@
       </section>
 
       <!-- 成长与记录：入口行（等级/成就/馆灵/连签/信鸽） + 追剧订阅 + 登录记录 -->
-      <section class="v4-sec" aria-label="成长与记录">
-        <div class="v4-sec-title">成长与记录</div>
-        <!-- 入口行：只串入口，功能本体留在各自页；现状摘要拿不到就不显示，不编造 -->
-        <div class="v4-card acct-card">
-            <RouterLink class="acct-row as-link" to="/shop">
-              <span class="acct-row-ic" aria-hidden="true"><Mountain :size="16" /></span>
-              <span class="acct-row-main"><span class="acct-row-text">等级</span><span v-if="entryLevelText" class="acct-row-meta">{{ entryLevelText }}</span></span>
+      <section class="v4-sec" :aria-label="gamificationOn ? '探险互动与成长' : '追剧与登录记录'">
+        <div class="v4-sec-title">{{ gamificationOn ? '探险互动与成长' : '追剧与登录记录' }}</div>
+        <!-- 游戏化组件收纳卡：受后台「显示游戏化与世界组件」开关控制（关闭时整体隐藏） -->
+        <div v-if="gamificationOn" class="v4-card acct-card">
+            <RouterLink class="acct-row as-link" to="/game">
+              <span class="acct-row-ic" aria-hidden="true"><Globe :size="16" /></span>
+              <span class="acct-row-main"><span class="acct-row-text">探险世界</span><span class="acct-row-meta">每日一封 · 抽一签 · 观影碑 · 到此一游</span></span>
+              <ChevronRight :size="15" class="acct-row-arrow" />
+            </RouterLink>
+            <RouterLink class="acct-row as-link" to="/game/ledger">
+              <span class="acct-row-ic" aria-hidden="true"><Notebook :size="16" /></span>
+              <span class="acct-row-main"><span class="acct-row-text">能量账本</span><span v-if="typeof pointsBalance === 'number'" class="acct-row-meta">当前 {{ pointsBalance }} 能量</span></span>
+              <ChevronRight :size="15" class="acct-row-arrow" />
+            </RouterLink>
+            <RouterLink class="acct-row as-link" to="/game/checkin">
+              <span class="acct-row-ic" aria-hidden="true"><CalendarCheck :size="16" /></span>
+              <span class="acct-row-main"><span class="acct-row-text">每日报到与体力</span><span v-if="entryStreakText" class="acct-row-meta">{{ entryStreakText }}</span></span>
               <ChevronRight :size="15" class="acct-row-arrow" />
             </RouterLink>
             <RouterLink class="acct-row as-link" to="/collector">
               <span class="acct-row-ic" aria-hidden="true"><Trophy :size="16" /></span>
-              <span class="acct-row-main"><span class="acct-row-text">成就</span><span v-if="entryAchvText" class="acct-row-meta">{{ entryAchvText }}</span></span>
+              <span class="acct-row-main"><span class="acct-row-text">收藏家</span><span v-if="entryAchvText" class="acct-row-meta">{{ entryAchvText }}</span></span>
               <ChevronRight :size="15" class="acct-row-arrow" />
             </RouterLink>
             <RouterLink class="acct-row as-link" to="/collector">
@@ -189,9 +199,9 @@
               <span class="acct-row-main"><span class="acct-row-text">馆灵</span><span v-if="entryPetText" class="acct-row-meta">{{ entryPetText }}</span></span>
               <ChevronRight :size="15" class="acct-row-arrow" />
             </RouterLink>
-            <RouterLink class="acct-row as-link" to="/game/checkin">
-              <span class="acct-row-ic" aria-hidden="true"><CalendarCheck :size="16" /></span>
-              <span class="acct-row-main"><span class="acct-row-text">连签</span><span v-if="entryStreakText" class="acct-row-meta">{{ entryStreakText }}</span></span>
+            <RouterLink class="acct-row as-link" to="/shop">
+              <span class="acct-row-ic" aria-hidden="true"><Mountain :size="16" /></span>
+              <span class="acct-row-main"><span class="acct-row-text">等级与补给</span><span v-if="entryLevelText" class="acct-row-meta">{{ entryLevelText }}</span></span>
               <ChevronRight :size="15" class="acct-row-arrow" />
             </RouterLink>
             <RouterLink class="acct-row as-link" to="/game/pigeon">
@@ -335,7 +345,7 @@
           <div class="acct-sub-title">发现页卡片展示</div>
         <div class="v4-sec-sub">发现页服务器卡片怎么摆，你说了算</div>
         <div class="v4-card">
-          <div class="mode-seg" role="group" aria-label="发现页卡片展示模式">
+          <div class="mode-seg" role="group" aria-label="首页卡片展示模式">
             <button
               v-for="opt in modeOptions"
               :key="opt.v"
@@ -364,14 +374,14 @@
                 :class="{ 'is-on': cardPrefs.isVisible(s.id) }"
                 role="switch"
                 :aria-checked="cardPrefs.isVisible(s.id)"
-                :aria-label="`${s.name}：在发现页显示`"
+                :aria-label="`${s.name}：在首页显示`"
                 @click="toggleServer(s.id)"
               ></button>
             </div>
           </div>
         </div>
         </div>
-        <div class="acct-subblock">
+        <div v-if="gamificationOn" class="acct-subblock">
           <div class="acct-sub-title">隐私</div>
         <div class="v4-sec-sub">谁能在榜单上看到你，你说了算</div>
         <div class="v4-card">
@@ -457,7 +467,7 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
-import { Lock, ChevronRight, ChevronDown, HardDrive, RefreshCw, Star, Mountain, Trophy, Sparkles, CalendarCheck, Bird, LogOut } from 'lucide-vue-next'
+import { Lock, ChevronRight, ChevronDown, HardDrive, RefreshCw, Star, Mountain, Trophy, Sparkles, CalendarCheck, Bird, LogOut, Globe, Notebook } from 'lucide-vue-next'
 import Modal from '@/components/ui/Modal.vue'
 import ProfileSubscriptions from '@/components/profile/ProfileSubscriptions.vue'
 import { facilityStamp } from '@/config/game'
@@ -475,9 +485,11 @@ import { toastCopy, confirmCopy } from '@/constants/toastMessages'
 import { toUserMessage } from '@/utils/toUserMessage'
 import { parseServerTime } from '@/utils/serverTime'
 
+import { branding } from '@/composables/useBranding'
 const userStore = useUserStore()
 const router = useRouter()
 const toast = useToast()
+const gamificationOn = computed(() => branding.gamification_enabled !== false)
 
 // ===== 修改登录密码（ProfileView 移植） =====
 const showChangePwd = ref(false)

@@ -1,7 +1,7 @@
 <template>
   <nav class="v4-tabbar" aria-label="主导航">
     <router-link
-      v-for="item in primaryNav"
+      v-for="item in visibleNav"
       :key="item.path"
       :to="item.path"
       :class="{ on: activePath === item.path }"
@@ -23,8 +23,10 @@
  */
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { primaryNav, resolveActiveNavPath } from '@/config/navigation'
+import { getVisiblePrimaryNav, resolveActiveNavPath } from '@/config/navigation'
+import { branding } from '@/composables/useBranding'
 
 const route = useRoute()
-const activePath = computed(() => resolveActiveNavPath(route.path))
+const visibleNav = computed(() => getVisiblePrimaryNav(branding.gamification_enabled))
+const activePath = computed(() => resolveActiveNavPath(route.path, visibleNav.value))
 </script>

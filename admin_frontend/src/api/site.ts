@@ -14,6 +14,7 @@ export interface Branding {
   seo_title: string
   seo_description: string
   seo_keywords: string
+  gamification_enabled?: boolean
 }
 
 export interface CaptchaInfo {

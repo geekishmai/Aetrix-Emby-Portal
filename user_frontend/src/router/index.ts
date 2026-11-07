@@ -27,7 +27,7 @@ const router = createRouter({
       name: 'home',
       // 首页即发现页（旧 HomeView 已删除，不再回退）
       component: () => import('@/views/panel/DiscoveryView.vue'),
-      meta: { title: '发现' },
+      meta: { title: '首页' },
     },
     // v4 面板：收藏家 / 服务器（需要登录，panel 接口全部要鉴权）
     ...(panelV4
