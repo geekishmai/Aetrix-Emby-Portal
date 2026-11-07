@@ -26,13 +26,13 @@ def _conf() -> str:
 
 def test_mangled_location_exists():
     s = _conf()
-    assert re.search(r"location\s+/embyhttp\s*\{", s), \
+    assert re.search(r"location\s+(?:\^~\s+)?/embyhttp\s*\{", s), \
         "缺少 /embyhttp 前缀 location：/embyhttps://... 会落 SPA 兜底返回 200"
 
 
 def test_mangled_location_uses_raw_request_uri():
     s = _conf()
-    m = re.search(r"location\s+/embyhttp\s*\{(.*?)\n    \}", s, re.S)
+    m = re.search(r"location\s+(?:\^~\s+)?/embyhttp\s*\{(.*?)\n    \}", s, re.S)
     assert m, "找不到 /embyhttp 块"
     block = m.group(1)
     assert "proxy_pass http://aetrix_backend$request_uri;" in block, \
@@ -41,7 +41,7 @@ def test_mangled_location_uses_raw_request_uri():
 
 def test_mangled_location_forwards_headers_and_timeout():
     s = _conf()
-    m = re.search(r"location\s+/embyhttp\s*\{(.*?)\n    \}", s, re.S)
+    m = re.search(r"location\s+(?:\^~\s+)?/embyhttp\s*\{(.*?)\n    \}", s, re.S)
     block = m.group(1)
     for needle in (
         'proxy_http_version 1.1;',
@@ -55,5 +55,5 @@ def test_mangled_location_forwards_headers_and_timeout():
 
 def test_mangled_location_not_swallowed_by_spa_fallback():
     s = _conf()
-    assert s.index("location /embyhttp") < s.index("location / {"), \
+    assert re.search(r"location\s+(?:\^~\s+)?/embyhttp", s).start() < s.index("location / {"), \
         "把 /embyhttp 写在 SPA 兜底之后可读性差，且后续维护容易误删"
