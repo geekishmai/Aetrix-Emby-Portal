@@ -8,31 +8,41 @@ import { branding } from '@/composables/useBranding'
 import {
   buildInfuseLaunchUrl,
   buildPasswordlessImportSchemes,
+  buildStrictInfusePlayUrl,
   embyImportTip,
   findPlayerImportScheme,
+  formatEpisodeCode,
   isImportScheme,
   isPlayerDeepLink,
   listImportSchemes,
   parseEmbyServerAddress,
+  pickTargetEpisodeForContainer,
   toBase64UrlNoPad,
   withImportPassword,
+  type EpisodePlayCandidate,
   type ParsedEmbyEndpoint,
   type PlayerScheme,
+  type ResolvedContainerEpisode,
 } from '@/utils/playerSchemes'
 
 export {
   buildInfuseLaunchUrl,
   buildPasswordlessImportSchemes,
+  buildStrictInfusePlayUrl,
   embyImportTip,
   findPlayerImportScheme,
+  formatEpisodeCode,
   isImportScheme,
   isPlayerDeepLink,
   listImportSchemes,
   parseEmbyServerAddress,
+  pickTargetEpisodeForContainer,
   toBase64UrlNoPad,
   withImportPassword,
+  type EpisodePlayCandidate,
   type ParsedEmbyEndpoint,
   type PlayerScheme,
+  type ResolvedContainerEpisode,
 }
 
 /** 接线员 openScheme 的跳转本体。不在白名单里的地址直接拒绝。 */

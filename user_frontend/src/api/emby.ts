@@ -565,7 +565,7 @@ function positionTicks() {
  * 图片 404 —— 就是首页那些只剩编号、没有封面的卡片的来源。
  */
 export function posterUrl(item: EmbyItem, maxWidth = 320): string {
-  if (!item.ImageTags?.Primary) return ''
+  if (!item?.Id) return ''
   return imageUrl(item.Id, 'Primary', maxWidth)
 }
 

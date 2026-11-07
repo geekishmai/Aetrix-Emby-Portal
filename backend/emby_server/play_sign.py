@@ -262,6 +262,26 @@ def verify_play_sign(user_id: int, item_id: str, exp: int, sign: str) -> bool:
     return hmac.compare_digest(expected, sign)
 
 
+def verify_play_sign_mac(user_id: int, item_id: str, exp: int, sign: str) -> bool:
+    """仅校验播放签名的 HMAC 真伪（忽略 exp 是否已过期）。
+
+    用途：客户端（如 VidHub / SenPlayer 继续观看）本地缓存了昨日下发的
+    DirectPlayUrl（同时含有效 api_key 与已过期的 uid/exp/sign）。当签名确系
+    本服签发、未被篡改、仅自然过期时，允许 get_play_user 回退校验同请求携带的
+    本人有效 EmbyApiToken，并交由下游流端点执行实时付费墙与绑定门禁；任何篡改
+    （改 uid / item_id / exp / sign）一律返回 False 并直接 403。
+    """
+    try:
+        exp = int(exp)
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(sign, str) or len(sign) != 32 or not sign.isascii():
+        return False
+    expected = _sign_payload(user_id, str(item_id), exp)
+    return hmac.compare_digest(expected, sign)
+
+
 def token_is_usable(row) -> bool:
     """token 行是否可用：未吊销 + 未过期。
 

@@ -3157,10 +3157,9 @@ def _query_items(request: Request, user: models.WebUser, db: Session, base: str)
     # Filters / IsFavorite 等筛选：客户端“只看收藏 / 已看 / 未看 / 继续观看”依赖它，
     # 旧实现忽略这些参数，导致筛选后返回全量。
     filters = {f.strip().lower() for f in (q.get("Filters") or "").split(",") if f.strip()}
-    for flag in ("IsFavorite", "IsPlayed", "IsUnplayed", "IsResumable"):
+    for flag in ("IsFavorite", "IsPlayed", "IsUnplayed", "IsResumable", "HasPrimaryImage"):
         if (q.get(flag) or "").lower() == "true":
             filters.add(flag.lower())
-
     query = db.query(em.MediaItem).filter(em.MediaItem.is_hidden == False,  # noqa: E712
                                          # PA-037：本查询按需外连接 UserMediaData，
                                          # 一旦联结 FROM 就变成 Join 对象、软删钩子
@@ -3362,6 +3361,14 @@ def _query_items(request: Request, user: models.WebUser, db: Session, base: str)
         if cond is not None:
             query = query.filter(cond)
 
+    if "hasprimaryimage" in filters:
+        query = query.filter(
+            or_(
+                and_(em.MediaItem.poster_path.isnot(None), em.MediaItem.poster_path != ""),
+                and_(em.MediaItem.primary_image_url.isnot(None), em.MediaItem.primary_image_url != ""),
+            )
+        )
+
     # 用户数据（UserMediaData）按需外连接：播放类筛选或按用户数据排序（DatePlayed /
     # PlayCount）时才需要。S9：旧实现只在筛选时 join，``SortBy=DatePlayed`` 单独出现
     # 会引用未 join 的列 → SQLite ``no such column`` / PG ``missing FROM-clause`` 500。
@@ -3424,6 +3431,10 @@ def _query_items(request: Request, user: models.WebUser, db: Session, base: str)
             #（客户端拼错参数时不再一声不吭；回退行为不变）
             logger.warning("Items 忽略不支持的 SortBy=%r，已回退默认排序", key)
             continue
+        if key in ("CommunityRating", "ProductionYear", "PremiereDate", "DateCreated", "DateLastContentAdded"):
+            # 可空数值/日期列：PostgreSQL 下 DESC 默认 NULLS FIRST，会把未刮削（无评分/无海报）
+            # 条目全部排在 9.x 高分佳作前面；用 c.is_(None).asc() 保证 SQLite 与 PG 一致排末尾。
+            order_cols.append(c.is_(None).asc())
         order_cols.append(c.desc() if _desc else c.asc())
     if not order_cols:
         order_cols = [em.MediaItem.sort_name.asc()]

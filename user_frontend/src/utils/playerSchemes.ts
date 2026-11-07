@@ -161,6 +161,76 @@ export function buildInfuseLaunchUrl(streamUrl?: string | null, baseOrigin?: str
   return `infuse://x-callback-url/play?url=${encodeURIComponent(resolved)}`
 }
 
+export interface EpisodePlayCandidate {
+  Id: string
+  Name?: string
+  ParentIndexNumber?: number
+  IndexNumber?: number
+  UserData?: {
+    PlaybackPositionTicks?: number
+    Played?: boolean
+    LastPlayedDate?: string
+  }
+}
+
+export interface ResolvedContainerEpisode<T extends EpisodePlayCandidate = EpisodePlayCandidate> {
+  episode: T
+  isResume: boolean
+  codeLabel: string
+}
+
+export function formatEpisodeCode(ep: Pick<EpisodePlayCandidate, 'Name' | 'ParentIndexNumber' | 'IndexNumber'>): string {
+  const s = ep.ParentIndexNumber
+  const e = ep.IndexNumber
+  if (typeof s === 'number' && typeof e === 'number') {
+    return `S${String(s).padStart(2, '0')}E${String(e).padStart(2, '0')}`
+  }
+  if (typeof e === 'number') return `第 ${e} 集`
+  return (ep.Name || '').trim() || '第 1 集'
+}
+
+/**
+ * 剧集（Series）或季（Season）的目标单集选择：
+ * 1. 正在继续观看的未播完单集（PlaybackPositionTicks > 0 && !Played，最近观看优先）；
+ * 2. 第一集尚未看完的单集（!Played）；
+ * 3. 第一集（全部看完时从头重温）；
+ * 空列表返回 null（调用方禁用播放按钮并提示无可用媒体源）。
+ */
+export function pickTargetEpisodeForContainer<T extends EpisodePlayCandidate>(
+  episodes: readonly T[] | null | undefined,
+): ResolvedContainerEpisode<T> | null {
+  if (!Array.isArray(episodes) || episodes.length === 0) return null
+  const valid = episodes.filter((e) => Boolean(e && typeof e.Id === 'string' && e.Id.trim()))
+  if (valid.length === 0) return null
+
+  const resumable = valid
+    .filter((e) => (e.UserData?.PlaybackPositionTicks ?? 0) > 0 && !e.UserData?.Played)
+    .sort((a, b) => {
+      const ta = a.UserData?.LastPlayedDate ? Date.parse(a.UserData.LastPlayedDate) || 0 : 0
+      const tb = b.UserData?.LastPlayedDate ? Date.parse(b.UserData.LastPlayedDate) || 0 : 0
+      if (tb !== ta) return tb - ta
+      return (b.UserData?.PlaybackPositionTicks ?? 0) - (a.UserData?.PlaybackPositionTicks ?? 0)
+    })
+  if (resumable.length > 0) {
+    const chosen = resumable[0]!
+    return { episode: chosen, isResume: true, codeLabel: formatEpisodeCode(chosen) }
+  }
+
+  const firstUnplayed = valid.find((e) => !e.UserData?.Played)
+  const target = firstUnplayed ?? valid[0]!
+  return { episode: target, isResume: false, codeLabel: formatEpisodeCode(target) }
+}
+
+/**
+ * 严格单流直连唤起地址（无真实可播流地址时返回 null，绝不拿剧集容器或空地址拼出无效链接）。
+ */
+export function buildStrictInfusePlayUrl(streamUrl?: string | null, baseOrigin?: string): string | null {
+  const raw = (streamUrl || '').trim()
+  if (!raw) return null
+  const built = buildInfuseLaunchUrl(raw, baseOrigin)
+  return built.startsWith('infuse://x-callback-url/play?url=') ? built : null
+}
+
 /** 从已解析的一键导入列表中按播放器名匹配（大小写不敏感） */
 export function findPlayerImportScheme(
   schemes: readonly PlayerScheme[],

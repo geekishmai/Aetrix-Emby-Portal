@@ -442,6 +442,18 @@ def get_play_user(
         except (TypeError, ValueError):
             raise HTTPException(status_code=403, detail="播放签名无效")
         if not play_sign.verify_play_sign(uid, item_id, exp, sign):
+            # 客户端（如 VidHub 继续观看）常把详情/PlaybackInfo 下发的 DirectPlayUrl
+            # 缓存到本地库隔日续播：URL 内短期 exp 已过期，但同时携带该用户本人有效的
+            # EmbyApiToken（api_key 或 X-Emby-Token）。仅当签名 HMAC 未被篡改且非二级
+            # 清单定位口（无 ?u=）时，回退 get_emby_user 校验本人有效客户端令牌；
+            # 下游因 verify_play_sign=False 仍按新播放完整执行付费墙、绑定与转存门禁。
+            if not q.get("u") and play_sign.verify_play_sign_mac(uid, item_id, exp, sign):
+                try:
+                    fallback_user = get_emby_user(request, db, credentials)
+                except HTTPException:
+                    fallback_user = None
+                if fallback_user is not None and fallback_user.id == uid:
+                    return fallback_user
             logger = logging.getLogger(__name__)
             logger.warning("播放签名校验失败: uid=%s item=%s", uid_s, item_id)
             raise HTTPException(status_code=403, detail="播放签名无效或已过期")

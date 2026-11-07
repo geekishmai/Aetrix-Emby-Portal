@@ -7,7 +7,7 @@
           <span>返回片库</span>
         </button>
         <RouterLink
-          v-if="item?.Type === 'Episode' && item.SeriesId"
+          v-if="(item?.Type === 'Episode' || item?.Type === 'Season') && item.SeriesId"
           :to="`/media/${encodeURIComponent(item.SeriesId)}`"
           class="md-series-back"
         >
@@ -103,19 +103,34 @@
                 <span v-for="g in item.Genres" :key="g" class="md-genre-chip">{{ g }}</span>
               </div>
 
-              <!-- 第 3 期核心：一键用 Infuse、VidHub、SenPlayer 打开（复用现有一键导入 scheme + Infuse 直连流协议） -->
+              <!-- 播放操作区：剧集/季自动落续看集或第 1 集真实流地址；无可用媒体源时显式禁用并给出提示 -->
               <div class="md-player-group" role="group" aria-label="用客户端打开">
-                <button type="button" class="md-btn-primary" @click="openInInfuse">
+                <button
+                  type="button"
+                  class="md-btn-primary"
+                  :disabled="sourceResolving || !hasPlayableSource"
+                  @click="openInInfuse"
+                >
                   <Play :size="16" aria-hidden="true" />
-                  <span>用 Infuse 打开</span>
+                  <span>{{ primaryPlayLabel }}</span>
                 </button>
-                <button type="button" class="md-btn-player" @click="openInSchemePlayer('VidHub')">
+                <button
+                  type="button"
+                  class="md-btn-player"
+                  :disabled="sourceResolving || !hasPlayableSource"
+                  @click="openClientPlayGuide('VidHub')"
+                >
                   <ExternalLink :size="15" aria-hidden="true" />
-                  <span>用 VidHub 打开</span>
+                  <span>{{ isContainerItem ? 'VidHub 选集点播' : '在 VidHub 中点播' }}</span>
                 </button>
-                <button type="button" class="md-btn-player" @click="openInSchemePlayer('SenPlayer')">
+                <button
+                  type="button"
+                  class="md-btn-player"
+                  :disabled="sourceResolving || !hasPlayableSource"
+                  @click="openClientPlayGuide('SenPlayer')"
+                >
                   <ExternalLink :size="15" aria-hidden="true" />
-                  <span>用 SenPlayer 打开</span>
+                  <span>{{ isContainerItem ? 'SenPlayer 选集点播' : '在 SenPlayer 中点播' }}</span>
                 </button>
                 <button
                   type="button"
@@ -126,11 +141,14 @@
                   <Heart :size="15" :fill="isFav ? '#c3f53c' : 'none'" :color="isFav ? '#c3f53c' : 'currentColor'" aria-hidden="true" />
                   <span>{{ isFav ? '已收藏' : '收藏' }}</span>
                 </button>
-                <button type="button" class="md-btn-ghost" @click="pickerOpen = true">
-                  <span>更多播放器</span>
+                <button type="button" class="md-btn-ghost" @click="router.push('/clients')">
+                  <span>客户端与教程</span>
                 </button>
               </div>
 
+              <p v-if="!sourceResolving && !hasPlayableSource" class="md-source-notice" role="status">
+                {{ unplayableReason }}
+              </p>
               <div class="md-overview-block">
                 <h2 class="md-sec-h">剧情简介</h2>
                 <p class="md-overview">
@@ -209,6 +227,54 @@
           </div>
         </section>
 
+
+        <!-- 剧集/季选集面板：让用户可直接点进具体单集或查看进度 -->
+        <section v-if="episodes.length > 0" class="md-section-card" aria-label="剧集选集">
+          <div class="md-sec-bar">
+            <h2 class="md-sec-h" style="margin:0">选集点播</h2>
+            <span class="md-sec-count">共 {{ filteredEpisodes.length }} 集</span>
+          </div>
+          <div v-if="seasons.length > 1" class="md-ep-tabs" role="tablist" aria-label="选择季">
+            <button
+              type="button"
+              role="tab"
+              class="md-ep-tab"
+              :class="{ 'is-active': activeSeasonFilter === '' }"
+              :aria-selected="activeSeasonFilter === ''"
+              @click="activeSeasonFilter = ''"
+            >
+              全部
+            </button>
+            <button
+              v-for="s in seasons"
+              :key="s.Id"
+              type="button"
+              role="tab"
+              class="md-ep-tab"
+              :class="{ 'is-active': activeSeasonFilter === s.Id }"
+              :aria-selected="activeSeasonFilter === s.Id"
+              @click="activeSeasonFilter = s.Id"
+            >
+              {{ s.Name }}
+            </button>
+          </div>
+          <div class="md-ep-grid">
+            <RouterLink
+              v-for="ep in filteredEpisodes"
+              :key="ep.Id"
+              :to="`/media/${encodeURIComponent(ep.Id)}`"
+              class="md-ep-card"
+              :class="{ 'is-target': targetEpisodeInfo?.episode.Id === ep.Id }"
+            >
+              <div class="md-ep-top">
+                <span class="md-ep-code">{{ formatEpisodeCode(ep) }}</span>
+                <span v-if="(ep.UserData?.PlaybackPositionTicks ?? 0) > 0 && !ep.UserData?.Played" class="md-ep-state is-resume">续看</span>
+                <span v-else-if="ep.UserData?.Played" class="md-ep-state">已看</span>
+              </div>
+              <div class="md-ep-name" :title="displayMediaTitle(ep)">{{ displayMediaTitle(ep) }}</div>
+            </RouterLink>
+          </div>
+        </section>
         <section v-if="seasons.length > 0" class="md-section-card" aria-label="季列表">
           <div class="md-sec-bar">
             <h2 class="md-sec-h" style="margin:0">包含季数（{{ seasons.length }}）</h2>
@@ -236,6 +302,32 @@
       </template>
 
       <PlayerSchemeSheet v-model:open="pickerOpen" :title="title" />
+
+      <!-- VidHub / SenPlayer 选集与点播引导弹窗（避免下发无密码 import 协议触发客户端「加载失败」） -->
+      <Teleport to="body">
+        <div
+          v-if="clientGuideTarget"
+          class="md-guide-mask"
+          @click.self="clientGuideTarget = ''"
+          @keydown.esc.window="clientGuideTarget = ''"
+        >
+          <div class="md-guide-card" role="dialog" aria-modal="true" :aria-label="`在 ${clientGuideTarget} 中点播`">
+            <h3 class="md-guide-title">在 {{ clientGuideTarget }} 中{{ isContainerItem ? '选集播放' : '点播' }}</h3>
+            <p class="md-guide-desc">
+              片名「<strong>{{ title }}</strong>」已自动复制到剪贴板。{{ clientGuideTarget }} 官方未开放网页直传单视频流协议，请直接打开已添加本站服务器的
+              {{ clientGuideTarget }}，粘贴片名即可{{ isContainerItem ? '进入剧集选集播放' : '立即原画点播' }}。
+            </p>
+            <div class="md-guide-actions">
+              <RouterLink to="/clients" class="md-btn-primary" style="text-decoration:none" @click="clientGuideTarget = ''">
+                <span>首次使用？去客户端页导入服务器</span>
+              </RouterLink>
+              <button type="button" class="md-btn-ghost" @click="clientGuideTarget = ''">
+                <span>我知道了</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </Teleport>
     </main>
   </div>
 </template>
@@ -261,15 +353,16 @@ import { storageBindingApi } from '@/api/economy'
 import PlayerSchemeSheet from '@/components/panel/PlayerSchemeSheet.vue'
 import {
   assignPlayerDeepLink,
-  buildInfuseLaunchUrl,
-  findPlayerImportScheme,
-  loadImportSchemes,
-  type PlayerScheme,
+  buildStrictInfusePlayUrl,
+  formatEpisodeCode,
+  pickTargetEpisodeForContainer,
+  type ResolvedContainerEpisode,
 } from '@/composables/usePlayerSchemes'
 import { resolveBindingUiState, shouldShowBindingGuide } from '@/utils/bindingUi'
 import { cleanOriginalSubtitle, displayMediaTitle, resolutionBadge } from '@/utils/mediaTitle'
 import { humanizeError } from '@/composables/usePanelApi'
 import { useToast } from '@/composables/useToast'
+import { useClipboard } from '@/composables/useClipboard'
 import { pageTitle } from '@/composables/useBranding'
 
 interface PersonEntry {
@@ -291,18 +384,23 @@ type FullEmbyItem = EmbyItem & {
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
+const { copy } = useClipboard()
 
 const loading = ref(true)
+const sourceResolving = ref(false)
 const error = ref('')
 const notGranted = ref(false)
 const item = ref<FullEmbyItem | null>(null)
 const seasons = ref<EmbyItem[]>([])
+const episodes = ref<EmbyItem[]>([])
+const activeSeasonFilter = ref('')
+const targetEpisodeInfo = ref<ResolvedContainerEpisode<EmbyItem> | null>(null)
 const firstEpisodeStreamUrl = ref('')
 const resolvedBaseUrl = ref('')
-const playerSchemes = ref<PlayerScheme[]>([])
 const needsDriveBinding = ref(false)
 
 const pickerOpen = ref(false)
+const clientGuideTarget = ref<'VidHub' | 'SenPlayer' | ''>('')
 const favBusy = ref(false)
 
 const posterBroken = ref(false)
@@ -324,9 +422,12 @@ const subOriginalTitle = computed(() =>
   cleanOriginalSubtitle(item.value?.OriginalTitle, title.value),
 )
 
+const isContainerItem = computed(() => item.value?.Type === 'Series' || item.value?.Type === 'Season')
+
 const mediaTypeLabel = computed(() => {
   const t = item.value?.Type
   if (t === 'Series') return '剧集'
+  if (t === 'Season') return '分季'
   if (t === 'Episode') return '单集'
   return '电影'
 })
@@ -344,10 +445,9 @@ const episodeBadge = computed(() => {
 
 const posterSrc = computed(() => {
   if (!item.value) return ''
-  const own = posterUrl(item.value, 520)
-  if (own) return own
+  if (item.value.ImageTags?.Primary) return posterUrl(item.value, 520)
   if (item.value.SeriesId) return imageUrl(item.value.SeriesId, 'Primary', 520)
-  return ''
+  return posterUrl(item.value, 520)
 })
 
 const backdropSrc = computed(() => {
@@ -366,10 +466,41 @@ const logoSrc = computed(() => {
 })
 
 const directStreamUrl = computed(() => {
+  if (isContainerItem.value) {
+    return firstEpisodeStreamUrl.value || ''
+  }
   const ms = item.value?.MediaSources?.[0]
-  return ms?.DirectStreamUrl || ms?.DirectPlayUrl || firstEpisodeStreamUrl.value || ''
+  return ms?.DirectStreamUrl || ms?.DirectPlayUrl || ''
 })
 
+const hasPlayableSource = computed(() => Boolean(directStreamUrl.value.trim()))
+
+const primaryPlayLabel = computed(() => {
+  if (sourceResolving.value) return '正在解析片源…'
+  if (!hasPlayableSource.value) return '暂无可直连片源'
+  if (isContainerItem.value && targetEpisodeInfo.value) {
+    const verb = targetEpisodeInfo.value.isResume ? '续播' : '播放'
+    return `用 Infuse ${verb} ${targetEpisodeInfo.value.codeLabel}`
+  }
+  return '用 Infuse 打开'
+})
+
+const unplayableReason = computed(() => {
+  if (isContainerItem.value) {
+    return '该剧集分集正在整理入库中，暂无可直连唤起的单集流地址；整理完成后即可一键点播，或在已连接的播放器内浏览选集。'
+  }
+  return '该条目暂无可用媒体源，暂时无法发起播放。'
+})
+
+const filteredEpisodes = computed(() => {
+  if (!activeSeasonFilter.value) return episodes.value
+  const seasonObj = seasons.value.find((s) => s.Id === activeSeasonFilter.value)
+  return episodes.value.filter(
+    (ep) =>
+      ep.SeasonId === activeSeasonFilter.value ||
+      (seasonObj && typeof seasonObj.IndexNumber === 'number' && ep.ParentIndexNumber === seasonObj.IndexNumber),
+  )
+})
 const ratingText = computed(() => {
   const r = item.value?.CommunityRating
   return typeof r === 'number' && r > 0 ? r.toFixed(1) : ''
@@ -467,57 +598,47 @@ function onCastPointerUp(e: PointerEvent) {
   castTrackEl.value?.releasePointerCapture?.(e.pointerId)
 }
 
-async function silentCopyTitle() {
-  const t = title.value.trim()
-  if (!t) return
-  try {
-    await navigator.clipboard?.writeText(t)
-  } catch {
-    /* ignore */
-  }
-}
-
-async function ensureSchemesReady(): Promise<PlayerScheme[]> {
-  if (playerSchemes.value.length > 0) return playerSchemes.value
-  const loaded = await loadImportSchemes()
-  playerSchemes.value = loaded
-  return loaded
-}
-
 async function openInInfuse() {
+  if (sourceResolving.value) return
+  if (!hasPlayableSource.value) {
+    toast.info(unplayableReason.value)
+    return
+  }
   if (needsDriveBinding.value) {
     pickerOpen.value = true
     return
   }
-  await silentCopyTitle()
   const baseOrigin =
     resolvedBaseUrl.value || (typeof window !== 'undefined' ? window.location.origin : '')
-  const url = buildInfuseLaunchUrl(directStreamUrl.value, baseOrigin)
+  const launchUrl = buildStrictInfusePlayUrl(directStreamUrl.value, baseOrigin)
+  if (!launchUrl) {
+    toast.info(unplayableReason.value)
+    return
+  }
   toast.info(
-    directStreamUrl.value
-      ? '正在唤起 Infuse 直接播放…'
-      : '正在打开 Infuse，片名已复制可直接粘贴搜索',
+    isContainerItem.value && targetEpisodeInfo.value
+      ? `正在唤起 Infuse ${targetEpisodeInfo.value.isResume ? '续播' : '播放'} ${targetEpisodeInfo.value.codeLabel}…`
+      : '正在唤起 Infuse 直接播放…',
   )
-  assignPlayerDeepLink(url)
+  assignPlayerDeepLink(launchUrl)
 }
 
-async function openInSchemePlayer(target: 'VidHub' | 'SenPlayer') {
+async function openClientPlayGuide(target: 'VidHub' | 'SenPlayer') {
+  if (sourceResolving.value) return
+  if (!hasPlayableSource.value) {
+    toast.info(unplayableReason.value)
+    return
+  }
   if (needsDriveBinding.value) {
     pickerOpen.value = true
     return
   }
-  const schemes = await ensureSchemesReady()
-  const matched = findPlayerImportScheme(schemes, target)
-  if (!matched) {
-    toast.info(`请先在「接线员」页设置播放密码后再一键打开 ${target}`)
-    void router.push('/game/operator')
-    return
+  const t = title.value.trim()
+  if (t) {
+    await copy(t, '片名')
   }
-  await silentCopyTitle()
-  toast.info(`正在打开 ${target}（片名已复制，导入后可直接搜索点播）`)
-  assignPlayerDeepLink(matched.url)
+  clientGuideTarget.value = target
 }
-
 function goBack() {
   if (window.history.length > 1) router.back()
   else void router.push('/library')
@@ -538,15 +659,11 @@ async function toggleFav() {
   }
 }
 
-async function refreshBindingAndSchemes() {
-  const [schemesRes, bindingsRes, providersRes] = await Promise.allSettled([
-    loadImportSchemes(),
+async function refreshBindingState() {
+  const [bindingsRes, providersRes] = await Promise.allSettled([
     storageBindingApi.list(),
     storageBindingApi.providers(),
   ])
-  if (schemesRes.status === 'fulfilled') {
-    playerSchemes.value = schemesRes.value
-  }
   const ui = resolveBindingUiState(
     providersRes.status === 'fulfilled' ? providersRes.value : undefined,
   )
@@ -564,37 +681,52 @@ async function refreshBindingAndSchemes() {
 async function loadDetail() {
   if (!itemId.value) return
   loading.value = true
+  sourceResolving.value = false
   error.value = ''
   notGranted.value = false
   posterBroken.value = false
   backdropBroken.value = false
   logoBroken.value = false
   seasons.value = []
+  episodes.value = []
+  activeSeasonFilter.value = ''
+  targetEpisodeInfo.value = null
   firstEpisodeStreamUrl.value = ''
+  clientGuideTarget.value = ''
   try {
     resolvedBaseUrl.value = await ensureEmbyBase()
     const fetched = (await embyApi.getItem(itemId.value)) as FullEmbyItem
     item.value = fetched
     document.title = pageTitle(displayMediaTitle(fetched))
-    if (fetched.Type === 'Series') {
-      const [seasonList, epList] = await Promise.allSettled([
-        embyApi.getSeasons(fetched.Id),
-        embyApi.getEpisodes(fetched.Id),
-      ])
-      if (seasonList.status === 'fulfilled') {
-        seasons.value = seasonList.value
-      }
-      if (epList.status === 'fulfilled' && epList.value.length > 0) {
-        try {
-          const firstEp = await embyApi.getItem(epList.value[0].Id)
-          const epMs = firstEp.MediaSources?.[0]
-          firstEpisodeStreamUrl.value = epMs?.DirectStreamUrl || epMs?.DirectPlayUrl || ''
-        } catch {
-          firstEpisodeStreamUrl.value = ''
+    if (fetched.Type === 'Series' || fetched.Type === 'Season') {
+      sourceResolving.value = true
+      try {
+        const seriesGuid = fetched.Type === 'Season' ? fetched.SeriesId || fetched.Id : fetched.Id
+        const seasonFilterGuid = fetched.Type === 'Season' ? fetched.Id : undefined
+        const [seasonList, epList] = await Promise.allSettled([
+          fetched.Type === 'Series' ? embyApi.getSeasons(seriesGuid) : Promise.resolve([] as EmbyItem[]),
+          embyApi.getEpisodes(seriesGuid, seasonFilterGuid),
+        ])
+        if (seasonList.status === 'fulfilled') {
+          seasons.value = seasonList.value
         }
+        if (epList.status === 'fulfilled' && epList.value.length > 0) {
+          episodes.value = epList.value
+          const chosen = pickTargetEpisodeForContainer(epList.value)
+          targetEpisodeInfo.value = chosen
+          if (chosen) {
+            const fullEp = await embyApi.getItem(chosen.episode.Id)
+            const epMs = fullEp.MediaSources?.[0]
+            firstEpisodeStreamUrl.value = epMs?.DirectStreamUrl || epMs?.DirectPlayUrl || ''
+          }
+        }
+      } catch {
+        firstEpisodeStreamUrl.value = ''
+      } finally {
+        sourceResolving.value = false
       }
     }
-    void refreshBindingAndSchemes()
+    void refreshBindingState()
   } catch (err: unknown) {
     const status = httpStatusOf(err)
     if (isEmbyAccessNotGranted(err) || status === 401 || status === 403) {
@@ -889,6 +1021,161 @@ onUnmounted(() => {
 .md-btn-ghost:hover {
   border-color: #4a4a4a;
   color: #f2f2f2;
+}
+
+.md-btn-primary:disabled,
+.md-btn-player:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  background: #242424;
+  border-color: #2f2f2f;
+  color: #8c8c8c;
+}
+
+.md-source-notice {
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  background: rgba(23, 23, 23, 0.9);
+  border: 1px solid #2a2a2a;
+  border-left: 2px solid #e5534b;
+  border-radius: 2px;
+  color: #c8c8c8;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.md-ep-tabs {
+  display: flex;
+  gap: 18px;
+  overflow-x: auto;
+  border-bottom: 1px solid #242424;
+  margin-bottom: 14px;
+  scrollbar-width: none;
+}
+
+.md-ep-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.md-ep-tab {
+  padding: 6px 2px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #9a9a9a;
+  font-size: 13.5px;
+  font-weight: 600;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.md-ep-tab.is-active {
+  color: #f2f2f2;
+  border-bottom-color: #c3f53c;
+  font-weight: 700;
+}
+
+.md-ep-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(188px, 1fr));
+  gap: 10px;
+}
+
+.md-ep-card {
+  padding: 10px 12px;
+  background: #141414;
+  border: 1px solid #262626;
+  border-radius: 2px;
+  text-decoration: none;
+  color: #f2f2f2;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.15s ease;
+}
+
+.md-ep-card:hover,
+.md-ep-card.is-target {
+  border-color: #c3f53c;
+}
+
+.md-ep-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.md-ep-code {
+  font-family: var(--dh-font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: #c3f53c;
+  font-variant-numeric: tabular-nums;
+}
+
+.md-ep-state {
+  font-size: 11px;
+  color: #9a9a9a;
+}
+
+.md-ep-state.is-resume {
+  color: #c3f53c;
+  font-weight: 700;
+}
+
+.md-ep-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #e6e6e6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.md-guide-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 105;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.md-guide-card {
+  width: min(460px, 100%);
+  padding: 22px 24px;
+  background: #171717;
+  border: 1px solid #2a2a2a;
+  border-radius: 2px;
+  color: #f2f2f2;
+}
+
+.md-guide-title {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.md-guide-desc {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: #c0c0c0;
+}
+
+.md-guide-desc strong {
+  color: #f2f2f2;
+}
+
+.md-guide-actions {
+  margin-top: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .md-overview-block {

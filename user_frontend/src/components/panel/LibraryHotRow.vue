@@ -271,14 +271,15 @@ async function loadHotItems(force = false) {
     const res = await embyApi.getItems({
       parentId: activeLibId.value || undefined,
       includeTypes: ['Movie', 'Series'],
+      filters: ['HasPrimaryImage'],
       sortBy: 'CommunityRating,DateCreated',
       sortOrder: 'Descending',
-      limit: 16,
+      limit: 24,
       enableTotalRecordCount: false,
     })
     const raw = Array.isArray(res?.Items) ? res.Items : []
-    const withPoster = raw.filter((it) => Boolean(it.ImageTags?.Primary))
-    const picked = (withPoster.length >= 4 ? withPoster : raw).slice(0, 14)
+    // 首页各库热门严格排除无海报条目（不再回退展示 ImageTags 缺失的未刮削行）
+    const picked = raw.filter((it) => Boolean(it.ImageTags?.Primary)).slice(0, 14)
     tabCache.set(cacheKey, picked)
     items.value = picked
   } catch (err: unknown) {
