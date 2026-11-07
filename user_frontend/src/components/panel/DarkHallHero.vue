@@ -34,7 +34,7 @@
       <div class="dh-hero-inner">
         <div class="dh-hero-copy">
           <div class="dh-hero-eyebrow">
-            <span class="dh-eyebrow-tag">{{ featured.Type === 'Series' ? 'SERIES' : 'FEATURE FILM' }}</span>
+            <span class="dh-eyebrow-tag">{{ featured.Type === 'Series' ? '剧集' : '电影' }}</span>
             <span v-if="featured.ProductionYear" class="dh-eyebrow-num">{{ featured.ProductionYear }}</span>
             <span v-if="featuredRating" class="dh-eyebrow-num">★ {{ featuredRating }}</span>
             <span v-if="featuredRes" class="dh-eyebrow-spec">{{ featuredRes }}</span>
@@ -75,7 +75,7 @@
               <span>浏览全部片库</span>
               <ArrowUpRight :size="16" aria-hidden="true" />
             </RouterLink>
-            <RouterLink to="/game/operator" class="dh-btn-ghost">
+            <RouterLink to="/clients" class="dh-btn-ghost">
               <span>播放器接入</span>
             </RouterLink>
           </div>
@@ -112,7 +112,7 @@
       <div class="dh-hero-inner">
         <div class="dh-hero-copy">
           <div class="dh-hero-eyebrow">
-            <span class="dh-eyebrow-tag">FANQIAO CINEMA</span>
+            <span class="dh-eyebrow-tag">帆桥影院</span>
             <span class="dh-eyebrow-num">{{ dateLabel }}</span>
           </div>
           <h1 class="dh-hero-title">{{ greeting }}，{{ nickname }}</h1>
@@ -128,7 +128,7 @@
               <Play :size="16" fill="currentColor" aria-hidden="true" />
               <span>{{ notGranted ? '开启观影权限' : '浏览片库' }}</span>
             </RouterLink>
-            <RouterLink to="/game/operator" class="dh-btn-secondary">
+            <RouterLink to="/clients" class="dh-btn-secondary">
               <span>播放器接入</span>
             </RouterLink>
           </div>

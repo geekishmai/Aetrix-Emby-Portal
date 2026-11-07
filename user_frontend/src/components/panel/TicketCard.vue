@@ -217,8 +217,8 @@ function overviewInfo(item: ServerCardItem): string {
                 <span class="hc-desc">{{
                   props.hideGamification ? '客户端填入服务器地址与播放账号即可直连点播' : s.desc
                 }}</span>
-                <RouterLink class="hc-link" :to="props.hideGamification ? '/game/operator' : s.to">{{
-                  props.hideGamification ? '播放器接入 ›' : `${s.footer} ›`
+                <RouterLink class="hc-link" :to="props.hideGamification ? '/clients' : s.to">{{
+                  props.hideGamification ? '客户端接入 ›' : `${s.footer} ›`
                 }}</RouterLink>
               </div>
             </template>

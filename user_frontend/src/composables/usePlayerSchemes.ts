@@ -1,28 +1,37 @@
-// 播放器一键导入：与接线员页同一份账号卡 import_schemes。
-// 只接受 rex:// / senplayer:// / vidhub://（scheme 大小写不敏感），用 location.href 拉起。
+// 播放器一键导入：合并账号卡 import_schemes 与前端基于 base_url + emby_username 生成的 6 款免密协议。
+// 只接受 rex:// / senplayer:// / vidhub:// / forward:// / rodelplayer:// / com.feifeiduck.capyplayer://，用 location.href 拉起。
 // 其余一律拒绝，包括 javascript:、data:、http(s):。
 import { embyApi, type AccountCard } from '@/api'
 import { useUserStore } from '@/stores/user'
+import { branding } from '@/composables/useBranding'
 
 import {
   buildInfuseLaunchUrl,
+  buildPasswordlessImportSchemes,
   embyImportTip,
   findPlayerImportScheme,
   isImportScheme,
   isPlayerDeepLink,
   listImportSchemes,
+  parseEmbyServerAddress,
+  toBase64UrlNoPad,
   withImportPassword,
+  type ParsedEmbyEndpoint,
   type PlayerScheme,
 } from '@/utils/playerSchemes'
 
 export {
   buildInfuseLaunchUrl,
+  buildPasswordlessImportSchemes,
   embyImportTip,
   findPlayerImportScheme,
   isImportScheme,
   isPlayerDeepLink,
   listImportSchemes,
+  parseEmbyServerAddress,
+  toBase64UrlNoPad,
   withImportPassword,
+  type ParsedEmbyEndpoint,
   type PlayerScheme,
 }
 
@@ -57,7 +66,16 @@ export function loadImportSchemes(force = false): Promise<PlayerScheme[]> {
   const promise = embyApi
     .getAccountCard()
     .then((card: AccountCard) => {
-      const schemes = listImportSchemes(card?.import_schemes)
+      const allowed = !card?.external && card?.view_permission?.granted !== false
+      const merged = allowed
+        ? buildPasswordlessImportSchemes(
+            card?.base_url,
+            card?.emby_username,
+            branding.site_name || '帆桥影院',
+            card?.import_schemes,
+          )
+        : {}
+      const schemes = listImportSchemes(merged)
       if (schemes.length > 0 && cacheUserId() === userId) cached = { userId, schemes }
       return schemes
     })

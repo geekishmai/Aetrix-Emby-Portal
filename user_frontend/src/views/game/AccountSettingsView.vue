@@ -270,6 +270,20 @@
       <!-- 设置与账号：改密/收藏列表行 + 设备 + 发现页卡片 + 隐私 -->
       <section class="v4-sec" aria-label="设置与账号">
         <div class="v4-sec-title">设置与账号</div>
+        <!-- 接线账号与客户端页入口（按需求紧邻展示） -->
+        <div class="v4-card acct-client-box">
+          <div class="acct-client-info">
+            <span class="acct-row-ic" aria-hidden="true"><MonitorSmartphone :size="16" /></span>
+            <div class="acct-row-main">
+              <span class="acct-row-text">接线账号{{ accountCard?.emby_username ? ` · ${accountCard.emby_username}` : '' }}</span>
+              <span class="acct-row-meta">{{ accountCard?.emby_username ? '16 款全平台播放器下载、免密一键导入与小白教程' : '首次使用播放器请先设置专属播放用户名与密码' }}</span>
+            </div>
+          </div>
+          <div class="acct-client-actions">
+            <RouterLink to="/clients" class="acct-btn primary acct-link-btn">客户端与教程</RouterLink>
+            <RouterLink to="/game/operator" class="acct-btn ghost acct-link-btn">{{ accountCard?.emby_username ? '改播放密码' : '设接线账号' }}</RouterLink>
+          </div>
+        </div>
         <div class="v4-card acct-card">
             <button type="button" class="acct-row" @click="openChangePwd">
               <span class="acct-row-ic" aria-hidden="true"><Lock :size="16" /></span>
@@ -466,7 +480,7 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
-import { Lock, ChevronRight, ChevronDown, HardDrive, RefreshCw, Star, Mountain, Trophy, Sparkles, CalendarCheck, Bird, LogOut, Globe, Notebook } from 'lucide-vue-next'
+import { Lock, ChevronRight, ChevronDown, HardDrive, RefreshCw, Star, Mountain, Trophy, Sparkles, CalendarCheck, Bird, LogOut, Globe, Notebook, MonitorSmartphone } from 'lucide-vue-next'
 import Modal from '@/components/ui/Modal.vue'
 import ProfileSubscriptions from '@/components/profile/ProfileSubscriptions.vue'
 import { facilityStamp } from '@/config/game'
@@ -1431,6 +1445,38 @@ watch(providersLoaded, (loaded) => {
 }
 
 .acct-card { padding: 6px; }
+.acct-client-box {
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.acct-client-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.acct-client-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.acct-link-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0 14px;
+  font-size: 13px;
+  text-decoration: none;
+  box-sizing: border-box;
+}
 
 .acct-row {
   display: flex;

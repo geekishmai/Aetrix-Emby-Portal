@@ -33,8 +33,13 @@
         <!-- 有查看权限：账号密码卡 -->
         <template v-if="viewGranted">
           <section class="v4-sec">
-            <div class="v4-sec-title">客户端连接凭据</div>
-            <div class="v4-sec-sub">{{ hasEmbyUsername ? '在 Infuse、VidHub 或 SenPlayer 中填入以下三项即可直连播放' : '首次使用请先设置专属播放用户名与密码（用户名保存后不可更改）' }}</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+              <div class="v4-sec-title">客户端连接凭据</div>
+              <RouterLink to="/clients" style="font-size:13px;font-weight:700;color:#c3f53c;text-decoration:none">
+                16 款客户端下载与小白教程 →
+              </RouterLink>
+            </div>
+            <div class="v4-sec-sub">{{ hasEmbyUsername ? '在 Infuse、VidHub、SenPlayer、Forward 或小幻影视中填入以下三项即可直连播放' : '首次使用请先设置专属播放用户名与密码（用户名保存后不可更改）' }}</div>
 
             <div class="op-rows" :class="{ loading: loading && !accountReloading }">
               <template v-if="accountReloading">
@@ -450,10 +455,11 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import { Check, CircleStop, Copy, Eye, EyeOff, MonitorSmartphone, Wifi } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
-import { assignImportScheme, embyImportTip, withImportPassword } from '@/composables/usePlayerSchemes'
+import { branding } from '@/composables/useBranding'
+import { assignImportScheme, buildPasswordlessImportSchemes, embyImportTip, withImportPassword } from '@/composables/usePlayerSchemes'
 import { useClipboard } from '@/composables/useClipboard'
 import { humanizeError } from '@/composables/usePanelApi'
 import { toUserMessage } from '@/utils/toUserMessage'
@@ -555,8 +561,13 @@ const realmCards = computed((): AccountRealmCard[] => {
   return Array.isArray(r) ? r : []
 })
 const importSchemes = computed((): Record<string, string> => {
-  const s = account.value?.import_schemes
-  return s && typeof s === 'object' ? s : {}
+  if (isExternalEmby.value || !viewGranted.value) return {}
+  return buildPasswordlessImportSchemes(
+    serverUrl.value === EMPTY_DASH ? '' : serverUrl.value,
+    embyUsername.value,
+    branding.site_name || '帆桥影院',
+    account.value?.import_schemes,
+  )
 })
 const hasSchemes = computed(() => Object.keys(importSchemes.value).length > 0)
 const isExternalEmby = computed(() => !!accountExtra.value.external)

@@ -46,6 +46,12 @@ const router = createRouter({
             meta: { title: '影片详情', requiresAuth: true },
           },
           {
+            path: '/clients',
+            name: 'clients',
+            component: () => import('@/views/panel/ClientsView.vue'),
+            meta: { title: '客户端与教程', requiresAuth: true },
+          },
+          {
             path: '/collector',
             name: 'collector',
             component: () => import('@/views/panel/CollectorView.vue'),
@@ -316,7 +322,7 @@ router.beforeEach(async (to) => {
 
 // v4 面板第一版只做纸色浅色：在 v4 路由下强制 light，离开时恢复
 // （v4 视图自带 .v4-scope 纸色变量，这里只处理 html data-theme 与浏览器工具栏色）
-export const V4_PATHS = new Set(['/', '/library', '/collector', '/favorites', '/collections', '/server', '/shop', '/want', '/store-requests', '/activities', '/source-discovery', '/game', '/game/checkin', '/game/calendar', '/game/wishlist', '/game/signal', '/game/pigeon', '/game/ledger', '/game/supply', '/game/companion', '/game/guide', '/game/outfit', '/game/operator', '/game/account'])
+export const V4_PATHS = new Set(['/', '/library', '/clients', '/collector', '/favorites', '/collections', '/server', '/shop', '/want', '/store-requests', '/activities', '/source-discovery', '/game', '/game/checkin', '/game/calendar', '/game/wishlist', '/game/signal', '/game/pigeon', '/game/ledger', '/game/supply', '/game/companion', '/game/guide', '/game/outfit', '/game/operator', '/game/account'])
 // 参数路由前缀：合集详情与影片详情带动态 id，按前缀启用纸面浅色主题
 const V4_PATH_PREFIXES = ['/collections/', '/media/', '/library/']
 // 底部坞由 App.vue 全局常驻渲染（PanelTabbar，≤768px 唯一一套，

@@ -118,7 +118,7 @@
             <div class="p2-poster-meta">
               <span>{{ item.Type === 'Series' ? '剧集' : '电影' }}</span>
               <span v-if="item.ProductionYear">· {{ item.ProductionYear }}</span>
-              <span v-if="ratingOf(item)">· ★ {{ ratingOf(item) }}</span>
+              <span v-if="ratingOf(item)">· ★{{ ratingOf(item) }}</span>
             </div>
           </RouterLink>
         </div>
@@ -677,6 +677,11 @@ onUnmounted(() => {
     flex: 0 0 112px;
     width: 112px;
     min-width: 112px;
+  }
+
+  .p2-poster-meta {
+    font-size: 11px;
+    gap: 2px;
   }
 
   .p2-lib-tab {

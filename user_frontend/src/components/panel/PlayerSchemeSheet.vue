@@ -54,7 +54,7 @@
           class="psp-copy"
           @click="copyTitle"
         >复制片名，去播放器里搜</button>
-        <p class="psp-tip">没装的话去<RouterLink to="/game/operator" @click="close">接线员页</RouterLink>导入</p>
+        <p class="psp-tip">没装的话去<RouterLink to="/clients" @click="close">客户端与教程页</RouterLink>下载或导入</p>
       </div>
     </div>
   </Teleport>

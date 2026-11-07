@@ -70,7 +70,7 @@ def test_backend_prefixes_use_caret_tilde_and_beat_static_regex():
     locs = _parse_locations(conf)
 
     by_mod_pat = {(mod, pat): body for mod, pat, body in locs}
-    for prefix in ("/api/", "/emby/", "/sso/"):
+    for prefix in ("/api/", "/emby/", "/sso/", "/embyhttp"):
         assert ("^~", prefix) in by_mod_pat, f"{prefix} 必须声明为 `location ^~ {prefix}`"
         assert "proxy_pass http://aetrix_backend" in by_mod_pat[("^~", prefix)]
 
@@ -81,6 +81,7 @@ def test_backend_prefixes_use_caret_tilde_and_beat_static_regex():
         ("/emby/Items/abc123/Images/Logo.png", "/emby/"),
         ("/emby/web/icon.svg", "/emby/"),
         ("/sso/fanqiao/init.js", "/sso/"),
+        ("/embyhttps://emby.fluxquata.com/emby/Items/abc123/Images/Primary.jpg", "/embyhttp"),
     ):
         mod, pat, body = _nginx_select_location(locs, backend_uri)
         assert (mod, pat) == ("^~", expected_prefix), (backend_uri, mod, pat)

@@ -417,6 +417,8 @@ export interface AccountCard {
   /** PA-036：图片端点鉴权后网页端拼图用的专用 Emby token（每次读卡轮换，
    *  没查看权限 / 外部模式为空串）；由 getAccountCard 同步进 imageKey 持有者 */
   emby_api_key?: string
+  /** 是否接入外部第三方 Emby（外部模式不下发本项目一键导入方案） */
+  external?: boolean
 }
 
 export interface WatchStats {

@@ -147,7 +147,7 @@
             <div class="lib-card-meta">
               <span>{{ item.Type === 'Series' ? '剧集' : '电影' }}</span>
               <span v-if="item.ProductionYear">· {{ item.ProductionYear }}</span>
-              <span v-if="ratingOf(item)">· ★ {{ ratingOf(item) }}</span>
+              <span v-if="ratingOf(item)">· ★{{ ratingOf(item) }}</span>
             </div>
           </RouterLink>
         </div>
@@ -856,6 +856,7 @@ onUnmounted(() => {
   }
   .lib-card-meta {
     font-size: 11px;
+    gap: 2px;
   }
 }
 </style>
